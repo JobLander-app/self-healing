@@ -1,0 +1,56 @@
+import { config } from "./config";
+import { startApi } from "./api";
+import { pollOnce, startPollCron, stopPollCron, startResumeWatcher } from "./poller";
+import { pauseRemainingMs, readPause } from "./pause";
+import { hydrateFromDisk } from "./trace";
+
+async function main() {
+  console.log("[claude-code-vm-job-dispatcher] Starting...");
+  console.log(
+    `[claude-code-vm-job-dispatcher] Model: ${config.claudeModel}, Port: ${config.httpPort}, ` +
+      `Team: ${config.linearTeam}, DRY_RUN: ${config.dryRun}`,
+  );
+
+  // 1. Rebuild recent-run state from disk so /status and /feed are useful
+  //    immediately after a restart (no DB to read from).
+  hydrateFromDisk();
+
+  // 2. Start HTTP API.
+  await startApi();
+  console.log(`[claude-code-vm-job-dispatcher] API ready on :${config.httpPort}`);
+
+  // 3. Start the self-poll cron + the rate-limit resume watcher.
+  startPollCron();
+  startResumeWatcher();
+
+  // 4. NO Telegram on start/stop/runs — the alerts channel is P0-only.
+  //    Status is available via /status and /self-healing-report.
+
+  // 5. Kick one poll immediately on startup (don't wait for the first cron
+  //    beat) — unless we're inside a rate-limit pause window that survived a
+  //    restart, in which case pollOnce skips and the resume watcher takes over.
+  const pausedMs = pauseRemainingMs();
+  if (pausedMs > 0) {
+    console.log(`[claude-code-vm-job-dispatcher] Rate-limit pause active (~${Math.ceil(pausedMs / 60000)}m left, until ${readPause()?.until}); startup poll deferred.`);
+  } else {
+    console.log("[claude-code-vm-job-dispatcher] Running startup poll...");
+  }
+  pollOnce("startup").catch((err) => console.error("[claude-code-vm-job-dispatcher] startup poll error:", err));
+
+  console.log("[claude-code-vm-job-dispatcher] Ready. Self-polling...");
+
+  // Graceful shutdown.
+  const shutdown = async (signal: string) => {
+    console.log(`[claude-code-vm-job-dispatcher] ${signal} received, shutting down...`);
+    stopPollCron();
+    process.exit(0);
+  };
+
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+}
+
+main().catch((err) => {
+  console.error("[claude-code-vm-job-dispatcher] Fatal error:", err);
+  process.exit(1);
+});
