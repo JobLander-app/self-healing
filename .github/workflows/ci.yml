@@ -1,0 +1,27 @@
+# JOB-731 Phase 1: CI for the TypeScript watcher.
+# Dispatcher is deliberately NOT built here yet — it joins CI in a later phase.
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  watcher:
+    name: watcher (build + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: watcher
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: watcher/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Typecheck + build
+        run: npm run build
+      - name: Unit tests
+        run: npm test

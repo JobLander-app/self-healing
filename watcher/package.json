@@ -1,0 +1,21 @@
+{
+  "name": "@joblander/output-watch",
+  "version": "1.0.0",
+  "private": true,
+  "description": "JOB-731 Phase 1: TypeScript port of output-watch.sh — 1-minute product-output pager (JOB-670)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "tick": "node dist/tick.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}
