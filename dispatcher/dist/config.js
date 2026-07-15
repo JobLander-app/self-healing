@@ -1,0 +1,61 @@
+"use strict";
+/**
+ * claude-code-vm-job-dispatcher configuration — fully env-driven.
+ *
+ * Stateless by design: there is NO database. Durable state lives in three
+ * places only:
+ *   1. Linear — the `In Progress` status is the concurrency claim, and the
+ *      issue's terminal status (Done/Canceled/Backlog) is the outcome.
+ *   2. JSONL turn traces on disk (logDir) — one file per dispatch run.
+ *   3. Telegram — human-facing one-line summary per run.
+ *
+ * Port: handy-daemon owns :4000. We default to :4100 to avoid any collision.
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.config = void 0;
+exports.config = {
+    httpPort: parseInt(process.env.HTTP_PORT || "4100", 10),
+    claudeModel: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
+    claudeMaxTurns: parseInt(process.env.CLAUDE_MAX_TURNS || "60", 10),
+    // Wall-clock ceiling for ONE dispatch run. claudeMaxTurns bounds the turn
+    // COUNT but not time; without a wall-clock abort a single hung turn (a stuck
+    // `gh pr checks --watch`, a wedged Bash, a network stall) blocks the run
+    // forever and leaves the busy lock stuck true — stalling the entire self-poll
+    // loop (observed: a run hung ~5 days, 2026-06-22→27, zero tickets picked up).
+    // On timeout the session is aborted and busy is released. Default 25 min.
+    maxRunMs: parseInt(process.env.MAX_RUN_MS || "1500000", 10),
+    // Freshness policy. A Monitor ticket is a hypothesis that a bug existed at
+    // FILING time, not a fact at FIX time — the codebase ships fast (features +
+    // refactors weekly), so by pickup the bug may be already fixed, no longer
+    // recurring, or pointing at refactored-away code. The agent must re-confirm
+    // the bug is still live before fixing (see CLAUDE.md "Step 3.5 FRESHNESS
+    // GATE"). These two knobs are injected into the run prompt so they stay
+    // tunable without editing the constitution.
+    //   staleAgeHrs       — ticket age (since createdAt) above which the FULL
+    //                       freshness gate is MANDATORY (owner's 12h heuristic).
+    //   freshnessWindowHrs — recency window used to re-confirm the signature is
+    //                       still occurring (e.g. gcloud --freshness).
+    staleAgeHrs: parseInt(process.env.STALE_AGE_HRS || "12", 10),
+    freshnessWindowHrs: parseInt(process.env.FRESHNESS_WINDOW_HRS || "6", 10),
+    // node-cron expression for the self-poll tick. Default: every 10 minutes.
+    pollCron: process.env.POLL_CRON || "*/10 * * * *",
+    tgBotToken: process.env.TG_BOT_TOKEN || "",
+    // String, not int — TG chat ids can be negative (groups) and exceed 2^31.
+    tgChatId: process.env.TG_CHAT_ID || "101333337",
+    // Linear team whose tickets we pick up.
+    linearTeam: process.env.LINEAR_TEAM || "JobLander",
+    // Shared secret for POST /trigger. Empty ⇒ /trigger rejected (open only
+    // to callers that present the secret in X-Dispatch-Token).
+    triggerToken: process.env.TRIGGER_TOKEN || "",
+    // When true the agent does everything EXCEPT irreversible writes
+    // (gh pr merge, Linear mutations, known-errors.json writes). Used for the
+    // first safe rollout. Passed through to the agent prompt.
+    dryRun: (process.env.DRY_RUN || "false").toLowerCase() === "true",
+    // Where per-run JSONL traces are written. Mirrors the prompt's
+    // /var/log/claude-code-vm-job-dispatcher/turns/{turn_id}.jsonl convention.
+    logDir: process.env.LOG_DIR || "/var/log/claude-code-vm-job-dispatcher/turns",
+    // GCP project — constant across all JobLander infra.
+    gcpProject: process.env.GCP_PROJECT || "meet-assistant-6d8ad",
+    nodeEnv: process.env.NODE_ENV || "development",
+};
+//# sourceMappingURL=config.js.map

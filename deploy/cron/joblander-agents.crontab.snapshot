@@ -1,0 +1,5 @@
+0 * * * * systemd-cat -t joblander-monitor /home/joblander/joblander/workspace/scripts/run-monitor-session.sh
+0 8 * * * /home/joblander/cws-recon/run.sh >> /home/joblander/cws-recon/cron.log 2>&1
+5 8 * * 1 bash /home/joblander/workspace/scripts/run-cws-metrics.sh >> /home/joblander/workspace/reports/cws-rankings/cron.log 2>&1
+59 23 * * * $HOME/jl-harness/kill-meetbot.sh >/dev/null 2>&1
+* * * * * /home/joblander/joblander/workspace/scripts/monitor/output-watch.sh  >> /home/joblander/output-watch.log 2>&1
