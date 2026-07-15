@@ -1,0 +1,30 @@
+# JOB-731 Phase 2: Terraform CI — fmt + validate only.
+# validate runs with `init -backend=false` so CI needs NO GCS/state access.
+# Lives in its own workflow file (ci.yml is owned by the Phase 1 watcher PR).
+name: Terraform
+
+on:
+  pull_request:
+
+jobs:
+  terraform:
+    name: fmt + validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.7"
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive -diff
+      - name: validate module (self-healing-vm)
+        run: |
+          terraform -chdir=modules/self-healing-vm init -backend=false -input=false
+          terraform -chdir=modules/self-healing-vm validate
+      - name: validate root (self-healing)
+        run: |
+          terraform -chdir=self-healing init -backend=false -input=false
+          terraform -chdir=self-healing validate

@@ -43,6 +43,37 @@ deploy/       systemd units, cron files (installed by init), CI config.
               joblander-agents.crontab.snapshot = as-found snapshot (2026-07-15).
 ```
 
+## Provisioning (Phase 2)
+
+```bash
+cd infra/terraform/self-healing
+terraform init          # state: gs://meet-assistant-6d8ad-tfstate, prefix self-healing
+terraform apply         # VM self-healing-1 + SA + IAM + firewall + alert policies
+```
+
+`terraform apply` creates the VM with `init/init.sh` as its startup-script
+(rendered via `templatefile`, idempotent — re-run any time with
+`sudo google_metadata_script_runner startup`). Init installs the runtime
+(node 20, gh, docker, Claude Code CLI, snap chromium + xvfb), creates user
+`joblander`, clones the three repos (self-healing, meeting-lab, workspace),
+renders `dispatcher/.env` from Secret Manager, builds dispatcher + watcher,
+installs the systemd unit from `deploy/systemd/` and the crontab from
+`deploy/cron/self-healing.crontab`, and sets up meeting-lab per its own
+deploy docs. SSH: IAP only (`gcloud compute ssh self-healing-1 --tunnel-through-iap`).
+
+**Post-init TODO** (printed at the end of init and written to
+`/home/joblander/POST-INIT-TODO.md`) — steps init cannot do:
+
+- Claude Code OAuth login (subscription auth) as `joblander`
+- meeting-lab browser profiles (meetbot/teamsbot/guest) — copy from the old
+  VM or re-login per meeting-lab README
+- gh auth token secret (`self-healing-gh-token`) if not yet created
+
+The legacy `joblander-agents` VM is untouched; the hand-made "no meetings
+saved 4h" alert policy stays alongside the Terraform copy until cutover
+(Phase 4). CWS crons in `deploy/cron/self-healing.crontab` are commented
+out until cutover.
+
 ## Secrets (Secret Manager, project meet-assistant-6d8ad)
 
 - `self-healing-dispatcher-env` — full dispatcher .env (split into individual
