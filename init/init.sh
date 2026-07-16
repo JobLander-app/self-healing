@@ -144,9 +144,20 @@ if [ -d "$SH_DIR" ]; then
     --secret="$DISPATCHER_ENV_SECRET" --project="$PROJECT_ID" \
     > "$SH_DIR/dispatcher/.env.tmp" 2>/dev/null; then
     mv "$SH_DIR/dispatcher/.env.tmp" "$SH_DIR/dispatcher/.env"
+    # TEST MODE overlay (TEST-PLAN.md, stage 0.1) — until the owner's cutover
+    # signal this VM's dispatcher is strictly read-only and never self-polls
+    # (manual POST /trigger only). systemd EnvironmentFile: last assignment
+    # wins, so appending overrides the secret's values. Removed at cutover
+    # (stage 4: DRY_RUN=false + real POLL_CRON).
+    {
+      echo ""
+      echo "# --- JOB-731 TEST MODE (remove at cutover, TEST-PLAN stage 4) ---"
+      echo "DRY_RUN=true"
+      echo "POLL_CRON=0 0 29 2 *"
+    } >> "$SH_DIR/dispatcher/.env"
     chown $AGENT_USER:$AGENT_USER "$SH_DIR/dispatcher/.env"
     chmod 600 "$SH_DIR/dispatcher/.env"
-    log "dispatcher/.env rendered from secret '$DISPATCHER_ENV_SECRET'"
+    log "dispatcher/.env rendered from secret '$DISPATCHER_ENV_SECRET' (+ test-mode overlay: DRY_RUN=true, poll off)"
   else
     rm -f "$SH_DIR/dispatcher/.env.tmp"
     add_todo "could not render dispatcher/.env from secret '$DISPATCHER_ENV_SECRET' — dispatcher will not start"
