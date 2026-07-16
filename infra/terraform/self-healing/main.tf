@@ -40,6 +40,11 @@ module "self_healing" {
   workspace_repo_url    = "https://github.com/JobLander-app/workspace"
   repo_branch           = "main"
 
+  # gh-auth token for cloning the private repos above (created 2026-07-16,
+  # interim copy of the legacy VM token; replace with a machine identity
+  # before cutover — TEST-PLAN stage 0.2).
+  extra_secret_ids = ["self-healing-gh-token"]
+
   # Parallel-run phase: keep the VM cheap to destroy/recreate.
   # Flip to true at cutover (Phase 4).
   deletion_protection = false
