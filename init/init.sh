@@ -130,6 +130,24 @@ clone_or_update "$SELF_HEALING_REPO_URL" "$AGENT_HOME/self-healing"
 clone_or_update "$MEETING_LAB_REPO_URL" "$AGENT_HOME/meeting-lab"
 clone_or_update "$WORKSPACE_REPO_URL" "$AGENT_HOME/workspace"
 
+# workspace/.env (TG_BOT_TOKEN/TG_CHAT_ID for scripts/notify.sh — the watcher's
+# Telegram pager). Untracked on the legacy VM; snapshotted to Secret Manager
+# 2026-07-16. Without it every page dies with "ENV_FILE not found" (found
+# during TEST-PLAN stage-2 prep — exactly the gap class the fire drill exists for).
+if [ -d "$AGENT_HOME/workspace" ]; then
+  if gcloud secrets versions access latest \
+    --secret="self-healing-workspace-env" --project="$PROJECT_ID" \
+    > "$AGENT_HOME/workspace/.env.tmp" 2>/dev/null; then
+    mv "$AGENT_HOME/workspace/.env.tmp" "$AGENT_HOME/workspace/.env"
+    chown $AGENT_USER:$AGENT_USER "$AGENT_HOME/workspace/.env"
+    chmod 600 "$AGENT_HOME/workspace/.env"
+    log "workspace/.env rendered from secret 'self-healing-workspace-env'"
+  else
+    rm -f "$AGENT_HOME/workspace/.env.tmp"
+    add_todo "could not render workspace/.env — notify.sh (Telegram paging) will FAIL"
+  fi
+fi
+
 SH_DIR=$AGENT_HOME/self-healing
 if [ ! -d "$SH_DIR" ]; then
   add_todo "self-healing repo absent — dispatcher/watcher/cron steps were SKIPPED entirely; fix clone and re-run init"
