@@ -5,11 +5,11 @@ After=network.target
 [Service]
 Type=simple
 User=joblander
-WorkingDirectory=/home/joblander/claude-code-vm-job-dispatcher
+WorkingDirectory=/home/joblander/self-healing/dispatcher
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=10
-EnvironmentFile=/home/joblander/claude-code-vm-job-dispatcher/.env
+EnvironmentFile=/home/joblander/self-healing/dispatcher/.env
 
 [Install]
 WantedBy=multi-user.target

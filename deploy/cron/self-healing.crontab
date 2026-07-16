@@ -1,0 +1,36 @@
+# self-healing loop crontab for user `joblander` (JOB-731 Phase 2).
+# Installed WHOLESALE by init/init.sh: `crontab -u joblander <this file>` —
+# it owns the entire crontab; hand edits on the VM are lost on re-init.
+#
+# Legacy reference: deploy/cron/joblander-agents.crontab.snapshot (old VM, as-found).
+
+# The TS watcher's notify.sh lives in the workspace clone on the NEW VM layout
+# (default inside the watcher still points at the legacy /home/joblander/joblander/... path).
+WATCH_NOTIFY_SCRIPT=/home/joblander/workspace/scripts/notify.sh
+
+# Watcher tick (JOB-670): product-output pager, every minute.
+# The `&& gcloud logging write ...` chain ships the heartbeat to Cloud Logging
+# ONLY on exit 0 — a crashed tick writes no heartbeat, which is exactly what
+# the Terraform dead-man alert (WATCHER_HEARTBEAT absent 5 min) catches.
+# Log id `self-healing-watcher` must match var.heartbeat_log_id in
+# infra/terraform/modules/self-healing-vm/variables.tf.
+#
+# --- DISABLED until role handover (TEST-PLAN stage 3): the legacy VM's watcher
+# is the live pager; enabling both double-pages. Uncomment here AND comment out
+# the legacy VM's cron line in the SAME minute. WATCH_TRIGGER_URL points at the
+# legacy dispatcher until stage 4 hands the fixer role over too.
+# * * * * * cd /home/joblander/self-healing/watcher && WATCH_TRIGGER_URL=http://joblander-agents.europe-west1-b.c.meet-assistant-6d8ad.internal:4100/trigger /usr/bin/node dist/tick.js >> /home/joblander/output-watch.log 2>&1 && gcloud logging write self-healing-watcher "WATCHER_HEARTBEAT tick ok" --severity=INFO >/dev/null 2>&1
+
+# Hourly monitor session (error-side triage; runs from the workspace clone —
+# run-monitor-session.sh sources scripts/lib/agent-launcher.sh next to it).
+# --- DISABLED until role handover (TEST-PLAN stage 3M): double-running against
+# the legacy VM's hourly cron would duplicate Linear tickets and Telegram P0s.
+# Before enabling: copy teams/logs/monitoring state from the legacy VM (diff
+# continuity) and disable the legacy cron line in the same hour.
+# 0 * * * * systemd-cat -t joblander-monitor /home/joblander/workspace/scripts/run-monitor-session.sh
+
+# --- CWS crons: ENABLED AT CUTOVER (Phase 4) ---------------------------------
+# The legacy joblander-agents VM still runs these; enabling here too would
+# double-run them. Uncomment only on the owner's cutover signal.
+# 0 8 * * * /home/joblander/cws-recon/run.sh >> /home/joblander/cws-recon/cron.log 2>&1
+# 5 8 * * 1 bash /home/joblander/workspace/scripts/run-cws-metrics.sh >> /home/joblander/workspace/reports/cws-rankings/cron.log 2>&1

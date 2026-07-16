@@ -1,4 +1,13 @@
 node_modules/
 .env
 *.log
+# build output ignored for NEW code (watcher); dispatcher/dist is the recovered
+# golden reference and stays TRACKED (gitignore does not affect tracked files)
 dist/
+
+# terraform (lock files ARE committed, like ai-voice-agent-python)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
