@@ -200,6 +200,11 @@ if [ -d "$SH_DIR" ]; then
 
   # ---- 9. systemd unit + cron -----------------------------------------------------
   log "[9/10] systemd + cron"
+  # Dispatcher trace/turn logs (LOG_DIR in .env). Found during the stage-2 fire
+  # drill: without it every traceEvent hits EACCES and per-turn traces are lost
+  # (run still works — trace is fail-soft — but /feed history dies on restart).
+  mkdir -p /var/log/job-dispatcher/turns
+  chown -R $AGENT_USER:$AGENT_USER /var/log/job-dispatcher
   install -m 644 "$SH_DIR/deploy/systemd/claude-code-vm-job-dispatcher.service" \
     /etc/systemd/system/claude-code-vm-job-dispatcher.service
   systemctl daemon-reload
