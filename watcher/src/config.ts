@@ -5,6 +5,8 @@ export interface WatchConfig {
   threshold: number;
   stateFile: string;
   notifyScript: string;
+  /** .env file with TG_BOT_TOKEN/TG_CHAT_ID for the direct Telegram pager (JOB-731). */
+  tgEnvFile: string;
   triggerUrl: string;
   /** DISPATCH_TOKEN env override (falls back to Secret Manager when unset). */
   dispatchToken: string | null;
@@ -38,6 +40,7 @@ export const readConfig = ({ env }: { env: NodeJS.ProcessEnv }): WatchConfig => 
   stateFile: env.WATCH_STATE_FILE ?? "/home/joblander/.output-watch-state",
   notifyScript:
     env.WATCH_NOTIFY_SCRIPT ?? "/home/joblander/joblander/workspace/scripts/notify.sh",
+  tgEnvFile: env.WATCH_TG_ENV_FILE ?? "/home/joblander/workspace/.env",
   triggerUrl: env.WATCH_TRIGGER_URL ?? "http://localhost:4100/trigger",
   dispatchToken:
     env.DISPATCH_TOKEN !== undefined && env.DISPATCH_TOKEN.length > 0

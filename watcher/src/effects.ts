@@ -4,6 +4,7 @@ import { LINEAR, SECRETS, type WatchConfig } from "./config.js";
 import { buildLinearTicket } from "./messages.js";
 import type { TickEffects } from "./processSample.js";
 import { saveStateFile } from "./state.js";
+import { buildNotifyOwner } from "./telegram.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -46,9 +47,9 @@ export const buildRealEffects = ({
   config: WatchConfig;
   secretReader: SecretReader;
 }): TickEffects => ({
-  notifyOwner: async ({ message }) => {
-    await execFileAsync("bash", [config.notifyScript, message]);
-  },
+  // JOB-731: direct plain-text Telegram send (no parse_mode), notify.sh as
+  // fallback, PAGE_FAILED log when both fail — see telegram.ts.
+  notifyOwner: buildNotifyOwner({ config, env: process.env }),
 
   createLinearTicket: async ({ status, httpCode, regions }) => {
     const key = await secretReader({
