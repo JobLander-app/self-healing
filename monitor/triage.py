@@ -32,8 +32,17 @@ LK_URLS = {
     "lk-asia-south1": "https://lk-in.joblander.app",
     "lk-au-southeast1": "https://lk-au.joblander.app",
 }
+# LK docker-log stream (JOB-731 stage 3M): the containers on all 4 LK VMs run
+# docker's `gcplogs` log driver, which ships to logName=".../logs/gcplogs-
+# docker-driver" with the VM name in jsonPayload.instance.name and CLEAN
+# message text. The older fluentd-style ".../logs/docker" stream is a garbled
+# duplicate (binary framing prefixes inside message) and lk-eu-west4 does not
+# emit to it at all — collecting from it missed the entire EU VM (verified
+# against live logs 2026-07-17). Requires only roles/logging.viewer — works
+# under the self-healing VM's minimal SA (no ssh, no compute.instances.get).
+LK_DRIVER_LOGNAME = f'logName="projects/{PROJECT}/logs/gcplogs-docker-driver"'
 LK_VM_FILTER = " OR ".join(
-    f'labels."compute.googleapis.com/resource_name"="{vm}"' for vm in LK_URLS
+    f'jsonPayload.instance.name="{vm}"' for vm in LK_URLS
 )
 WINDOW_HOURS = 2
 STATE_DIR = os.environ.get("MONITOR_STATE_DIR", "teams/logs/monitoring")
@@ -162,13 +171,19 @@ def collect_cloud_functions(groups):
     log(f"cloud functions: {len(entries)} error entries")
 
 
+def lk_entry_vm(entry):
+    """VM name of a gcplogs-docker-driver entry (jsonPayload.instance.name)."""
+    inst = entry.get("jsonPayload", {}).get("instance")
+    return inst.get("name", "unknown") if isinstance(inst, dict) else "unknown"
+
+
 def collect_lk_docker(groups):
     entries = gcloud_logging_read(
-        f'logName="projects/{PROJECT}/logs/docker" AND resource.type="gce_instance" '
+        f'{LK_DRIVER_LOGNAME} AND resource.type="gce_instance" '
         f'AND jsonPayload.message=~"ERROR" AND ({LK_VM_FILTER})', limit=QUERY_LIMIT
     )
     for e in entries:
-        vm = e.get("labels", {}).get("compute.googleapis.com/resource_name", "unknown")
+        vm = lk_entry_vm(e)
         msg = entry_message(e)
         add_to_groups(groups, f"voice-agent:{vm}:{slugify(msg)}",
                       "ai-voice-agent-python", vm, e.get("timestamp", ""), msg)
@@ -231,12 +246,12 @@ def collect_geo_misroutes(groups):
 def collect_anam_failures(groups):
     """monitor.md §1.5: Anam `Failed to start avatar` > 3/2h → P2."""
     entries = gcloud_logging_read(
-        f'logName="projects/{PROJECT}/logs/docker" AND resource.type="gce_instance" '
+        f'{LK_DRIVER_LOGNAME} AND resource.type="gce_instance" '
         f'AND jsonPayload.message=~"Failed to start avatar" AND ({LK_VM_FILTER})',
         limit=QUERY_LIMIT,
     )
     for e in entries:
-        vm = e.get("labels", {}).get("compute.googleapis.com/resource_name", "unknown")
+        vm = lk_entry_vm(e)
         add_to_groups(groups, "voice-agent:all:anam-avatar-start-failed",
                       "ai-voice-agent-python", vm, e.get("timestamp", ""), entry_message(e))
     # Severity floor (P2 when >3/2h) is applied in assign_severity via
@@ -336,17 +351,55 @@ LK_ZONES = {
 }
 
 
+# ssh failure modes that mean "these credentials cannot ssh AT ALL" (the
+# self-healing VM's minimal SA: no compute.instances.get, no ssh keys —
+# JOB-731 stage 3M). Identical for every VM, so the first hit skips the rest.
+SSH_UNAVAILABLE_RE = re.compile(
+    r"compute\.instances\.get|PERMISSION_DENIED|does not have permission|"
+    r"Permission denied \(publickey", re.I)
+
+
 def check_vm_disk(groups):
-    """LK VM disk usage: >70% → P2, >85% → P1 (PR #72 incident)."""
+    """LK VM disk usage: >70% → P2, >85% → P1 (PR #72 incident).
+
+    Needs ssh — disk % has NO ssh-free source: the LK VMs run no ops agent
+    (no agent.googleapis.com/disk/percent_used series exists) and nothing
+    logs disk usage to Cloud Logging (both verified 2026-07-17); the
+    self-healing VM's SA has no monitoring.viewer either. So the check is
+    best-effort: where credentials cannot ssh it is skipped with ONE
+    informational note (never counted toward hard_fail) instead of failing
+    4x every run.
+    """
     if os.environ.get("MONITOR_SKIP_VM_DISK") == "1":
         return
     now = utcnow_iso()
     for vm, zone in LK_ZONES.items():
-        out = run_cmd(["gcloud", "compute", "ssh", vm, f"--zone={zone}",
-                       f"--project={PROJECT}", "--ssh-flag=-o ConnectTimeout=10",
-                       "--command=df / | tail -1 | awk '{print $5}' | tr -d '%'"],
-                      timeout=60)
-        if out is None or not out.strip().isdigit():
+        cmd = ["gcloud", "compute", "ssh", vm, f"--zone={zone}",
+               f"--project={PROJECT}", "--ssh-flag=-o ConnectTimeout=10",
+               "--command=df / | tail -1 | awk '{print $5}' | tr -d '%'"]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except Exception as e:  # noqa: BLE001 — timeout etc: real failure
+            collection_errors.append({"cmd": f"vm disk ssh {vm}", "error": str(e)[:300]})
+            log(f"FAILED: vm disk ssh {vm}: {e}")
+            continue
+        if res.returncode != 0:
+            err = res.stderr.strip()[:300]
+            if SSH_UNAVAILABLE_RE.search(err):
+                collection_errors.append({
+                    "cmd": "vm disk check",
+                    "error": f"ssh unavailable for these credentials ({vm}: "
+                             f"{err[:120]}) — disk checks skipped; needs "
+                             f"ssh-capable creds or MONITOR_SKIP_VM_DISK=1",
+                    "informational": True,
+                })
+                log("vm disk: ssh unavailable in this environment — skipping")
+                return
+            collection_errors.append({"cmd": f"vm disk ssh {vm}", "error": err})
+            log(f"FAILED: vm disk ssh {vm}: {err}")
+            continue
+        out = res.stdout
+        if not out.strip().isdigit():
             continue
         used = int(out.strip())
         log(f"{vm} disk: {used}%")
@@ -608,8 +661,9 @@ def main():
     # Hard fail: collection is severely broken. Do NOT overwrite the baseline
     # (latest-report.json) or write an archive — an empty report would make the
     # next run treat everything as NEW, the exact failure mode of JOB-558.
-    # Truncation notes are informational and do not count toward the threshold.
-    hard_fail = len([e for e in collection_errors if not e.get("truncated")]) >= 6
+    # Truncation and informational notes do not count toward the threshold.
+    hard_fail = len([e for e in collection_errors
+                     if not e.get("truncated") and not e.get("informational")]) >= 6
 
     latest_path = os.path.join(STATE_DIR, "latest-report.json")
     archive_path = os.path.join(STATE_DIR, now[:13] + ".json")  # YYYY-MM-DDTHH
