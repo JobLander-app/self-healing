@@ -8,6 +8,12 @@
  * persistent orchestrator state. Linear's `In Progress` status is the durable
  * claim; we keep nothing in memory that we can't rebuild from a re-poll.
  */
+export type PrecheckOutcome = "skip" | "run" | "error";
+export interface PrecheckState {
+    at: string;
+    result: PrecheckOutcome;
+}
+export declare function getLastPrecheck(): PrecheckState | null;
 /**
  * One poll tick. Skips if a dispatch session is already running (single
  * concurrency). Safe to call from cron or from the /trigger endpoint.
