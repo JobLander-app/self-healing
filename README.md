@@ -20,6 +20,20 @@ Manager, all alert policies in Terraform.
 | Hourly triage | error-side monitoring narrative (errors, not output) | `monitor/` | cron on the loop VM |
 | Dispatcher | autonomous fixer: picks ONE `monitor`-labeled Linear ticket per ~10 min tick, investigates prod, writes fix, PRs, auto-merges (sanctioned exception) | `dispatcher/` | systemd on the loop VM, HTTP :4100 (`/trigger`, `/status`, `/feed`) |
 
+## Lifecycle observability (Telegram)
+
+The owner watches one incident travel end-to-end in Telegram: **created →
+acted upon → in prod**. Every message is sent as plain text (no `parse_mode` —
+unescaped content + Markdown once silently dropped a real P0, 2026-07-16), and
+a send failure never affects the loop.
+
+| Event | Message | Emitted by | When |
+|---|---|---|---|
+| P0 page | `URGENT P0 [output-watch]: /health/output = … Regions: … <url>` | watcher (`telegram.ts` direct send) | 3 consecutive bad samples |
+| Ticket created | `🎫 {IDENTIFIER} created — self-healing engaged` | watcher (same direct path) | right after a successful Linear `[Monitor]` create |
+| Acted upon / in prod | `🚀 in prod: {ticket} FIXED — {PR} merged, deploy pipeline running. … ${cost}, {n}s` · `✅ {ticket}: investigated — …. ${cost}` · `⚠️ {ticket}: {outcome}. …` (DRY_RUN runs prefixed `[DRY_RUN] `) | dispatcher (`notify.ts`, from `session.ts`) | end of a run that picked a ticket — `no-work`/no-ticket runs stay silent |
+| Recovered | `RECOVERED: /health/output = … Product output flowing again.` | watcher (same direct path) | detector clears after a page |
+
 ## Repo layout
 
 ```

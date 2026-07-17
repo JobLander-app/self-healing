@@ -12,6 +12,23 @@ import { type RunSummary } from "./trace";
 export declare function isBusy(): boolean;
 export declare function getCurrentTurnId(): string | null;
 /**
+ * Build the lifecycle-observability Telegram for a completed run (JOB-731).
+ * Returns null when the run should stay silent:
+ *   - "no-work" ticks (a message every ~10 min would be spam; the poller
+ *     pre-check already suppresses most of these before they even run), and
+ *   - runs that never picked a ticket (no issueId) — e.g. a startup error —
+ *     which would otherwise spam ⚠️ on every tick.
+ *
+ * Three visible outcomes, keyed off the structured RunSummary fields only
+ * (no free-text parsing beyond what the run already structured):
+ *   🚀 in prod   — fixed+merged (auto-merge → Cloud Build deploys main).
+ *   ✅ investigated — closed without a prod code change (not-a-bug/stale/
+ *                    fixed-elsewhere).
+ *   ⚠️ needs eyes — dead-end (backlogged) / error / timeout / unknown.
+ * DRY_RUN runs are prefixed with "[DRY_RUN] ".
+ */
+export declare function buildRunNotification(s: RunSummary): string | null;
+/**
  * Run a single dispatch session. Returns the run summary. Never throws —
  * any failure is captured as an "error" outcome so the cron loop keeps
  * ticking.

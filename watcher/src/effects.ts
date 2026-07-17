@@ -39,6 +39,16 @@ export const gcloudSecretReader: SecretReader = async ({ secret, project }) => {
 const LINEAR_MUTATION =
   "mutation($i:IssueCreateInput!){issueCreate(input:$i){success issue{identifier}}}";
 
+/** Shape of the issueCreate GraphQL response (only the fields we read). */
+interface LinearIssueCreateResponse {
+  data?: {
+    issueCreate?: {
+      success?: boolean;
+      issue?: { identifier?: string };
+    };
+  };
+}
+
 /** Real effects wiring for prod. Tests inject their own TickEffects. */
 export const buildRealEffects = ({
   config,
@@ -56,7 +66,7 @@ export const buildRealEffects = ({
       secret: SECRETS.linearKey,
       project: config.project,
     });
-    if (key === null) return; // bash skips silently when the key is empty
+    if (key === null) return null; // bash skips silently when the key is empty
     const { title, description } = buildLinearTicket({ status, httpCode, regions });
     const response = await fetch("https://api.linear.app/graphql", {
       method: "POST",
@@ -78,6 +88,11 @@ export const buildRealEffects = ({
     if (!response.ok) {
       throw new Error(`linear issueCreate HTTP ${response.status}`);
     }
+    // Plumb the created issue identifier back so the watcher can name it in
+    // the "🎫 … created" lifecycle Telegram. Absent identifier ⇒ null (no
+    // second message), never a throw — the ticket itself already landed.
+    const body = (await response.json()) as LinearIssueCreateResponse;
+    return body.data?.issueCreate?.issue?.identifier ?? null;
   },
 
   triggerDispatcher: async () => {
