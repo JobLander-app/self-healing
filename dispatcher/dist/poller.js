@@ -43,15 +43,90 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.getLastPrecheck = getLastPrecheck;
 exports.pollOnce = pollOnce;
 exports.startPollCron = startPollCron;
 exports.stopPollCron = stopPollCron;
 exports.startResumeWatcher = startResumeWatcher;
 const cron = __importStar(require("node-cron"));
+const child_process_1 = require("child_process");
+const util_1 = require("util");
 const config_1 = require("./config");
 const session_1 = require("./session");
 const pause_1 = require("./pause");
+const execFileAsync = (0, util_1.promisify)(child_process_1.execFile);
 let task = null;
+let lastPrecheck = null;
+function getLastPrecheck() {
+    return lastPrecheck;
+}
+// Cached in memory after first resolve — Secret Manager is only hit once per
+// process lifetime (env var LINEAR_API_KEY short-circuits it entirely).
+let cachedLinearKey = "";
+async function resolveLinearApiKey() {
+    if (cachedLinearKey)
+        return cachedLinearKey;
+    if (process.env.LINEAR_API_KEY) {
+        cachedLinearKey = process.env.LINEAR_API_KEY;
+        return cachedLinearKey;
+    }
+    const { stdout } = await execFileAsync("gcloud", ["secrets", "versions", "access", "latest", "--secret=linear-api-key", `--project=${config_1.config.gcpProject}`], { timeout: 15_000 });
+    const key = stdout.trim();
+    if (!key)
+        throw new Error("linear-api-key resolved empty from Secret Manager");
+    cachedLinearKey = key;
+    return key;
+}
+/**
+ * Ask Linear whether ANY candidate ticket exists (team from config, label
+ * `monitor`, state To Do / Backlog / In Progress — the states the agent's
+ * pickup logic considers, incl. stale-claim reclaims). `first: 1` — we only
+ * need existence, not the list. Never throws; errors map to "error" (fail open).
+ */
+async function precheckCandidates() {
+    try {
+        const key = await resolveLinearApiKey();
+        // config.linearTeam is configured as a team NAME ("JobLander") but could
+        // plausibly be set to the key ("JOB") — match either, so a config style
+        // change can't silently turn every pre-check into a false "skip".
+        const filter = {
+            team: { or: [{ name: { eq: config_1.config.linearTeam } }, { key: { eq: config_1.config.linearTeam } }] },
+            labels: { name: { eq: "monitor" } },
+            state: { name: { in: ["To Do", "Backlog", "In Progress"] } },
+        };
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10_000);
+        let res;
+        try {
+            res = await fetch("https://api.linear.app/graphql", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: key },
+                body: JSON.stringify({
+                    query: "query PollerPrecheck($filter: IssueFilter!) { issues(filter: $filter, first: 1) { nodes { identifier } } }",
+                    variables: { filter },
+                }),
+                signal: controller.signal,
+            });
+        }
+        finally {
+            clearTimeout(timer);
+        }
+        if (!res.ok)
+            throw new Error(`Linear pre-check HTTP ${res.status}`);
+        const body = (await res.json());
+        if (body.errors && body.errors.length > 0) {
+            throw new Error(`Linear pre-check GraphQL errors: ${JSON.stringify(body.errors).slice(0, 300)}`);
+        }
+        const nodes = body.data?.issues?.nodes;
+        if (!Array.isArray(nodes))
+            throw new Error("Linear pre-check: malformed response shape");
+        return nodes.length > 0 ? "run" : "skip";
+    }
+    catch (err) {
+        console.error("[poller] pre-check error (failing OPEN — agent will run):", err instanceof Error ? err.message : err);
+        return "error";
+    }
+}
 /**
  * One poll tick. Skips if a dispatch session is already running (single
  * concurrency). Safe to call from cron or from the /trigger endpoint.
@@ -73,6 +148,27 @@ async function pollOnce(reason) {
     }
     if ((0, pause_1.readPause)())
         (0, pause_1.clearPause)(); // window elapsed → resume normal operation
+    // Cheap Linear pre-check before spawning the (expensive) agent. Manual
+    // /trigger BYPASSES it: a trigger means the watcher just filed a ticket
+    // (Linear indexing may lag) and it is also the operator fire-drill path.
+    // Cron/startup/limit-reset ticks all pre-check. "error" falls through to a
+    // normal run (fail open — see the pre-check block above).
+    if (reason !== "trigger") {
+        const outcome = await precheckCandidates();
+        lastPrecheck = { at: new Date().toISOString(), result: outcome };
+        if (outcome === "skip") {
+            // Deliberately NOT recordRun — a skipped tick is not a run and must not
+            // flood /feed. One concise log line is the whole footprint.
+            console.log("[poller] pre-check: no monitor candidates — skipped");
+            return { ran: false, note: "precheck-skip" };
+        }
+        // The pre-check awaited network I/O; a /trigger may have started a run in
+        // the meantime. runDispatchSession throws if busy, so re-check here.
+        if ((0, session_1.isBusy)()) {
+            console.log(`[poller] Skipping tick (reason: ${reason}) — became busy during pre-check`);
+            return { ran: false, note: "busy" };
+        }
+    }
     try {
         await (0, session_1.runDispatchSession)(reason);
         return { ran: true, note: "completed" };
