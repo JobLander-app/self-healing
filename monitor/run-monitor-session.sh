@@ -1,11 +1,21 @@
 #!/bin/bash
-# Monitor Agent — hourly session
-# Cron: 0 * * * * systemd-cat -t joblander-monitor /home/joblander/joblander/workspace/scripts/run-monitor-session.sh
+# Monitor Agent — hourly session. HOME = the self-healing repo (JOB-731 3M).
+# Cron (new VM): 0 * * * * systemd-cat -t joblander-monitor /home/joblander/self-healing/monitor/run-monitor-session.sh
+#
+# The launcher lib + agent prompt + state dir still live in the WORKSPACE
+# checkout (the launcher `git stash`es dirty workspace state on start — so
+# NOTHING may be overlaid into workspace by hand; found when a stash silently
+# reverted a synced triage.py and the session ran the stale ssh collector).
+# triage.py itself runs FROM THIS repo — the single source of truth.
 
 AGENT_NAME="Monitor"
 LIVENESS_TIMEOUT=900  # 15 min
+SELF_HEALING_MONITOR_DIR="$(cd "$(dirname "$0")" && pwd)"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/home/joblander/workspace}"
+[ -d "$WORKSPACE_DIR" ] || WORKSPACE_DIR=/home/joblander/joblander/workspace  # legacy VM layout
+cd "$WORKSPACE_DIR" || exit 1
 
-source "$(dirname "$0")/lib/agent-launcher.sh"
+source "$WORKSPACE_DIR/scripts/lib/agent-launcher.sh"
 init_launcher 203
 
 # Pre-inject the Sentry token from Secret Manager so the agent never types a
@@ -20,7 +30,7 @@ export SENTRY_TOKEN="$(gcloud secrets versions access latest --secret=joblander-
 # The LLM session must NOT collect or classify anything itself.
 TRIAGE_LOG="teams/logs/monitoring/last-triage-run.log"
 mkdir -p teams/logs/monitoring
-python3 "$(dirname "$0")/monitor/triage.py" > "$TRIAGE_LOG" 2>&1
+python3 "$SELF_HEALING_MONITOR_DIR/triage.py" > "$TRIAGE_LOG" 2>&1
 TRIAGE_EXIT=$?
 
 run_agent_session "Monitor" \

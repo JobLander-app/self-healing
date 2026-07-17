@@ -22,11 +22,10 @@ WATCH_NOTIFY_SCRIPT=/home/joblander/workspace/scripts/notify.sh
 
 # Hourly monitor session (error-side triage; runs from the workspace clone —
 # run-monitor-session.sh sources scripts/lib/agent-launcher.sh next to it).
-# --- DISABLED until role handover (TEST-PLAN stage 3M): double-running against
-# the legacy VM's hourly cron would duplicate Linear tickets and Telegram P0s.
-# Before enabling: copy teams/logs/monitoring state from the legacy VM (diff
-# continuity) and disable the legacy cron line in the same hour.
-# 0 * * * * systemd-cat -t joblander-monitor /home/joblander/workspace/scripts/run-monitor-session.sh
+# --- ROLE HANDED OVER (stage 3M, 2026-07-17): this VM runs the hourly monitor;
+# the legacy VM's hourly cron is commented out. State (teams/logs/monitoring)
+# was copied from the legacy VM before handover. Runs from THIS repo.
+0 * * * * systemd-cat -t joblander-monitor /home/joblander/self-healing/monitor/run-monitor-session.sh
 
 # --- CWS crons: ENABLED AT CUTOVER (Phase 4) ---------------------------------
 # The legacy joblander-agents VM still runs these; enabling here too would
