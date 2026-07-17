@@ -128,12 +128,6 @@ variable "self_healing_repo_url" {
   default     = "https://github.com/JobLander-app/self-healing"
 }
 
-variable "meeting_lab_repo_url" {
-  description = "HTTPS clone URL of meeting-lab (cloned to /home/joblander/meeting-lab)."
-  type        = string
-  default     = "https://github.com/JobLander-app/meeting-lab"
-}
-
 variable "workspace_repo_url" {
   description = "HTTPS clone URL of the workspace repo (cloned to /home/joblander/workspace — dispatcher agents need its task-file dirs, notify.sh and the monitor launcher)."
   type        = string

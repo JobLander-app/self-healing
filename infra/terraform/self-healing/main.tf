@@ -36,7 +36,6 @@ module "self_healing" {
 
   # Repos init.sh clones onto the VM (as user joblander).
   self_healing_repo_url = "https://github.com/JobLander-app/self-healing"
-  meeting_lab_repo_url  = "https://github.com/JobLander-app/meeting-lab"
   workspace_repo_url    = "https://github.com/JobLander-app/workspace"
   repo_branch           = "main"
 

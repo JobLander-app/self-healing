@@ -66,7 +66,6 @@ resource "google_compute_instance" "this" {
     startup-script = templatefile("${path.module}/../../../../init/init.sh", {
       project_id            = var.project_id
       self_healing_repo_url = var.self_healing_repo_url
-      meeting_lab_repo_url  = var.meeting_lab_repo_url
       workspace_repo_url    = var.workspace_repo_url
       repo_branch           = var.repo_branch
       dispatcher_env_secret = var.dispatcher_env_secret

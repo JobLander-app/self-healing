@@ -21,7 +21,6 @@ set -euo pipefail
 # ---- values injected by Terraform -------------------------------------------
 PROJECT_ID="${project_id}"
 SELF_HEALING_REPO_URL="${self_healing_repo_url}"
-MEETING_LAB_REPO_URL="${meeting_lab_repo_url}"
 WORKSPACE_REPO_URL="${workspace_repo_url}"
 REPO_BRANCH="${repo_branch}"
 DISPATCHER_ENV_SECRET="${dispatcher_env_secret}"
@@ -44,13 +43,13 @@ as_agent() { sudo -u $AGENT_USER -H "$@"; }
 log "=== self-healing init started (project=$PROJECT_ID branch=$REPO_BRANCH) ==="
 
 # ---- 1. base packages --------------------------------------------------------
-log "[1/10] base packages"
+log "[1/9] base packages"
 apt-get update -qq
 apt-get install -y -qq git curl wget unzip jq ca-certificates gnupg \
   python3 python3-venv python3-pip xvfb cron
 
 # ---- 2. node 20 (nodesource) ---------------------------------------------------
-log "[2/10] node 20"
+log "[2/9] node 20"
 NODE_MAJOR=0
 if command -v node >/dev/null 2>&1; then
   NODE_MAJOR=$(node -v | sed 's/^v//' | cut -d. -f1)
@@ -62,7 +61,7 @@ fi
 log "node: $(node -v)"
 
 # ---- 3. gh CLI ----------------------------------------------------------------
-log "[3/10] gh CLI"
+log "[3/9] gh CLI"
 if ! command -v gh >/dev/null 2>&1; then
   curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     -o /usr/share/keyrings/githubcli-archive-keyring.gpg
@@ -74,29 +73,22 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 # ---- 4. docker + Claude Code CLI + chromium ------------------------------------
-log "[4/10] docker, claude, chromium"
+log "[4/9] docker, claude, chromium"
 if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
 fi
 command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
-# meeting-lab README (VM specifics): SNAP chromium ONLY — the apt/google-chrome
-# builds do not run MAIN-world content scripts from --load-extension.
-if ! snap list chromium >/dev/null 2>&1; then
-  snap install chromium || add_todo "snap install chromium failed — meeting-lab browser bots need /snap/bin/chromium"
-fi
 
 # ---- 5. agent user -------------------------------------------------------------
-log "[5/10] user $AGENT_USER"
+log "[5/9] user $AGENT_USER"
 id -u $AGENT_USER >/dev/null 2>&1 || useradd -m -s /bin/bash $AGENT_USER
 usermod -aG docker $AGENT_USER || true
-# linger so the meeting-lab systemd *user* unit starts at boot without a login
-loginctl enable-linger $AGENT_USER || true
 
 as_agent git config --global user.name "JobLander Self-Healing Agent"
 as_agent git config --global user.email "agent@joblander.app"
 
 # ---- 6. gh auth (fail-soft) -----------------------------------------------------
-log "[6/10] gh auth from Secret Manager ($GH_TOKEN_SECRET)"
+log "[6/9] gh auth from Secret Manager ($GH_TOKEN_SECRET)"
 GH_TOKEN_VALUE=$(gcloud secrets versions access latest \
   --secret="$GH_TOKEN_SECRET" --project="$PROJECT_ID" 2>/dev/null || true)
 if [ -n "$GH_TOKEN_VALUE" ]; then
@@ -112,7 +104,7 @@ fi
 unset GH_TOKEN_VALUE
 
 # ---- 7. clone/update repos -------------------------------------------------------
-log "[7/10] repos"
+log "[7/9] repos"
 clone_or_update() {
   # $1 = url, $2 = target dir
   local url=$1 dir=$2
@@ -127,7 +119,6 @@ clone_or_update() {
   fi
 }
 clone_or_update "$SELF_HEALING_REPO_URL" "$AGENT_HOME/self-healing"
-clone_or_update "$MEETING_LAB_REPO_URL" "$AGENT_HOME/meeting-lab"
 clone_or_update "$WORKSPACE_REPO_URL" "$AGENT_HOME/workspace"
 
 # workspace/.env (TG_BOT_TOKEN/TG_CHAT_ID for scripts/notify.sh — the watcher's
@@ -155,7 +146,7 @@ fi
 
 # ---- 8. dispatcher + watcher ------------------------------------------------------
 if [ -d "$SH_DIR" ]; then
-  log "[8/10] dispatcher .env + builds"
+  log "[8/9] dispatcher .env + builds"
 
   # dispatcher .env from Secret Manager (never on disk outside this file)
   if gcloud secrets versions access latest \
@@ -199,7 +190,7 @@ if [ -d "$SH_DIR" ]; then
   fi
 
   # ---- 9. systemd unit + cron -----------------------------------------------------
-  log "[9/10] systemd + cron"
+  log "[9/9] systemd + cron"
   # Dispatcher trace/turn logs (LOG_DIR in .env). Found during the stage-2 fire
   # drill: without it every traceEvent hits EACCES and per-turn traces are lost
   # (run still works — trace is fail-soft — but /feed history dies on restart).
@@ -219,39 +210,6 @@ if [ -d "$SH_DIR" ]; then
   # whole-crontab install: deploy/cron/self-healing.crontab OWNS joblander's crontab
   crontab -u $AGENT_USER "$SH_DIR/deploy/cron/self-healing.crontab"
   log "crontab installed for $AGENT_USER"
-fi
-
-# ---- 10. meeting-lab ----------------------------------------------------------------
-# Per meeting-lab/deploy/setup-vm.sh (its own deploy doc), adapted from
-# rsync-push to on-VM clone: node deps for bots/, python venv for server/,
-# data dirs, systemd USER unit. Browser login profiles are interactive-only
-# → POST-INIT-TODO.
-ML_DIR=$AGENT_HOME/meeting-lab
-if [ -d "$ML_DIR" ]; then
-  log "[10/10] meeting-lab"
-  (cd "$ML_DIR/bots" && as_agent npm install --no-audit --no-fund --loglevel=error) \
-    || add_todo "meeting-lab bots npm install failed"
-  as_agent python3 -m venv "$AGENT_HOME/meeting-lab-venv" 2>/dev/null || true
-  as_agent "$AGENT_HOME/meeting-lab-venv/bin/pip" -q install -r "$ML_DIR/server/requirements.txt" \
-    || add_todo "meeting-lab server pip install failed"
-  as_agent mkdir -p "$AGENT_HOME/meeting-lab-data/sessions" \
-    "$AGENT_HOME/meeting-lab-data/profiles" "$AGENT_HOME/meeting-lab-data/assets"
-
-  as_agent mkdir -p "$AGENT_HOME/.config/systemd/user"
-  as_agent cp "$ML_DIR/deploy/meeting-lab.service" "$AGENT_HOME/.config/systemd/user/"
-  AGENT_UID=$(id -u $AGENT_USER)
-  # user manager needs a moment on the very first boot after enable-linger
-  if sudo -u $AGENT_USER XDG_RUNTIME_DIR=/run/user/$AGENT_UID \
-    systemctl --user daemon-reload 2>/dev/null; then
-    sudo -u $AGENT_USER XDG_RUNTIME_DIR=/run/user/$AGENT_UID \
-      systemctl --user enable --now meeting-lab \
-      || add_todo "meeting-lab user unit failed to start — systemctl --user status meeting-lab (as $AGENT_USER)"
-  else
-    add_todo "systemd user manager for $AGENT_USER not up yet — run as $AGENT_USER: systemctl --user daemon-reload && systemctl --user enable --now meeting-lab"
-  fi
-  add_todo "meeting-lab browser profiles (meetbot/teamsbot/guest) are interactive-only: copy $AGENT_HOME/meeting-lab-data/profiles/ from the old VM (or re-login per meeting-lab README) — bots cannot host Meet/Teams without them"
-else
-  add_todo "meeting-lab repo absent — its install was skipped; fix clone and re-run init"
 fi
 
 # ---- unavoidable one-time steps ------------------------------------------------------
