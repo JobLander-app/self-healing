@@ -16,9 +16,9 @@ WATCH_NOTIFY_SCRIPT=/home/joblander/workspace/scripts/notify.sh
 # infra/terraform/modules/self-healing-vm/variables.tf.
 #
 # --- ROLE HANDED OVER (TEST-PLAN stage 3, 2026-07-16): this VM is the LIVE
-# pager; the legacy VM's watcher cron line is commented out. WATCH_TRIGGER_URL
-# still points at the legacy dispatcher until stage 4 hands the fixer role over.
-* * * * * cd /home/joblander/self-healing/watcher && WATCH_TRIGGER_URL=http://joblander-agents.europe-west1-b.c.meet-assistant-6d8ad.internal:4100/trigger /usr/bin/node dist/tick.js >> /home/joblander/output-watch.log 2>&1 && gcloud logging write self-healing-watcher "WATCHER_HEARTBEAT tick ok" --severity=INFO >/dev/null 2>&1
+# pager; the legacy VM's watcher cron line is commented out. Stage 4 (2026-07-17):
+# trigger targets THIS VM's dispatcher (default localhost:4100) — full loop local.
+* * * * * cd /home/joblander/self-healing/watcher && /usr/bin/node dist/tick.js >> /home/joblander/output-watch.log 2>&1 && gcloud logging write self-healing-watcher "WATCHER_HEARTBEAT tick ok" --severity=INFO >/dev/null 2>&1
 
 # Hourly monitor session (error-side triage; runs from the workspace clone —
 # run-monitor-session.sh sources scripts/lib/agent-launcher.sh next to it).
