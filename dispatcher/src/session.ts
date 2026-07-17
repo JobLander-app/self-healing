@@ -18,6 +18,7 @@ import {
   type RunSummary,
 } from "./trace";
 import { isLimitError, pauseFromLimitError } from "./pause";
+import { sendTelegram } from "./notify";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -119,6 +120,54 @@ function newTurnId(): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const rand = Math.random().toString(36).slice(2, 8);
   return `dispatch-${stamp}-${rand}`;
+}
+
+/**
+ * Build the lifecycle-observability Telegram for a completed run (JOB-731).
+ * Returns null when the run should stay silent:
+ *   - "no-work" ticks (a message every ~10 min would be spam; the poller
+ *     pre-check already suppresses most of these before they even run), and
+ *   - runs that never picked a ticket (no issueId) — e.g. a startup error —
+ *     which would otherwise spam ⚠️ on every tick.
+ *
+ * Three visible outcomes, keyed off the structured RunSummary fields only
+ * (no free-text parsing beyond what the run already structured):
+ *   🚀 in prod   — fixed+merged (auto-merge → Cloud Build deploys main).
+ *   ✅ investigated — closed without a prod code change (not-a-bug/stale/
+ *                    fixed-elsewhere).
+ *   ⚠️ needs eyes — dead-end (backlogged) / error / timeout / unknown.
+ * DRY_RUN runs are prefixed with "[DRY_RUN] ".
+ */
+export function buildRunNotification(s: RunSummary): string | null {
+  if (s.outcome === "no-work") return null;
+  if (!s.issueId) return null; // no ticket picked → not a lifecycle event
+
+  const ticket = s.issueId;
+  const summary = s.summary.trim().length > 0 ? s.summary.trim() : "no summary";
+  const cost = `$${s.costUsd.toFixed(2)}`;
+
+  let line: string;
+  switch (s.outcome) {
+    case "fixed": {
+      const pr = s.prUrl ? `${s.prUrl} merged` : "merged";
+      line = `🚀 in prod: ${ticket} FIXED — ${pr}, deploy pipeline running. ${summary}. ${cost}, ${s.durationSec}s`;
+      break;
+    }
+    case "not-a-bug":
+      line = `✅ ${ticket}: investigated — not a bug. ${summary}. ${cost}`;
+      break;
+    case "stale":
+      line = `✅ ${ticket}: investigated — stale, no longer reproduces. ${summary}. ${cost}`;
+      break;
+    case "fixed-elsewhere":
+      line = `✅ ${ticket}: investigated — already fixed by a later change. ${summary}. ${cost}`;
+      break;
+    default: // backlogged | error | unknown (watchdog timeout surfaces as "error")
+      line = `⚠️ ${ticket}: ${s.outcome}. ${summary}`;
+      break;
+  }
+
+  return s.dryRun ? `[DRY_RUN] ${line}` : line;
 }
 
 /**
@@ -270,10 +319,19 @@ export async function runDispatchSession(reason: string): Promise<RunSummary> {
   traceEvent(turnId, "run_finished", { ...summary });
   recordRun(summary);
 
-  // NO Telegram. The "Joblander Alerts" channel is reserved for P0 "on fire"
-  // emergencies only — not per-run dispatcher logs. Dispatcher activity lives
-  // in the JSONL traces and is surfaced on demand via /self-healing-report.
-  // (Owner directive 2026-06-08: stop logging to the alerts channel.)
+  // Lifecycle observability (JOB-731, supersedes the 2026-06-08 "no Telegram"
+  // policy): one Telegram per run that actually did work — "acted upon" /
+  // "in prod". no-work / no-ticket runs stay silent (see buildRunNotification).
+  // Fail-soft: sendTelegram already swallows its own errors, and we belt-and-
+  // suspenders around it so a TG failure can NEVER throw into the poll loop.
+  const notification = buildRunNotification(summary);
+  if (notification !== null) {
+    try {
+      await sendTelegram(notification);
+    } catch (err) {
+      console.warn("[session] lifecycle Telegram send failed (ignored):", err);
+    }
+  }
 
   console.log(`[session] Dispatch run ${turnId} done: ${outcome} (${durationSec}s, $${costUsd.toFixed(2)})`);
 

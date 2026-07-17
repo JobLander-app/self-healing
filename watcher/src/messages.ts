@@ -9,6 +9,16 @@ export const buildRecoveredMessage = ({
 }): string =>
   `RECOVERED: /health/output = ${status} (HTTP ${httpCode}). Product output flowing again.`;
 
+/**
+ * Second lifecycle Telegram, sent only after a Linear ticket is created:
+ * tells the owner the self-healing loop has picked the incident up.
+ */
+export const buildTicketCreatedMessage = ({
+  identifier,
+}: {
+  identifier: string;
+}): string => `🎫 ${identifier} created — self-healing engaged`;
+
 export const buildPageMessage = ({
   status,
   httpCode,

@@ -31,6 +31,7 @@ const makeEffects = (): { effects: TickEffects; order: string[]; lines: string[]
     }),
     createLinearTicket: vi.fn(async () => {
       order.push("linear");
+      return "JOB-999";
     }),
     triggerDispatcher: vi.fn(async () => {
       order.push("trigger");
@@ -61,7 +62,14 @@ describe("processSample — incident sequence", () => {
     });
 
     expect(decision.shouldPage).toBe(true);
-    expect(order).toEqual(["saveState", "telegram", "linear", "trigger"]);
+    // saveState → page → linear create → "ticket created" page → trigger.
+    expect(order).toEqual([
+      "saveState",
+      "telegram",
+      "linear",
+      "telegram",
+      "trigger",
+    ]);
     expect(effects.saveState).toHaveBeenCalledWith({
       state: { count: 3, paged: true },
     });
@@ -137,7 +145,15 @@ describe("processSample — incident sequence", () => {
       dryRun: false,
       effects,
     });
-    expect(order).toEqual(["saveState", "telegram", "linear", "trigger"]);
+    // The ticket-created notify also runs after the successful linear create
+    // (its own notifyOwner throw is swallowed too), so trigger still lands.
+    expect(order).toEqual([
+      "saveState",
+      "telegram",
+      "linear",
+      "telegram",
+      "trigger",
+    ]);
   });
 
   it("below threshold: only saves state, no page actions", async () => {
@@ -171,6 +187,85 @@ describe("processSample — incident sequence", () => {
     expect(effects.saveState).toHaveBeenCalledWith({
       state: { count: 4, paged: true },
     });
+  });
+});
+
+describe("processSample — ticket-created lifecycle message", () => {
+  it("sends the '🎫 … created' message after a successful ticket, page first", async () => {
+    const { effects, order } = makeEffects();
+    await processSample({
+      sample: badSample({}),
+      prevState: { count: 2, paged: false },
+      threshold: 3,
+      url: URL,
+      dryRun: false,
+      effects,
+    });
+
+    // Two notifyOwner calls: the P0 page first, the ticket-created message second.
+    expect(effects.notifyOwner).toHaveBeenCalledTimes(2);
+    expect(order.indexOf("linear")).toBeLessThan(order.lastIndexOf("telegram"));
+    const pageIdx = order.indexOf("telegram");
+    expect(pageIdx).toBeLessThan(order.indexOf("linear")); // page fired first
+    expect(effects.notifyOwner).toHaveBeenLastCalledWith({
+      message: "🎫 JOB-999 created — self-healing engaged",
+    });
+  });
+
+  it("uses the exact identifier returned by createLinearTicket", async () => {
+    const { effects } = makeEffects();
+    effects.createLinearTicket = vi.fn(async () => "JOB-742");
+    await processSample({
+      sample: badSample({}),
+      prevState: { count: 2, paged: false },
+      threshold: 3,
+      url: URL,
+      dryRun: false,
+      effects,
+    });
+    expect(effects.notifyOwner).toHaveBeenLastCalledWith({
+      message: "🎫 JOB-742 created — self-healing engaged",
+    });
+  });
+
+  it("no second message when the ticket create returns null (skipped)", async () => {
+    const { effects } = makeEffects();
+    effects.createLinearTicket = vi.fn(async () => null);
+    await processSample({
+      sample: badSample({}),
+      prevState: { count: 2, paged: false },
+      threshold: 3,
+      url: URL,
+      dryRun: false,
+      effects,
+    });
+    // Only the P0 page — no "🎫 created" follow-up.
+    expect(effects.notifyOwner).toHaveBeenCalledTimes(1);
+    expect(effects.notifyOwner).not.toHaveBeenCalledWith({
+      message: expect.stringContaining("🎫"),
+    });
+  });
+
+  it("ticket create failure: no second message, no throw, logged", async () => {
+    const { effects, lines } = makeEffects();
+    effects.createLinearTicket = vi.fn(async () => {
+      throw new Error("linear 500");
+    });
+
+    await expect(
+      processSample({
+        sample: badSample({}),
+        prevState: { count: 2, paged: false },
+        threshold: 3,
+        url: URL,
+        dryRun: false,
+        effects,
+      }),
+    ).resolves.toMatchObject({ shouldPage: true });
+
+    expect(effects.notifyOwner).toHaveBeenCalledTimes(1); // page only
+    expect(lines.some((l) => l.includes("linear create failed"))).toBe(true);
+    expect(effects.triggerDispatcher).toHaveBeenCalledTimes(1); // trigger still ran
   });
 });
 

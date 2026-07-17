@@ -1,17 +1,26 @@
 import { decide } from "./decide.js";
-import { buildPageMessage, buildRecoveredMessage } from "./messages.js";
+import {
+  buildPageMessage,
+  buildRecoveredMessage,
+  buildTicketCreatedMessage,
+} from "./messages.js";
 import { renderRegions } from "./regions.js";
 import type { Decision, Sample, WatchState } from "./types.js";
 
 export interface TickEffects {
   /** Page the owner (Telegram / notify.sh). */
   notifyOwner: (input: { message: string }) => Promise<void>;
-  /** File the [Monitor] Linear ticket. Best-effort. */
+  /**
+   * File the [Monitor] Linear ticket. Best-effort. Resolves to the created
+   * issue identifier (e.g. "JOB-742") on success, or null when the create was
+   * skipped (missing key) or the response carried no identifier. Throws on a
+   * real create failure.
+   */
   createLinearTicket: (input: {
     status: string;
     httpCode: string;
     regions: string;
-  }) => Promise<void>;
+  }) => Promise<string | null>;
   /** Wake the self-heal dispatcher (POST /trigger). Best-effort. */
   triggerDispatcher: () => Promise<void>;
   /** Persist the "COUNT PAGED" state file. */
@@ -46,6 +55,8 @@ const runSafely = async ({
  *   2. Telegram page fires FIRST,
  *   3. Linear ticket and dispatcher trigger follow, best-effort — their
  *      failures are logged, never thrown, and cannot block the page.
+ * After a SUCCESSFUL Linear create, a second short "🎫 … created" Telegram is
+ * sent (lifecycle observability) — it never precedes or blocks the page.
  * Ends with exactly one `WATCHER_HEARTBEAT {json}` stdout line.
  */
 export const processSample = async ({
@@ -109,22 +120,41 @@ export const processSample = async ({
       });
     }
 
-    // 2. File the [Monitor] ticket — best-effort.
+    // 2. File the [Monitor] ticket — best-effort. On a SUCCESSFUL create we
+    //    also emit the "ticket created" lifecycle message (JOB-731 lifecycle
+    //    observability), a SECOND Telegram via the same direct plain-text path
+    //    the page used. A create failure must not affect the already-sent page
+    //    and must NOT emit the second message.
     if (dryRun) {
       effects.log({
         line: `[DRY] create [Monitor] ticket status=${sample.status} regions=${regions}`,
       });
+      effects.log({ line: "[DRY] notify ticket-created" });
     } else {
-      await runSafely({
-        action: () =>
-          effects.createLinearTicket({
-            status: sample.status,
-            httpCode: sample.httpCode,
-            regions,
-          }),
-        label: "linear create",
-        log: effects.log,
-      });
+      let identifier: string | null = null;
+      try {
+        identifier = await effects.createLinearTicket({
+          status: sample.status,
+          httpCode: sample.httpCode,
+          regions,
+        });
+      } catch (error) {
+        // Best-effort: log, never throw — same contract as runSafely. The page
+        // is already sent; a Linear failure can never block it.
+        effects.log({
+          line: `output-watch: linear create failed: ${String(error)}`,
+        });
+      }
+      if (identifier !== null) {
+        await runSafely({
+          action: () =>
+            effects.notifyOwner({
+              message: buildTicketCreatedMessage({ identifier }),
+            }),
+          label: "ticket-created notify",
+          log: effects.log,
+        });
+      }
     }
 
     // 3. Wake the dispatcher now — best-effort.
