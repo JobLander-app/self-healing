@@ -178,6 +178,19 @@ if [ -d "$SH_DIR" ]; then
     add_todo "watcher/package.json absent (TS port not merged) — the cron tick 'node dist/tick.js' will fail until it lands; re-run init after merge"
   fi
 
+  # Vendored MCP servers (stdio) the dispatcher session + healthcheck spawn:
+  # firebase (Firestore reads via ADC — needs the SA + datastore.viewer) and
+  # sentry. `npm ci` only — they run from JS, no build step. Without their
+  # node_modules the child procs fail-closed (tools absent; dispatcher still runs).
+  for mcp in firebase sentry; do
+    if [ -f "$SH_DIR/mcp/$mcp/package.json" ]; then
+      (cd "$SH_DIR/mcp/$mcp" && as_agent npm ci --omit=dev) \
+        || add_todo "mcp/$mcp npm ci failed — the $mcp MCP tools will be absent until fixed; re-run init"
+    else
+      add_todo "mcp/$mcp absent — dispatcher $mcp MCP tools unavailable; re-run init after it merges"
+    fi
+  done
+
   # ---- 9. systemd unit + cron -----------------------------------------------------
   log "[9/9] systemd + cron"
   # Dispatcher trace/turn logs (LOG_DIR in .env). Found during the stage-2 fire
