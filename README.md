@@ -1,114 +1,246 @@
 # self-healing
 
-JobLander self-healing loop — the system that detects "product output died" in
+JobLander's self-healing loop — the system that detects "product output died" in
 production, pages the owner, files a ticket, and autonomously fixes it. Born from
-the JOB-651 post-mortem (19h silent STT outage: zero errors, zero output — no
-monitor measured product OUTPUT). Extracted into its own repo per owner directive
-(JOB-731, 2026-07-14): the previous incarnation lived untracked on the
-`joblander-agents` VM, and the dispatcher's TypeScript sources were lost.
+the **JOB-651** post-mortem (a 19-hour silent STT outage: zero errors, zero
+output — every existing monitor watched errors, none watched product OUTPUT).
+Extracted into this repo per owner directive (**JOB-731**, 2026-07-14): the
+previous incarnation lived untracked on the `joblander-agents` VM and the
+dispatcher's TypeScript sources had been lost.
 
-**Goal: `terraform apply` + startup init = the whole loop stands up on any fresh
-VM and works immediately.** Nothing hand-crafted on disk, all secrets in Secret
-Manager, all alert policies in Terraform.
+**Design goal:** `terraform apply` + startup init = the whole loop stands up on a
+fresh VM and works. Nothing hand-crafted on disk, all secrets in Secret Manager,
+all alert policies in Terraform, all the dispatcher's tools (MCP servers) vendored
+in this repo. Reproducibility is the point — the original was one disk failure
+away from non-existence.
 
-## The loop (three layers + a fixer)
+**Status (2026-07-17):** fully live on VM `self-healing-1` (europe-west1-b,
+Terraform-managed). All three roles — watcher, hourly monitor, dispatcher — run
+there; the legacy `joblander-agents` VM has had its loop components removed and
+now only hosts unrelated services (meeting-lab, cws crons) pending full cleanup.
+
+---
+
+## The loop
 
 | Layer | What it answers | Code | Runs |
 |---|---|---|---|
-| Detector `/health/output` | "did value reach the user?" per region vs same-window-yesterday baseline (JOB-668) | `backend` repo, `src/services/health-output/` | inside the backend service (Cloud Run, 3 regions) |
-| Watcher | polls detector 1/min; on 3 consecutive bad samples: Telegram P0 → Linear `[Monitor]` ticket → wakes dispatcher; RECOVERED on clear (JOB-670) | `watcher/` | cron on the loop VM |
-| Hourly triage | error-side monitoring narrative (errors, not output) | `monitor/` | cron on the loop VM |
-| Dispatcher | autonomous fixer: picks ONE `monitor`-labeled Linear ticket per ~10 min tick, investigates prod, writes fix, PRs, auto-merges (sanctioned exception) | `dispatcher/` | systemd on the loop VM, HTTP :4100 (`/trigger`, `/status`, `/feed`) |
+| **Detector** `/health/output` | "did value reach the user?" per region vs same-window-yesterday baseline (JOB-668) | `backend` repo, `src/services/health-output/` | inside the backend service (Cloud Run, 3 regions) — NOT this repo |
+| **Watcher** | polls the detector 1/min; on 3 consecutive bad samples: Telegram P0 → Linear `[Monitor]` ticket → wakes the dispatcher; RECOVERED on clear. Hysteresis avoids flapping (JOB-670, JOB-725) | `watcher/` | minute cron on the VM |
+| **Hourly monitor** | error-side triage (Cloud Run / Cloud Functions / LiveKit VMs / Sentry) → escalations + verbatim P0 alerts; a Claude session sends only what the deterministic `triage.py` prepared | `monitor/` | hourly cron on the VM |
+| **Dispatcher** | autonomous fixer: picks ONE `monitor`-labeled Linear ticket per tick, investigates prod, writes a fix, opens a PR, and auto-merges (the sanctioned Self-Healing Loop exception) — or proves it's not a bug | `dispatcher/` | systemd on the VM, HTTP :4100 (`/trigger`, `/status`, `/feed`) |
+
+The watcher files a ticket → the dispatcher picks it up → the fix merges → Cloud
+Build deploys. A closed loop from "output died" to "fix in prod", with the owner
+watching in Telegram but not in the critical path.
+
+---
+
+## Dispatcher tooling (MCP servers, vendored in-repo)
+
+The dispatcher's investigation session (Claude Agent SDK `query()` in
+`dispatcher/src/session.ts`) is given real tools via **stdio MCP servers vendored
+under `mcp/`** — run locally as child processes: no Cloud Run, no dependency on
+the `tools` repo, no expiring OAuth connectors. The whole system stays
+self-contained and reproducible from this repo alone.
+
+| MCP | Tools | Auth | Purpose |
+|---|---|---|---|
+| `mcp/firebase/` | 11 — `firestore_*`, `auth_*` | **ADC** (VM service account, no key file); SA has `roles/datastore.viewer` | read Firestore (meetings/users) during investigation |
+| `mcp/sentry/` | 2 — `sentry_list_issues`, `sentry_get_issue` | `joblander-sentry-monitor-token` | read error groups |
+| `mcp/linear/` | 13 — `list_issues`, `get_issue`, `search_issues`, `update_issue`, `create_comment`, `list_teams/states/labels/projects/cycles/comments`, `create_issue`, `create_project` | `linear-api-key` — a **personal API key that never expires** (why we self-host instead of claude.ai's OAuth Linear connector, which kept logging out) | structured Linear: claim = `update_issue`, comment = `create_comment`, find work = `list_issues` |
+
+GCP is reached via the `gcloud` CLI (Bash) — the SA has `logging.viewer`; no MCP
+needed. `dispatcher/CLAUDE.md` (the constitution) documents when to use which.
+
+Wiring: `session.ts` passes these as inline `mcpServers` stdio defs and adds
+`mcp__firebase__*` / `mcp__sentry__*` / `mcp__linear__*` to `allowedTools`;
+`LINEAR_API_KEY` is resolved once from Secret Manager and injected into the child
+env. The daemon's out-of-agent poll pre-check uses Linear GraphQL directly —
+separate from the agent's MCP path.
+
+---
+
+## Self-healthcheck (keeps the dispatcher's tools working)
+
+`dispatcher/src/healthcheck.ts` — ported from the `handy-daemon` pattern and
+pointed **inward**. Runs on startup and every 6h (`0 */6 * * *`), entirely outside
+the agent (plain Node / child processes / stdio JSON-RPC — never through Claude
+tools). Five probes, each with a real smoke call:
+
+1. **firebase MCP** — spawn → `tools/list` >0 → smoke `firestore_list_collections` (exercises ADC + datastore.viewer end-to-end)
+2. **sentry MCP** — spawn → smoke `sentry_list_issues`
+3. **gcp** — `gcloud logging read … --limit 1` exit 0 (the SA can read logs)
+4. **claude-oauth-token** — resolves + non-empty (presence only; expiry is a known gap)
+5. **linear MCP** — spawn → smoke `list_teams`
+
+On failure: one Telegram (`⚠️ self-heal: dependency <dep> DOWN …`) **and it files a
+`[SelfHeal]` Linear ticket** (label `monitor`, deduped against open ones) — which
+the dispatcher's own poll then picks up and repairs. The same loop, turned on its
+own toolchain. `/status.lastHealthcheck` exposes the latest result. This class of
+check would have caught the OAuth-token/secret-access failure that silently broke
+the hourly monitor on 2026-07-17.
+
+---
+
+## Cost control (poll pre-check)
+
+`dispatcher/src/poller.ts` runs a cheap Linear existence query before spawning the
+LLM agent on each tick. Zero `monitor` candidates → skip the agent entirely
+(`lastPrecheck: skip` on `/status`), saving ~144 empty LLM runs/day. **Fail-open**:
+any pre-check error → spawn the agent as before, so the loop is never blinded. A
+manual `/trigger` bypasses the pre-check.
+
+---
 
 ## Lifecycle observability (Telegram)
 
-The owner watches one incident travel end-to-end in Telegram: **created →
-acted upon → in prod**. Every message is sent as plain text (no `parse_mode` —
-unescaped content + Markdown once silently dropped a real P0, 2026-07-16), and
-a send failure never affects the loop.
+The owner watches one incident travel end-to-end: **created → acted upon → in
+prod**. Every message is plain text (no `parse_mode` — unescaped content +
+Markdown once silently dropped a real P0 on 2026-07-16); a send failure never
+affects the loop.
 
-| Event | Message | Emitted by | When |
-|---|---|---|---|
-| P0 page | `URGENT P0 [output-watch]: /health/output = … Regions: … <url>` | watcher (`telegram.ts` direct send) | 3 consecutive bad samples |
-| Ticket created | `🎫 {IDENTIFIER} created — self-healing engaged` | watcher (same direct path) | right after a successful Linear `[Monitor]` create |
-| Acted upon / in prod | `🚀 in prod: {ticket} FIXED — {PR} merged, deploy pipeline running. … ${cost}, {n}s` · `✅ {ticket}: investigated — …. ${cost}` · `⚠️ {ticket}: {outcome}. …` (DRY_RUN runs prefixed `[DRY_RUN] `) | dispatcher (`notify.ts`, from `session.ts`) | end of a run that picked a ticket — `no-work`/no-ticket runs stay silent |
-| Recovered | `RECOVERED: /health/output = … Product output flowing again.` | watcher (same direct path) | detector clears after a page |
+| Event | Message | Emitted by |
+|---|---|---|
+| P0 page | `URGENT P0 [output-watch]: /health/output = … Regions: … <url>` | watcher, on 3 consecutive bad samples |
+| Ticket created | `🎫 {IDENTIFIER} created — self-healing engaged` | watcher, right after a successful Linear create |
+| Acted upon / in prod | `🚀 in prod: {ticket} FIXED — {PR} merged, deploy pipeline running. … ${cost}, {n}s` · `✅ {ticket}: investigated — not a bug. … ${cost}` · `⚠️ {ticket}: {outcome}. …` (DRY_RUN prefixed `[DRY_RUN] `) | dispatcher, at the end of a run that picked a ticket (`no-work` stays silent) |
+| Recovered | `RECOVERED: /health/output = … Product output flowing again.` | watcher, when the detector clears after a page |
+| Self-heal | `⚠️ self-heal: dependency <dep> DOWN — …. Filing repair ticket.` | dispatcher healthcheck, on a dep failure |
+
+---
 
 ## Repo layout
 
 ```
-dispatcher/   Node 20 + TS. dist/ is the RECOVERED compiled output from the VM
-              (sources were lost; TS reconstruction = Phase 1, criterion: tsc
-              output ≡ this dist). CLAUDE.md = the fixer's constitution
-              (security-level document — versioned here).
-watcher/      output-watch.sh (current prod version, incl. JOB-725 fix).
-              Phase 1: TS port with unit tests (hysteresis, dedup, Telegram-FIRST).
-monitor/      triage.py + run-monitor-session.sh (hourly Claude triage session).
-init/         startup provisioning. legacy-startup-script.sh = current GCE
-              metadata script (baseline). Target: idempotent init that installs
-              runtime, clones repos (self-healing, meeting-lab from ITS repo,
-              workspace), renders secrets from Secret Manager, installs
-              units/cron from deploy/, starts everything.
-infra/        Terraform (convention: ai-voice-agent-python — modules + roots,
-              state gs://meet-assistant-6d8ad-tfstate): VM, dedicated SA,
-              firewall, Secret Manager IAM, alert policies incl. dead-man
-              "watcher heartbeat absent 5min".
-deploy/       systemd units, cron files (installed by init), CI config.
-              joblander-agents.crontab.snapshot = as-found snapshot (2026-07-15).
+watcher/       TypeScript port of output-watch.sh — pure decision core
+               (hysteresis / exactly-once / recovery) + injectable effects
+               (Telegram-first paging, best-effort Linear/trigger, heartbeat).
+               vitest suite. output-watch.sh kept for reference/parity.
+monitor/       triage.py (deterministic collector: Cloud Run/Functions/LiveKit
+               via Cloud Logging + Sentry) + run-monitor-session.sh (hourly
+               Claude escalation session; runs from THIS repo, reads state in
+               the workspace checkout).
+dispatcher/    Node 20 + TS autonomous fixer. src/ (reconstructed, tsc → dist/,
+               dist committed — the VM runs dist), CLAUDE.md (the fixer's
+               constitution — a security-level document, versioned), poller.ts
+               (self-poll + pre-check), session.ts (Agent SDK + MCP wiring),
+               healthcheck.ts, routes/ (trigger/status/feed).
+mcp/           Vendored stdio MCP servers: firebase/ sentry/ linear/.
+init/          init.sh — idempotent GCE startup-script (installs runtime, clones
+               repos, renders secrets, builds dispatcher+watcher+mcp, installs
+               systemd unit + crontab). legacy-startup-script.sh kept for ref.
+infra/         Terraform (convention: ai-voice-agent-python — modules + roots,
+               backend gs://meet-assistant-6d8ad-tfstate prefix self-healing):
+               VM, dedicated SA + minimal IAM, IAP-only firewall, Secret Manager
+               IAM, alert policies (dead-man on WATCHER_HEARTBEAT 5min +
+               meetings-saved backstop).
+deploy/        systemd unit, self-healing.crontab (installed by init),
+               joblander-agents.crontab.snapshot (legacy, as-found).
+docs/          TEST-PLAN.md (the role-handover test plan used for cutover).
 ```
 
-## Provisioning (Phase 2)
+---
+
+## Provisioning
 
 ```bash
 cd infra/terraform/self-healing
-terraform init          # state: gs://meet-assistant-6d8ad-tfstate, prefix self-healing
-terraform apply         # VM self-healing-1 + SA + IAM + firewall + alert policies
+terraform init     # backend: gs://meet-assistant-6d8ad-tfstate, prefix self-healing
+terraform apply    # VM self-healing-1 + SA + IAM + firewall + alert policies
 ```
 
 `terraform apply` creates the VM with `init/init.sh` as its startup-script
-(rendered via `templatefile`, idempotent — re-run any time with
-`sudo google_metadata_script_runner startup`). Init installs the runtime
-(node 20, gh, docker, Claude Code CLI, snap chromium + xvfb), creates user
-`joblander`, clones the three repos (self-healing, meeting-lab, workspace),
-renders `dispatcher/.env` from Secret Manager, builds dispatcher + watcher,
-installs the systemd unit from `deploy/systemd/` and the crontab from
-`deploy/cron/self-healing.crontab`, and sets up meeting-lab per its own
-deploy docs. SSH: IAP only (`gcloud compute ssh self-healing-1 --tunnel-through-iap`).
+(rendered via `templatefile`, **idempotent** — re-run any time with
+`sudo google_metadata_script_runner startup`). Init installs the runtime (node 20,
+gh, docker, Claude CLI, python, xvfb), creates user `joblander`, clones
+`self-healing` + `workspace`, renders `dispatcher/.env` and `workspace/.env` from
+Secret Manager, `npm ci`s + builds `dispatcher`, `watcher`, and each `mcp/*`,
+installs the systemd unit + crontab, and starts everything.
 
-**Post-init TODO** (printed at the end of init and written to
-`/home/joblander/POST-INIT-TODO.md`) — steps init cannot do:
+**SSH:** IAP only — `gcloud compute ssh self-healing-1 --zone europe-west1-b --tunnel-through-iap`.
 
-- Claude Code OAuth login (subscription auth) as `joblander`
-- meeting-lab browser profiles (meetbot/teamsbot/guest) — copy from the old
-  VM or re-login per meeting-lab README
-- gh auth token secret (`self-healing-gh-token`) if not yet created
+**Post-init TODO** (printed + written to `/home/joblander/POST-INIT-TODO.md`) —
+the only steps init cannot script:
+- Claude Code OAuth login as `joblander` — `claude setup-token` (subscription auth)
+- `self-healing-gh-token` secret (a GitHub token) if not yet created — used for
+  cloning private repos and the dispatcher's auto-merge (a dedicated GitHub App /
+  machine identity is the intended replacement for the interim owner-token copy)
 
-The legacy `joblander-agents` VM is untouched; the hand-made "no meetings
-saved 4h" alert policy stays alongside the Terraform copy until cutover
-(Phase 4). CWS crons in `deploy/cron/self-healing.crontab` are commented
-out until cutover.
+---
+
+## Deploying a code change
+
+The VM runs from a git checkout of this repo's `main`; there is no CI/CD to the VM
+(deliberate — the fixer must stay inspectable). To deploy:
+
+```bash
+gcloud compute ssh self-healing-1 --zone europe-west1-b --tunnel-through-iap --command='
+  sudo -u joblander bash -c "cd /home/joblander/self-healing && git checkout -- dispatcher/dist && git pull"
+  # then, as the change requires:
+  sudo -u joblander bash -c "cd /home/joblander/self-healing/dispatcher && npm ci && npx tsc"
+  sudo systemctl restart claude-code-vm-job-dispatcher   # dispatcher changes (only when /status busy:false)
+  # watcher / monitor changes take effect on the next cron tick
+'
+```
+After changing `init.sh` or Terraform, run `terraform apply` to refresh the VM's
+startup-script metadata so a future re-provision stays reproducible.
+
+**Check health:** `curl -s localhost:4100/status` on the VM → `dryRun`, `busy`,
+`lastPrecheck`, `lastHealthcheck`, plus recent runs via `/feed`.
+
+---
 
 ## Secrets (Secret Manager, project meet-assistant-6d8ad)
 
-- `self-healing-dispatcher-env` — full dispatcher .env (split into individual
-  secrets in Phase 2)
-- `self-healing-trigger-token` — X-Dispatch-Token for POST /trigger
-- `HEALTH_OUTPUT_HMAC_KEY`, `linear-api-key`, `joblander-sentry-monitor-token` — pre-existing, read by watcher/triage
+| Secret | Used by |
+|---|---|
+| `self-healing-dispatcher-env` | dispatcher `.env` (rendered by init) |
+| `self-healing-workspace-env` | `workspace/.env` — TG_BOT_TOKEN/TG_CHAT_ID for notify.sh |
+| `self-healing-trigger-token` | `X-Dispatch-Token` for POST /trigger (watcher → dispatcher) |
+| `self-healing-gh-token` | git clone + dispatcher auto-merge (interim) |
+| `claude-code-oauth-token` | the dispatcher / monitor Claude sessions |
+| `HEALTH_OUTPUT_HMAC_KEY` | watcher signs its `/health/output` probe |
+| `linear-api-key` | watcher/poller GraphQL + the vendored linear MCP |
+| `joblander-sentry-monitor-token` | monitor triage + the vendored sentry MCP |
+| `qa-test-user-password` | granted to the SA (reserved) |
 
-One-time manual steps after provisioning (documented, unavoidable):
-Claude subscription OAuth login (`claude` CLI) for the dispatcher agent.
+SA `self-healing-agent` project roles: `logging.viewer`, `logging.logWriter`,
+`monitoring.metricWriter`, `datastore.viewer` (Firestore reads via ADC), plus
+per-secret `secretAccessor` and bucket-scoped `objectAdmin` on
+`gs://joblander-agent-logs`.
 
-## Backups / recovered artifacts
+---
 
+## Alerts (Terraform-managed)
+
+- **Dead-man:** log-metric on `WATCHER_HEARTBEAT` absent 5 min → email. The
+  watcher pages on prod, but nothing pages if the watcher itself dies — this closes
+  that hole (its own failure domain).
+- **Backstop:** meetings-saved absent 4h → email (the hand-made JOB-651 policy, as
+  code).
+
+---
+
+## Backups / recovered artifacts (GCS)
+
+- `gs://joblander-agent-logs/backups/loop-final-2026-07-17.tgz` — full snapshot of
+  the loop components (dispatcher + state/traces, watcher, monitoring state) taken
+  when they were removed from the legacy VM
 - `gs://joblander-agent-logs/backups/atlas-memory-2026-07-15.dump` — final pg_dump
-  of the retired agent-memory DB (owner: nobody reads it; container to be removed
-  at cutover)
-- `gs://joblander-agent-logs/backups/dispatcher-state-2026-07-15.tgz` — full
-  dispatcher dir snapshot (state, traces, .env) as of extraction
+  of the retired agent-memory DB
+- `gs://joblander-agent-logs/backups/dispatcher-state-2026-07-15.tgz` — early
+  dispatcher dir snapshot
 
-## Status / constraints
+---
 
-- Linear: JOB-731. Old VM `joblander-agents` STAYS until explicit owner signal —
-  no cutover, no cleanup without it.
-- Phases: 0 rescue (done) → 1 code (TS reconstruction + watcher port + CI) →
-  2 terraform + init → 3 new VM, self-tested, parallel run → 4 cutover (owner signal).
+## Open items
+
+- **Full legacy-VM cleanup** (owner signal): retire atlas-memory (backed up),
+  decide on dead caddy domains, kill leftover experiment dirs. The loop is already
+  off the old VM; this is the remaining housekeeping.
+- **GitHub App / machine identity** for auto-merge, replacing the interim copy of
+  the owner's `gh` token (needs a one-time owner setup in the GitHub org).
+- **claude-oauth-token expiry** — the healthcheck verifies presence, not validity.
+
+Tracking: Linear **JOB-731**.
