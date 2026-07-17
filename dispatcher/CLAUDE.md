@@ -25,6 +25,30 @@ against real logs and real code before you act. You never spam the Owner.
 - Linear team: **`JobLander`**.
 - All log queries: `gcloud logging read "..." --project=meet-assistant-6d8ad`.
 
+## Tools available in this session
+
+You investigate with Bash **plus** two vendored read-capable MCP servers wired
+into this session (`mcp/firebase` and `mcp/sentry` in the self-healing repo):
+
+- **`gcloud` (via Bash)** — Cloud Run / Cloud Functions / GCE logs and service
+  descriptions. Your primary evidence for reproducing a log-based signature.
+- **`mcp__firebase__firestore_*`** — read Firestore documents/collections
+  directly during investigation (meetings, users, sessions, etc.) instead of
+  scripting the Admin SDK. Read tools: `firestore_get_document`,
+  `firestore_list_documents`, `firestore_query_collection`,
+  `firestore_list_collections`, plus `auth_get_user`. (Write/auth-mutation
+  tools exist but fail-closed — the VM service account has read-only perms; do
+  not rely on them.)
+- **`mcp__sentry__sentry_list_issues`** / **`mcp__sentry__sentry_get_issue`** —
+  frontend (`joblander-app`) error groups and the latest event for one issue.
+- **Bash → Linear GraphQL** (`https://api.linear.app/graphql`, key from Secret
+  Manager `linear-api-key`) — read tickets, claim, comment, transition. There
+  is no Linear MCP.
+
+**When to use which:** `gcloud` for logs and deploy/revision facts; the
+**firebase MCP** for Firestore document state; the **sentry MCP** for frontend
+error groups; **Bash + Linear GraphQL** for all ticket reads/writes.
+
 ## Step 1 — PICK exactly one ticket
 
 **You handle `monitor`-origin tickets ONLY** — the `[Monitor]`-prefixed
@@ -34,9 +58,17 @@ Self-Healing Loop in the root CLAUDE.md). Human-authored feature / improvement
 tickets are **NOT yours** — picking one up and auto-merging it would overstep
 the sanctioned scope. Never touch a ticket that lacks the `monitor` label.
 
-Via the Linear MCP, read team `JobLander` issues that carry the label
-**`monitor`**, in state **`To Do`** first, then **`Backlog`**. (Monitor files
-into Backlog; To Do is checked first in case one was promoted.)
+Read team `JobLander` issues that carry the label **`monitor`**, in state
+**`To Do`** first, then **`Backlog`** (Monitor files into Backlog; To Do is
+checked first in case one was promoted). There is **no Linear MCP** in this
+session — Linear is reached via **Bash → GraphQL**: `curl -s -X POST
+https://api.linear.app/graphql` with header `Authorization: <linear-api-key>`
+(the key comes from Secret Manager: `gcloud secrets versions access latest
+--secret=linear-api-key --project=meet-assistant-6d8ad`; the `LINEAR_API_KEY`
+env var, if set, short-circuits the lookup). Every Linear action named below
+(`update_issue`, `create_comment`, assigning yourself, state transitions) means
+the corresponding Linear **GraphQL query/mutation** — `issues(...)`,
+`issueUpdate`, `commentCreate` — not an MCP tool call.
 
 **Filter out:**
 - Any issue **without the `monitor` label** (features/improvements/epics are
@@ -107,7 +139,7 @@ THRESHOLDS" — `staleAgeHrs`, `freshnessWindowHrs`):
 **§1 — Still occurring? Re-reproduce in the fresh window** (use the source that
 matches the signal):
 - backend / MCP (Cloud Run): `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="<svc>" AND severity>=ERROR AND jsonPayload.message=~"<sig>"' --project=meet-assistant-6d8ad --freshness=<freshnessWindowHrs>h --limit=20`
-- frontend (Sentry): events for that issue within the window.
+- frontend (Sentry): `mcp__sentry__sentry_get_issue` for that issue's latest event / counts within the window (or `mcp__sentry__sentry_list_issues` to re-find it).
 - perf / metric (e.g. transcription delay): re-measure the current value vs the threshold.
 - **Zero hits / metric back within threshold → outcome `stale`** → Linear
   **Canceled** with evidence ("not observed since <last real timestamp>; signature
