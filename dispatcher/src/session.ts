@@ -25,6 +25,31 @@ import * as path from "path";
 let busy = false;
 let currentTurnId: string | null = null;
 
+// Vendored stdio MCP servers live at the repo root (self-healing/mcp/*), one
+// level above the dispatcher package. __dirname at runtime is
+// <repo>/dispatcher/dist, so ../.. resolves to the repo root regardless of the
+// process CWD. These give the investigation session real Firestore reads
+// (firebase MCP) and Sentry issue lookups (sentry MCP) instead of only Bash.
+const REPO_ROOT = path.resolve(__dirname, "..", "..");
+const FIREBASE_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "firebase", "index.js");
+const SENTRY_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "sentry", "index.js");
+
+/**
+ * Env handed to the child MCP processes. Inherit the full parent env (PATH,
+ * HOME, GOOGLE_* / gcloud config are all required for ADC + `gcloud secrets`),
+ * then ensure GCP_PROJECT_ID is set for both servers. GCP_PRIVATE_KEY_BASE_64 /
+ * GCP_CLIENT_EMAIL (firebase cert fallback) and SENTRY_TOKEN pass through
+ * automatically when present in the dispatcher's own environment.
+ */
+function buildMcpEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === "string") env[k] = v;
+  }
+  env.GCP_PROJECT_ID = env.GCP_PROJECT_ID || config.gcpProject;
+  return env;
+}
+
 export function isBusy(): boolean {
   return busy;
 }
@@ -248,7 +273,23 @@ export async function runDispatchSession(reason: string): Promise<RunSummary> {
       options: {
         model: config.claudeModel,
         maxTurns: config.claudeMaxTurns,
-        allowedTools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"],
+        allowedTools: [
+          "Bash",
+          "Read",
+          "Edit",
+          "Write",
+          "Glob",
+          "Grep",
+          "Agent",
+          // Vendored MCP servers (see mcpServers below). Wildcard grants every
+          // tool the server exposes; the SDK validates `mcp__<server>__*`.
+          "mcp__firebase__*",
+          "mcp__sentry__*",
+        ],
+        mcpServers: {
+          firebase: { command: "node", args: [FIREBASE_MCP_ENTRY], env: buildMcpEnv() },
+          sentry: { command: "node", args: [SENTRY_MCP_ENTRY], env: buildMcpEnv() },
+        },
         permissionMode: "bypassPermissions",
         abortController,
       },

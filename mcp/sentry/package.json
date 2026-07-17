@@ -1,0 +1,14 @@
+{
+  "name": "sentry-mcp-server",
+  "version": "1.0.0",
+  "description": "Minimal stdio MCP server exposing read-only Sentry issue lookups (list + get) for the self-healing dispatcher's investigation session",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "zod": "^3.23.8"
+  }
+}
