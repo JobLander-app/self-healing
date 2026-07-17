@@ -5,6 +5,7 @@ const express_1 = require("express");
 const session_1 = require("../session");
 const trace_1 = require("../trace");
 const poller_1 = require("../poller");
+const healthcheck_1 = require("../healthcheck");
 const config_1 = require("../config");
 const router = (0, express_1.Router)();
 exports.statusRouter = router;
@@ -35,6 +36,8 @@ router.get("/status", (_req, res) => {
         recentCostUsd: Math.round(recentCost * 100) / 100,
         // JOB-731: pre-check observability. null until the first pre-checked tick.
         lastPrecheck: (0, poller_1.getLastPrecheck)(),
+        // JOB-731 follow-up: dependency healthcheck. null until the first run.
+        lastHealthcheck: (0, healthcheck_1.getLastHealthcheck)(),
     });
 });
 //# sourceMappingURL=status.js.map
