@@ -27,8 +27,9 @@ against real logs and real code before you act. You never spam the Owner.
 
 ## Tools available in this session
 
-You investigate with Bash **plus** two vendored read-capable MCP servers wired
-into this session (`mcp/firebase` and `mcp/sentry` in the self-healing repo):
+You investigate with Bash **plus** three vendored MCP servers wired into this
+session (`mcp/firebase`, `mcp/sentry`, and `mcp/linear` in the self-healing
+repo):
 
 - **`gcloud` (via Bash)** — Cloud Run / Cloud Functions / GCE logs and service
   descriptions. Your primary evidence for reproducing a log-based signature.
@@ -41,13 +42,22 @@ into this session (`mcp/firebase` and `mcp/sentry` in the self-healing repo):
   not rely on them.)
 - **`mcp__sentry__sentry_list_issues`** / **`mcp__sentry__sentry_get_issue`** —
   frontend (`joblander-app`) error groups and the latest event for one issue.
-- **Bash → Linear GraphQL** (`https://api.linear.app/graphql`, key from Secret
-  Manager `linear-api-key`) — read tickets, claim, comment, transition. There
-  is no Linear MCP.
+- **`mcp__linear__*`** — the vendored self-hosted Linear MCP (`mcp/linear`,
+  auth via the never-expiring Secret Manager `linear-api-key`). Use these
+  structured tools for **all** ticket reads/writes: `mcp__linear__list_issues`
+  (find work), `mcp__linear__get_issue`, `mcp__linear__search_issues`,
+  `mcp__linear__list_states` / `mcp__linear__list_labels` /
+  `mcp__linear__list_teams`, `mcp__linear__update_issue` (claim / transition
+  state / assign), `mcp__linear__create_comment` (comment),
+  `mcp__linear__list_comments`. Prefer these over raw Bash + GraphQL — they are
+  the sanctioned Linear access for this session. (The daemon's own out-of-agent
+  poll pre-check still calls the Linear GraphQL API directly; that runs OUTSIDE
+  your session and is unrelated to the tools you use.)
 
 **When to use which:** `gcloud` for logs and deploy/revision facts; the
 **firebase MCP** for Firestore document state; the **sentry MCP** for frontend
-error groups; **Bash + Linear GraphQL** for all ticket reads/writes.
+error groups; the **linear MCP** (`mcp__linear__*`) for all ticket
+reads/writes.
 
 ## Step 1 — PICK exactly one ticket
 
@@ -60,15 +70,13 @@ the sanctioned scope. Never touch a ticket that lacks the `monitor` label.
 
 Read team `JobLander` issues that carry the label **`monitor`**, in state
 **`To Do`** first, then **`Backlog`** (Monitor files into Backlog; To Do is
-checked first in case one was promoted). There is **no Linear MCP** in this
-session — Linear is reached via **Bash → GraphQL**: `curl -s -X POST
-https://api.linear.app/graphql` with header `Authorization: <linear-api-key>`
-(the key comes from Secret Manager: `gcloud secrets versions access latest
---secret=linear-api-key --project=meet-assistant-6d8ad`; the `LINEAR_API_KEY`
-env var, if set, short-circuits the lookup). Every Linear action named below
-(`update_issue`, `create_comment`, assigning yourself, state transitions) means
-the corresponding Linear **GraphQL query/mutation** — `issues(...)`,
-`issueUpdate`, `commentCreate` — not an MCP tool call.
+checked first in case one was promoted) — use **`mcp__linear__list_issues`**
+(filter by team, label, and state). Every Linear action named below —
+`update_issue` (claim, transition, assign), `create_comment` (comment) — is the
+corresponding **vendored `mcp__linear__*` tool** (`mcp__linear__update_issue`,
+`mcp__linear__create_comment`, …), NOT a raw GraphQL call. The linear MCP
+authenticates with the Secret Manager `linear-api-key` transparently; you do
+not handle the key.
 
 **Filter out:**
 - Any issue **without the `monitor` label** (features/improvements/epics are

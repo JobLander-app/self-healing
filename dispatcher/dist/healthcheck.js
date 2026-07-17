@@ -78,6 +78,7 @@ const execFileAsync = (0, util_1.promisify)(child_process_1.execFile);
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const FIREBASE_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "firebase", "index.js");
 const SENTRY_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "sentry", "index.js");
+const LINEAR_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "linear", "index.js");
 function buildMcpEnv() {
     const env = {};
     for (const [k, v] of Object.entries(process.env)) {
@@ -85,6 +86,11 @@ function buildMcpEnv() {
             env[k] = v;
     }
     env.GCP_PROJECT_ID = env.GCP_PROJECT_ID || config_1.config.gcpProject;
+    // Linear MCP child auth for probeLinear — cachedLinearKey is populated by the
+    // resolveLinearApiKey() awaited at the top of probeLinear before probeMcp
+    // spawns the child. Harmless for the firebase/sentry children.
+    if (cachedLinearKey)
+        env.LINEAR_API_KEY = env.LINEAR_API_KEY || cachedLinearKey;
     return env;
 }
 let lastHealthcheck = null;
@@ -266,29 +272,20 @@ async function probeClaudeOauth() {
     return `token present (${token.length} chars); expiry not checked (known gap)`;
 }
 async function probeLinear() {
-    // Minimal issues(first:1) GraphQL ping (mirrors poller pre-check shape):
-    // HTTP 200 + no GraphQL errors = the queue is reachable and the key is valid.
-    const key = await resolveLinearApiKey();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
-    try {
-        const res = await fetch("https://api.linear.app/graphql", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: key },
-            body: JSON.stringify({ query: "query { issues(first: 1) { nodes { identifier } } }" }),
-            signal: controller.signal,
-        });
-        if (!res.ok)
-            throw new Error(`Linear HTTP ${res.status}`);
-        const body = (await res.json());
-        if (body.errors && body.errors.length > 0) {
-            throw new Error(`GraphQL errors: ${JSON.stringify(body.errors).slice(0, 200)}`);
-        }
-        return "issues(first:1) 200, no GraphQL errors";
-    }
-    finally {
-        clearTimeout(timer);
-    }
+    // stdio MCP: initialize → tools/list(>0) → list_teams (not isError). This
+    // smokes the ACTUAL path the agent now uses — the vendored mcp/linear server
+    // spawned with the never-expiring LINEAR_API_KEY — not just that the Linear
+    // GraphQL API is reachable. resolveLinearApiKey() runs first so buildMcpEnv()
+    // can inject the key into the child (and so an unreadable secret fails fast
+    // with a clear message instead of a generic MCP isError).
+    await resolveLinearApiKey();
+    const { detail } = await probeMcp({
+        entry: LINEAR_MCP_ENTRY,
+        smokeTool: "list_teams",
+        smokeArgs: {},
+        budgetMs: 15_000,
+    });
+    return detail;
 }
 const PROBES = [
     { dep: "firebase", run: probeFirebase },

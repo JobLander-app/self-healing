@@ -1,0 +1,14 @@
+{
+  "name": "linear-mcp-server",
+  "version": "2.1.0",
+  "description": "Vendored stdio MCP server for Linear (issues/projects/comments/states/labels) — read+write project-management tools for the self-healing dispatcher's investigation session; auth via LINEAR_API_KEY (Secret Manager 'linear-api-key'), a never-expiring API key rather than the managed OAuth connector",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "zod": "^3.25.76"
+  }
+}
