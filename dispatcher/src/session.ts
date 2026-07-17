@@ -21,6 +21,10 @@ import { isLimitError, pauseFromLimitError } from "./pause";
 import { sendTelegram } from "./notify";
 import * as fs from "fs";
 import * as path from "path";
+import { execFile } from "child_process";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
 
 let busy = false;
 let currentTurnId: string | null = null;
@@ -33,6 +37,37 @@ let currentTurnId: string | null = null;
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const FIREBASE_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "firebase", "index.js");
 const SENTRY_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "sentry", "index.js");
+// Vendored self-hosted Linear MCP (mcp/linear). Replaces claude.ai's managed
+// Linear connector, whose OAuth login kept expiring — this reads a
+// never-expiring Linear API key (Secret Manager `linear-api-key`, injected into
+// the child env below). Gives the agent structured Linear access
+// (list_issues/get_issue/update_issue/create_comment/…) instead of raw
+// Bash+GraphQL.
+const LINEAR_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "linear", "index.js");
+
+// LINEAR_API_KEY for the vendored linear MCP child. The dispatcher process does
+// NOT carry it in env (the poller resolves it from Secret Manager at runtime),
+// so we resolve it ONCE here and cache it, then inject it into every MCP child's
+// env via buildMcpEnv(). Mirrors poller.ts's resolveLinearApiKey (not exported
+// there; importing it would create a session↔poller cycle). Injecting the key
+// into the firebase/sentry children too is harmless — they ignore it.
+let cachedLinearKey = "";
+async function resolveLinearApiKey(): Promise<string> {
+  if (cachedLinearKey) return cachedLinearKey;
+  if (process.env.LINEAR_API_KEY) {
+    cachedLinearKey = process.env.LINEAR_API_KEY;
+    return cachedLinearKey;
+  }
+  const { stdout } = await execFileAsync(
+    "gcloud",
+    ["secrets", "versions", "access", "latest", "--secret=linear-api-key", `--project=${config.gcpProject}`],
+    { timeout: 15_000 },
+  );
+  const key = stdout.trim();
+  if (!key) throw new Error("linear-api-key resolved empty from Secret Manager");
+  cachedLinearKey = key;
+  return key;
+}
 
 /**
  * Env handed to the child MCP processes. Inherit the full parent env (PATH,
@@ -47,6 +82,10 @@ function buildMcpEnv(): Record<string, string> {
     if (typeof v === "string") env[k] = v;
   }
   env.GCP_PROJECT_ID = env.GCP_PROJECT_ID || config.gcpProject;
+  // Linear MCP child auth. Resolved once (resolveLinearApiKey, awaited before
+  // the query() below) so cachedLinearKey is populated by the time this runs.
+  // Harmless for the firebase/sentry children.
+  if (cachedLinearKey) env.LINEAR_API_KEY = env.LINEAR_API_KEY || cachedLinearKey;
   return env;
 }
 
@@ -249,6 +288,19 @@ export async function runDispatchSession(reason: string): Promise<RunSummary> {
 
   const prompt = `${systemPrompt}${freshnessPolicy}${dryRunBanner}\n\n---\n\n${RUN_INSTRUCTION}`;
 
+  // Resolve LINEAR_API_KEY once before spawning the MCP children so
+  // buildMcpEnv() can inject it into the linear MCP child. Fail-soft: if the key
+  // can't be resolved, the linear MCP still starts but its tool calls fail —
+  // the rest of the session (firebase/sentry/Bash) is unaffected.
+  try {
+    await resolveLinearApiKey();
+  } catch (err) {
+    console.warn(
+      "[session] LINEAR_API_KEY resolve failed — linear MCP tools will be unavailable this run:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+
   let output = "";
   let costUsd = 0;
   let numTurns = 0;
@@ -285,10 +337,12 @@ export async function runDispatchSession(reason: string): Promise<RunSummary> {
           // tool the server exposes; the SDK validates `mcp__<server>__*`.
           "mcp__firebase__*",
           "mcp__sentry__*",
+          "mcp__linear__*",
         ],
         mcpServers: {
           firebase: { command: "node", args: [FIREBASE_MCP_ENTRY], env: buildMcpEnv() },
           sentry: { command: "node", args: [SENTRY_MCP_ENTRY], env: buildMcpEnv() },
+          linear: { command: "node", args: [LINEAR_MCP_ENTRY], env: buildMcpEnv() },
         },
         permissionMode: "bypassPermissions",
         abortController,

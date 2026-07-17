@@ -182,7 +182,7 @@ if [ -d "$SH_DIR" ]; then
   # firebase (Firestore reads via ADC — needs the SA + datastore.viewer) and
   # sentry. `npm ci` only — they run from JS, no build step. Without their
   # node_modules the child procs fail-closed (tools absent; dispatcher still runs).
-  for mcp in firebase sentry; do
+  for mcp in firebase sentry linear; do
     if [ -f "$SH_DIR/mcp/$mcp/package.json" ]; then
       (cd "$SH_DIR/mcp/$mcp" && as_agent npm ci --omit=dev) \
         || add_todo "mcp/$mcp npm ci failed — the $mcp MCP tools will be absent until fixed; re-run init"
