@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { isBusy, getCurrentTurnId } from "../session";
 import { getRecentRuns, getLastRun } from "../trace";
 import { getLastPrecheck } from "../poller";
+import { getLastHealthcheck } from "../healthcheck";
 import { config } from "../config";
 
 const router = Router();
@@ -34,6 +35,8 @@ router.get("/status", (_req: Request, res: Response) => {
     recentCostUsd: Math.round(recentCost * 100) / 100,
     // JOB-731: pre-check observability. null until the first pre-checked tick.
     lastPrecheck: getLastPrecheck(),
+    // JOB-731 follow-up: dependency healthcheck. null until the first run.
+    lastHealthcheck: getLastHealthcheck(),
   });
 });
 

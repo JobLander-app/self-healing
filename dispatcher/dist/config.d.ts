@@ -27,3 +27,7 @@ export declare const config: {
     readonly gcpProject: string;
     readonly nodeEnv: string;
 };
+export declare const LINEAR_JOB_TEAM_ID = "b12df7a0-4845-47fd-be59-8f6d03d9ae8d";
+export declare const LINEAR_MONITOR_LABEL_ID = "3cf3f731-dccf-43fa-861e-cba73998b183";
+export declare const LINEAR_API_KEY_SECRET = "linear-api-key";
+export declare const CLAUDE_OAUTH_SECRET = "claude-code-oauth-token";

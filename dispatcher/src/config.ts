@@ -67,3 +67,17 @@ export const config = {
 
   nodeEnv: process.env.NODE_ENV || "development",
 } as const;
+
+// ---------------------------------------------------------------------------
+// Healthcheck routing (JOB-731 follow-up).
+//
+// Linear IDs are a MIRROR of watcher/src/config.ts `LINEAR.*` (cross-package
+// coupling — keep in sync). Used by healthcheck.ts to create + dedup the
+// inward `[SelfHeal]` repair tickets the dispatcher's own poll loop picks up.
+// ---------------------------------------------------------------------------
+export const LINEAR_JOB_TEAM_ID = "b12df7a0-4845-47fd-be59-8f6d03d9ae8d";
+export const LINEAR_MONITOR_LABEL_ID = "3cf3f731-dccf-43fa-861e-cba73998b183";
+
+// Secret Manager secret names probed by the healthcheck.
+export const LINEAR_API_KEY_SECRET = "linear-api-key";
+export const CLAUDE_OAUTH_SECRET = "claude-code-oauth-token";

@@ -12,7 +12,7 @@
  * Port: handy-daemon owns :4000. We default to :4100 to avoid any collision.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.config = void 0;
+exports.CLAUDE_OAUTH_SECRET = exports.LINEAR_API_KEY_SECRET = exports.LINEAR_MONITOR_LABEL_ID = exports.LINEAR_JOB_TEAM_ID = exports.config = void 0;
 exports.config = {
     httpPort: parseInt(process.env.HTTP_PORT || "4100", 10),
     claudeModel: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
@@ -58,4 +58,16 @@ exports.config = {
     gcpProject: process.env.GCP_PROJECT || "meet-assistant-6d8ad",
     nodeEnv: process.env.NODE_ENV || "development",
 };
+// ---------------------------------------------------------------------------
+// Healthcheck routing (JOB-731 follow-up).
+//
+// Linear IDs are a MIRROR of watcher/src/config.ts `LINEAR.*` (cross-package
+// coupling — keep in sync). Used by healthcheck.ts to create + dedup the
+// inward `[SelfHeal]` repair tickets the dispatcher's own poll loop picks up.
+// ---------------------------------------------------------------------------
+exports.LINEAR_JOB_TEAM_ID = "b12df7a0-4845-47fd-be59-8f6d03d9ae8d";
+exports.LINEAR_MONITOR_LABEL_ID = "3cf3f731-dccf-43fa-861e-cba73998b183";
+// Secret Manager secret names probed by the healthcheck.
+exports.LINEAR_API_KEY_SECRET = "linear-api-key";
+exports.CLAUDE_OAUTH_SECRET = "claude-code-oauth-token";
 //# sourceMappingURL=config.js.map

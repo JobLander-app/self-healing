@@ -3,6 +3,7 @@ import { startApi } from "./api";
 import { pollOnce, startPollCron, stopPollCron, startResumeWatcher } from "./poller";
 import { pauseRemainingMs, readPause } from "./pause";
 import { hydrateFromDisk } from "./trace";
+import { runHealthcheck, startHealthcheckCron } from "./healthcheck";
 
 async function main() {
   console.log("[claude-code-vm-job-dispatcher] Starting...");
@@ -22,6 +23,14 @@ async function main() {
   // 3. Start the self-poll cron + the rate-limit resume watcher.
   startPollCron();
   startResumeWatcher();
+
+  // 3.5 Dependency healthcheck (JOB-731 follow-up): verify the toolchain the
+  //     dispatch session depends on (firebase/sentry MCP, gcloud, Claude OAuth
+  //     token, Linear). Runs once now (non-blocking, fail-soft — never crashes
+  //     the daemon) + every 6h. On a downed dep it files an inward `monitor`
+  //     ticket the poll loop repairs.
+  startHealthcheckCron();
+  runHealthcheck().catch((err) => console.error("[claude-code-vm-job-dispatcher] startup healthcheck error:", err));
 
   // 4. NO Telegram on start/stop/runs — the alerts channel is P0-only.
   //    Status is available via /status and /self-healing-report.
