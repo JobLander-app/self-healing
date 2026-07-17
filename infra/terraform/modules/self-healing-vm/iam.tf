@@ -14,11 +14,15 @@ resource "google_service_account" "agent" {
 #   logging.logWriter    VM writes its own logs (incl. the WATCHER_HEARTBEAT
 #                        entries the dead-man alert watches)
 #   monitoring.metricWriter  ops metrics from the VM
+#   datastore.viewer     read-only Firestore for the vendored firebase MCP
+#                        (ADC — no key file); dispatcher reads meetings/users
+#                        docs while investigating a bug. Read-only on purpose.
 resource "google_project_iam_member" "roles" {
   for_each = toset([
     "roles/logging.viewer",
     "roles/logging.logWriter",
     "roles/monitoring.metricWriter",
+    "roles/datastore.viewer",
   ])
 
   project = var.project_id
