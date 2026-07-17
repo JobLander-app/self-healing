@@ -1,31 +1,45 @@
 # self-healing
 
-JobLander's self-healing loop — the system that detects "product output died" in
-production, pages the owner, files a ticket, and autonomously fixes it. Born from
-the **JOB-651** post-mortem (a 19-hour silent STT outage: zero errors, zero
-output — every existing monitor watched errors, none watched product OUTPUT).
-Extracted into this repo per owner directive (**JOB-731**, 2026-07-14): the
-previous incarnation lived untracked on the `joblander-agents` VM and the
-dispatcher's TypeScript sources had been lost.
+**A standalone product: an autonomous production self-healing loop.** It detects
+when a service's *product output* dies (not just when it throws errors), pages the
+owner, files a ticket, and autonomously investigates → fixes → ships. The pattern
+is the product; a *consumer* plugs in its own output detector, its dependency set,
+and the repo to fix.
+
+**Consumers.** JobLander is **consumer #1** — the first (and currently only)
+tenant. Everything consumer-specific here is JobLander's configuration, not the
+loop itself: the detector endpoint (`/health/output`), the dependencies the fixer
+reaches (firebase / sentry / linear / gcloud), the target repos it patches, and
+the secrets. Generalizing to additional consumers is on the roadmap; today the
+consumer wiring is hard-coded to JobLander — this doc is honest about that, not
+aspirational.
+
+Born from a JobLander incident, **JOB-651** (a 19-hour silent STT outage: zero
+errors, zero output — every existing monitor watched errors, none watched product
+OUTPUT). Extracted into this repo (**JOB-731**, 2026-07-14) from an untracked
+incarnation on a shared VM whose dispatcher TypeScript sources had been lost.
 
 **Design goal:** `terraform apply` + startup init = the whole loop stands up on a
 fresh VM and works. Nothing hand-crafted on disk, all secrets in Secret Manager,
-all alert policies in Terraform, all the dispatcher's tools (MCP servers) vendored
-in this repo. Reproducibility is the point — the original was one disk failure
-away from non-existence.
+all alert policies in Terraform, all the fixer's tools (MCP servers) vendored in
+this repo. Reproducibility is the point — the original was one disk failure away
+from non-existence.
 
 **Status (2026-07-17):** fully live on VM `self-healing-1` (europe-west1-b,
-Terraform-managed). All three roles — watcher, hourly monitor, dispatcher — run
-there; the legacy `joblander-agents` VM has had its loop components removed and
-now only hosts unrelated services (meeting-lab, cws crons) pending full cleanup.
+Terraform-managed, GCP project `meet-assistant-6d8ad`), healing JobLander prod.
+All three roles — watcher, hourly monitor, dispatcher — run there.
 
 ---
 
 ## The loop
 
+The **detector** is the consumer's contract with the loop: any endpoint that
+answers "is product output alive?" for that consumer. Everything else (watcher,
+monitor, dispatcher) is the reusable engine.
+
 | Layer | What it answers | Code | Runs |
 |---|---|---|---|
-| **Detector** `/health/output` | "did value reach the user?" per region vs same-window-yesterday baseline (JOB-668) | `backend` repo, `src/services/health-output/` | inside the backend service (Cloud Run, 3 regions) — NOT this repo |
+| **Detector** (consumer-owned) | "did value reach the user?" — JobLander's is `/health/output`, per region vs same-window-yesterday baseline (JOB-668) | JobLander `backend` repo, `src/services/health-output/` | inside the consumer's service (Cloud Run, 3 regions) — NOT this repo |
 | **Watcher** | polls the detector 1/min; on 3 consecutive bad samples: Telegram P0 → Linear `[Monitor]` ticket → wakes the dispatcher; RECOVERED on clear. Hysteresis avoids flapping (JOB-670, JOB-725) | `watcher/` | minute cron on the VM |
 | **Hourly monitor** | error-side triage (Cloud Run / Cloud Functions / LiveKit VMs / Sentry) → escalations + verbatim P0 alerts; a Claude session sends only what the deterministic `triage.py` prepared | `monitor/` | hourly cron on the VM |
 | **Dispatcher** | autonomous fixer: picks ONE `monitor`-labeled Linear ticket per tick, investigates prod, writes a fix, opens a PR, and auto-merges (the sanctioned Self-Healing Loop exception) — or proves it's not a bug | `dispatcher/` | systemd on the VM, HTTP :4100 (`/trigger`, `/status`, `/feed`) |
