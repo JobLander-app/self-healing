@@ -191,7 +191,12 @@ the anomaly**. Any credible intentional explanation → you do **not** touch pro
    - region → `region:<gcp-region>` (e.g. `region:australia-southeast1`)
    - a specific host / instance → `gcp_instance:<name>` (e.g.
      `gcp_instance:lk-au-southeast1`)
-   - target repo → `repo:<name>`
+   - target repo → `repo:<github-slug>` — the repo's **GitHub name exactly as it
+     appears in its PR URLs**, which is how the change feed stores it (from the PR
+     payload's `base.repo.name`). Note the frontend repo's slug is **`joblander.app`**
+     (with a dot), NOT `joblander-app` — use the dotted form here so it matches the
+     feed. `gcp_instance` / `region` / `service` come canonical from audit logs, so
+     no such caveat applies to them.
 
 2. **Ask the change feed what changed.** The local change-ingest service (see the
    injected "CHANGE FEED" block for the exact base URL) records every recent prod
