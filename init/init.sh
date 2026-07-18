@@ -269,6 +269,19 @@ if [ -d "$SH_DIR" ]; then
     fi
   done
 
+  # change-ingest build (Change Context / INTENT GATE feed). Pulls prod changes
+  # into a local SQLite change store the dispatcher queries before fixing. v1
+  # reuses the SA's logging.viewer + self-healing-gh-token + linear-api-key — no
+  # new IAM/secret. better-sqlite3 is a native module; if npm ci fails to build
+  # it, the todo flags it and the dispatcher's INTENT GATE simply fails OPEN
+  # (feed unreachable → fix flow proceeds as before).
+  if [ -f "$SH_DIR/change-ingest/tsconfig.json" ]; then
+    (cd "$SH_DIR/change-ingest" && as_agent npm ci && as_agent npx tsc) \
+      || add_todo "change-ingest build failed (native better-sqlite3?) — INTENT GATE feed absent; dispatcher fails OPEN. Check $LOG_FILE"
+  else
+    add_todo "change-ingest absent — dispatcher INTENT GATE has no change feed (fails OPEN); re-run init after it merges"
+  fi
+
   # ---- 10. systemd unit + cron ----------------------------------------------------
   log "[10/11] systemd + cron"
   # Dispatcher trace/turn logs (LOG_DIR in .env). Found during the stage-2 fire
@@ -285,6 +298,22 @@ if [ -d "$SH_DIR" ]; then
       || add_todo "dispatcher service failed to start — journalctl -u claude-code-vm-job-dispatcher"
   else
     add_todo "dispatcher service enabled but NOT started (missing .env or dist/index.js)"
+  fi
+
+  # change-ingest: SQLite data dir + systemd unit (localhost :4200 change feed).
+  mkdir -p /var/lib/self-healing
+  chown -R $AGENT_USER:$AGENT_USER /var/lib/self-healing
+  if [ -f "$SH_DIR/deploy/systemd/self-healing-change-ingest.service" ]; then
+    install -m 644 "$SH_DIR/deploy/systemd/self-healing-change-ingest.service" \
+      /etc/systemd/system/self-healing-change-ingest.service
+    systemctl daemon-reload
+    systemctl enable self-healing-change-ingest.service
+    if [ -f "$SH_DIR/change-ingest/dist/index.js" ]; then
+      systemctl restart self-healing-change-ingest.service \
+        || add_todo "change-ingest service failed to start — journalctl -u self-healing-change-ingest"
+    else
+      add_todo "change-ingest service enabled but NOT started (missing dist/index.js — build failed?)"
+    fi
   fi
 
   # whole-crontab install: deploy/cron/self-healing.crontab OWNS joblander's crontab

@@ -163,8 +163,75 @@ matches the signal):
   **`fixed-elsewhere`** → Linear **Done**, citing the commit/revision that
   resolved it. Do NOT re-fix.
 
-Only if the bug **still reproduces in the fresh window** do you proceed to Step 4
-to fix it.
+Only if the bug **still reproduces in the fresh window** do you proceed to the
+INTENT GATE, then Step 4.
+
+## Step 3.6 — INTENT GATE (was this anomaly an INTENTIONAL change? BEFORE you fix)
+
+A ticket says something *broke*. It cannot tell you whether that thing broke by
+**accident** or because **someone meant to change it** — a decommissioned VM, a
+deliberate deploy, a config cutover all look identical to a symptom-detector. The
+`lk-au-southeast1` incident is the canonical trap: the AU region was
+**intentionally decommissioned** (a closed Linear ticket + a cloud audit
+`instances.delete`), yet the monitor filed it as a P0 "server down." A fixer with
+no sense of intent would have "repaired" — re-provisioned — a server the org
+**decided to kill**, burning money and undoing a deliberate decision. **That is
+the single worst thing you can do.** This gate exists to make it impossible.
+
+**This is the crux of your discipline: you fail CLOSED.** Where the freshness gate
+asks "is it still real?", this gate asks "is it real *and unexplained by intent*?"
+You may fix **only** when you are confident **no recent intentional change explains
+the anomaly**. Any credible intentional explanation → you do **not** touch prod.
+
+**How to run it:**
+
+1. **Name the anomaly's entities.** From the ticket's service / region / repo /
+   host, list the concrete scopes it touches, as `type:id`:
+   - Cloud Run service → `service:<name>` (e.g. `service:joblander-audio-engine`)
+   - region → `region:<gcp-region>` (e.g. `region:australia-southeast1`)
+   - a specific host / instance → `gcp_instance:<name>` (e.g.
+     `gcp_instance:lk-au-southeast1`)
+   - target repo → `repo:<name>`
+
+2. **Ask the change feed what changed.** The local change-ingest service (see the
+   injected "CHANGE FEED" block for the exact base URL) records every recent prod
+   change — merged PRs, cloud audit events (incl. instance deletes and deploys),
+   and closed/updated Linear tickets. Query it for your entities over the lookback
+   window:
+   ```
+   curl -s "<CHANGE_FEED_URL>/changes?entity=gcp_instance:lk-au-southeast1&entity=region:australia-southeast1&since=<epoch_ms of now-72h>&until=<epoch_ms now>"
+   ```
+   Repeat `entity=` per scope (they are OR-matched). Each returned row carries an
+   `intent_text` — the human essence of that change (PR body, audit
+   `method+resource`, ticket description + closing comment).
+
+3. **Judge — YOUR reasoning, no separate tool.** Read the returned `intent_text`s
+   and decide whether any change **plausibly accounts for** this anomaly:
+   - **Explained** — a change on record accounts for it (a `instances.delete` on
+     the very host that is "down"; a closed "decommission AU" ticket; a deploy that
+     removed the endpoint). → **Do NOT fix.** Outcome **`intentional`**: Linear
+     **Canceled**, comment naming the explaining change(s) (id + one-line intent),
+     e.g. *"lk-au down is expected: audit `v1.compute.instances.delete
+     lk-au-southeast1` + closed JOB-XXX 'decommission AU'. No fix — intentional
+     decommission."* No PR, no code, no money burned.
+   - **Unexplained** — the feed returned nothing, or nothing that credibly explains
+     it → this is a genuine incident → proceed to Step 4 and fix.
+   - **Ambiguous / conflicting** (a change is *near* but you cannot confidently say
+     it explains the anomaly) → do **not** guess and do **not** fix. Outcome
+     **`backlogged`**, comment the candidate change(s) and why you're unsure, so a
+     human decides.
+
+**Fail-safe rules (do not violate):**
+- **You fix ONLY on a confident "unexplained".** `intentional` and `ambiguous`
+  never proceed to a prod change.
+- **Correlation fails OPEN on availability, CLOSED on judgment.** If the
+  change-ingest service is unreachable / errors / times out (curl fails), that is
+  NOT evidence of intent — proceed with the normal fix flow exactly as today (the
+  freshness gate remains your guard). The gate may only ever *add* a decline; it
+  must never block a real fix just because the feed is down. But when the feed DOES
+  answer and a change explains the anomaly, you MUST decline.
+- **Never re-provision, restart, or "restore" a resource** whose deletion/removal
+  appears in the change feed as an intentional audit event. Close `intentional`.
 
 ## Step 4 — DECIDE: real bug vs noise (you decide, no human lane)
 
@@ -288,13 +355,16 @@ this section. Always emit the final `[DISPATCH_RESULT]` marker.
 
 Always finish with exactly one line:
 ```
-[DISPATCH_RESULT] {"outcome":"fixed|not-a-bug|stale|fixed-elsewhere|backlogged|no-work","issue":"JOB-XXX or null","repo":"<repo or null>","pr":"<PR url or null>","note":"one-sentence summary"}
+[DISPATCH_RESULT] {"outcome":"fixed|not-a-bug|stale|fixed-elsewhere|intentional|backlogged|no-work","issue":"JOB-XXX or null","repo":"<repo or null>","pr":"<PR url or null>","note":"one-sentence summary"}
 ```
 Outcomes: `fixed` (real bug fixed + merged → Done) · `not-a-bug` (proven
 noise/client-side → Done/Canceled) · `stale` (no longer reproducible in the
 fresh window → Canceled, see Step 3.5) · `fixed-elsewhere` (was real but already
-resolved by a later commit/deploy → Done, cite it) · `backlogged` (honest
-dead-end → Backlog) · `no-work` (nothing to pick this tick).
+resolved by a later commit/deploy → Done, cite it) · `intentional` (the anomaly
+is explained by an intentional change on the change feed — decommission / deploy /
+config cutover — closed **Canceled** without a fix, see Step 3.6 INTENT GATE) ·
+`backlogged` (honest dead-end, or an ambiguous intent-match a human must judge →
+Backlog) · `no-work` (nothing to pick this tick).
 
 The daemon parses this to log the run, decide the Telegram one-liner, and move
 on to the next poll tick. A run without this marker is a bug.

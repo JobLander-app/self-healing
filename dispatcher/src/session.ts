@@ -114,18 +114,20 @@ const RUN_INSTRUCTION = `Это автономный poll-tick claude-code-vm-jo
 1. Выбери ОДИН тикет ТОЛЬКО с label "monitor" (To Do, затем Backlog; сортировка Urgent→High→Medium→Low, затем старейший createdAt; пропусти уже In Progress и назначенные на человека). ТИКЕТЫ БЕЗ label "monitor" (фичи/improvement/эпики) — НЕ ТВОИ, не трогай их вообще: авто-merge санкционирован только для monitor-origin.
 2. Заклейми его: переведи в In Progress и назначь на себя ДО любой работы. Если заклеймить нельзя — выйди.
 3. FRESHNESS GATE (Step 3.5 в конституции): тикет — это ГИПОТЕЗА о баге на момент создания, а не факт на момент починки. ПЕРЕД тем как чинить — заново подтверди, что баг ещё живой В ТЕКУЩЕМ коде (воспроизведи сигнатуру в свежем окне; проверь не пофикшено ли уже поздним деплоем/коммитом). Не воспроизводится → "stale". Уже решено другим коммитом/деплоем → "fixed-elsewhere". Не чини то, что не смог воспроизвести.
-4. Иначе доведи тикет до терминального состояния СВОИМ решением (исправить+смержить, доказать что это не баг, или — только для реального тупика — вернуть в Backlog с детальным комментарием).
-5. Один тикет за запуск. Заверши чисто.
+4. INTENT GATE (Step 3.6 в конституции): даже если баг воспроизводится — сначала спроси change feed (см. блок "CHANGE FEED" ниже), не объясняется ли аномалия НАМЕРЕННЫМ изменением прода (декоммишен / деплой / cutover). Изменение объясняет её → НЕ чини, outcome "intentional", Linear → Canceled с указанием объясняющего изменения. Никогда не восстанавливай/не переподнимай ресурс, чьё намеренное удаление есть в change feed. Только уверенно НЕОБЪЯСНЁННУЮ аномалию чинишь. Ты фейлишь CLOSED.
+5. Иначе доведи тикет до терминального состояния СВОИМ решением (исправить+смержить, доказать что это не баг, или — только для реального тупика/неоднозначного intent-match — вернуть в Backlog с детальным комментарием).
+6. Один тикет за запуск. Заверши чисто.
 
 В САМОМ КОНЦЕ выведи ровно одну строку машиночитаемого маркера итога:
-[DISPATCH_RESULT] {"outcome":"fixed|not-a-bug|stale|fixed-elsewhere|backlogged|no-work","issue":"JOB-XXX или null","repo":"<repo или null>","pr":"<PR url или null>","note":"краткое описание (1 предложение)"}
+[DISPATCH_RESULT] {"outcome":"fixed|not-a-bug|stale|fixed-elsewhere|intentional|backlogged|no-work","issue":"JOB-XXX или null","repo":"<repo или null>","pr":"<PR url или null>","note":"краткое описание (1 предложение)"}
 
 outcome:
 - "fixed" — реальный баг исправлен, PR смержен, Linear → Done
 - "not-a-bug" — доказано что это шум/transient/client-side, Linear → Done или Canceled
 - "stale" — баг больше не воспроизводится в свежем окне (перестал происходить), Linear → Canceled с доказательством "не наблюдается с <ts>"
 - "fixed-elsewhere" — баг был реальным, но уже устранён поздним коммитом/деплоем, Linear → Done со ссылкой на коммит/ревизию
-- "backlogged" — честный тупик, вернул в Backlog с деталями (единственный не-терминальный выход)
+- "intentional" — аномалия объясняется намеренным изменением из change feed (Step 3.6), Linear → Canceled с указанием изменения, БЕЗ фикса
+- "backlogged" — честный тупик ИЛИ неоднозначный intent-match для человека, вернул в Backlog с деталями (единственный не-терминальный выход)
 - "no-work" — нечего брать в этот тик`;
 
 interface DispatchResult {
@@ -167,7 +169,7 @@ function parseDispatchResult(output: string): DispatchResult {
   try {
     const raw = JSON.parse(after.slice(braceStart, end + 1)) as Record<string, unknown>;
     const outcome = String(raw.outcome ?? "unknown") as RunOutcome;
-    const valid: RunOutcome[] = ["fixed", "not-a-bug", "stale", "fixed-elsewhere", "backlogged", "no-work"];
+    const valid: RunOutcome[] = ["fixed", "not-a-bug", "stale", "fixed-elsewhere", "intentional", "backlogged", "no-work"];
     return {
       outcome: valid.includes(outcome) ? outcome : "unknown",
       issue: raw.issue && raw.issue !== "null" ? String(raw.issue) : undefined,
@@ -225,6 +227,9 @@ export function buildRunNotification(s: RunSummary): string | null {
       break;
     case "fixed-elsewhere":
       line = `✅ ${ticket}: investigated — already fixed by a later change. ${summary}. ${cost}`;
+      break;
+    case "intentional":
+      line = `✅ ${ticket}: investigated — explained by an intentional change, no fix needed. ${summary}. ${cost}`;
       break;
     default: // backlogged | error | unknown (watchdog timeout surfaces as "error")
       line = `⚠️ ${ticket}: ${s.outcome}. ${summary}`;
@@ -286,7 +291,19 @@ export async function runDispatchSession(reason: string): Promise<RunSummary> {
     `- staleAgeHrs = ${config.staleAgeHrs}h — if the ticket is OLDER than this (now − createdAt), the FULL freshness gate is MANDATORY; when you cannot reproduce it live, default to "stale".\n` +
     `- freshnessWindowHrs = ${config.freshnessWindowHrs}h — re-confirm the signature still occurs within this recent window (e.g. \`gcloud logging read ... --freshness=${config.freshnessWindowHrs}h\`). Zero hits / metric back within threshold ⇒ "stale".\n`;
 
-  const prompt = `${systemPrompt}${freshnessPolicy}${dryRunBanner}\n\n---\n\n${RUN_INSTRUCTION}`;
+  // CHANGE FEED — the change-ingest base URL + lookback for the Step 3.6 INTENT
+  // GATE, injected so the port/lookback stay tunable via env without editing the
+  // constitution. The PROCEDURE (name entities → query → judge → fail closed on
+  // intent, open on availability) lives in CLAUDE.md Step 3.6.
+  const changeFeedPolicy =
+    `\n\n## CHANGE FEED (base URL + lookback for Step 3.6 INTENT GATE)\n` +
+    `- CHANGE_FEED_URL = ${config.changeFeedUrl} — localhost-only change-ingest service. Query recent prod changes (merged PRs, cloud audit events incl. instance deletes & deploys, closed/updated Linear tickets) touching the anomaly's entities:\n` +
+    `  \`curl -s "${config.changeFeedUrl}/changes?entity=<type>:<id>&entity=<type>:<id>&since=<epoch_ms>&until=<epoch_ms>"\`\n` +
+    `  entity types: gcp_instance | region | service | repo (repeat entity= per scope, OR-matched). Each row has an intent_text you judge over.\n` +
+    `- intentLookbackHrs = ${config.intentLookbackHrs}h — set since = now − ${config.intentLookbackHrs}h (epoch ms), until = now (epoch ms).\n` +
+    `- FAIL OPEN on availability: if curl fails / the service is unreachable, that is NOT evidence of intent — proceed with the normal fix flow. FAIL CLOSED on judgment: if a returned change explains the anomaly, do NOT fix (outcome "intentional").\n`;
+
+  const prompt = `${systemPrompt}${freshnessPolicy}${changeFeedPolicy}${dryRunBanner}\n\n---\n\n${RUN_INSTRUCTION}`;
 
   // Resolve LINEAR_API_KEY once before spawning the MCP children so
   // buildMcpEnv() can inject it into the linear MCP child. Fail-soft: if the key

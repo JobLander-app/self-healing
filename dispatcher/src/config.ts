@@ -65,6 +65,18 @@ export const config = {
   // GCP project — constant across all JobLander infra.
   gcpProject: process.env.GCP_PROJECT || "meet-assistant-6d8ad",
 
+  // Change-ingest service base URL — the local (localhost-only) "change feed"
+  // the agent's INTENT GATE (CLAUDE.md Step 3.6) queries to learn whether a
+  // recent INTENTIONAL prod change explains an anomaly before it fixes. Same
+  // firewall invariant as this daemon's own :4100 — never public. Injected into
+  // the run prompt as the CHANGE FEED base URL.
+  changeFeedUrl: process.env.CHANGE_FEED_URL || "http://127.0.0.1:4200",
+
+  // Intent-gate lookback: how far BACK the agent queries the change feed for an
+  // explaining change. A decommission decision can precede its effect by days,
+  // so default generous (72h). Injected into the run prompt.
+  intentLookbackHrs: parseInt(process.env.INTENT_LOOKBACK_HRS || "72", 10),
+
   nodeEnv: process.env.NODE_ENV || "development",
 } as const;
 

@@ -19,6 +19,7 @@ export type RunOutcome =
   | "not-a-bug"
   | "stale"
   | "fixed-elsewhere"
+  | "intentional"
   | "backlogged"
   | "no-work"
   | "error"

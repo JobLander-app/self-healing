@@ -1,0 +1,21 @@
+[Unit]
+Description=Self-Healing Change-Ingest — pulls prod changes (audit logs, merged PRs, Linear) into the local change feed the dispatcher INTENT GATE queries
+After=network.target
+
+[Service]
+Type=simple
+User=joblander
+WorkingDirectory=/home/joblander/self-healing/change-ingest
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=10
+# v1 needs no .env: secrets (linear-api-key, self-healing-gh-token) are resolved
+# at runtime via `gcloud secrets` under the VM SA (same pattern as the poller),
+# and the audit-log pull uses ambient ADC. The `-` prefix makes the file optional
+# so a future .env (e.g. Notion) is picked up without editing this unit.
+EnvironmentFile=-/home/joblander/self-healing/change-ingest/.env
+# SQLite change store lives here (created + chowned by init.sh).
+Environment=CHANGES_DB=/var/lib/self-healing/changes.db
+
+[Install]
+WantedBy=multi-user.target
