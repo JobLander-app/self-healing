@@ -26,11 +26,17 @@ import urllib.request
 
 PROJECT = "meet-assistant-6d8ad"
 REGIONS = ["europe-west1", "us-central1", "australia-southeast1", "asia-south1"]
+# Live LiveKit regions. lk-au-southeast1 removed 2026-07-18: it has no running
+# GCE instance (daily Spot delete cycle, currently absent) and the backend does
+# not serve Australia — monitoring a phantom fired a false P0 every run. If AU is
+# re-provisioned, add it back here AND in agents/claude/monitor.md (see the
+# config-drift note there). ROOT FIX (tracked): derive this list from reality
+# (VMs that emit gcplogs recently — logging.viewer already granted) instead of a
+# hand-maintained duplicate, so a decommission can never leave a phantom.
 LK_URLS = {
     "lk-eu-west4": "https://lk-eu.joblander.app",
     "lk-us-central1": "https://lk-us.joblander.app",
     "lk-asia-south1": "https://lk-in.joblander.app",
-    "lk-au-southeast1": "https://lk-au.joblander.app",
 }
 # LK docker-log stream (JOB-731 stage 3M): the containers on all 4 LK VMs run
 # docker's `gcplogs` log driver, which ships to logName=".../logs/gcplogs-
