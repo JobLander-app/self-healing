@@ -27,6 +27,17 @@ export interface TickEffects {
   saveState: (input: { state: WatchState }) => Promise<void>;
   /** Structured stdout line (heartbeat, DRY_RUN echo, error reports). */
   log: (input: { line: string }) => void;
+  /**
+   * Best-effort Prometheus textfile write (JOB-731 observability). Optional so
+   * tests can omit it. Additive and fail-soft — it never throws and runs AFTER
+   * the heartbeat, so it can never reorder or block the page-first flow.
+   */
+  writeMetrics?: (input: {
+    detectorOk: boolean;
+    consecutiveBad: number;
+    pagedThisTick: boolean;
+    recoveredThisTick: boolean;
+  }) => Promise<void>;
 }
 
 const runSafely = async ({
@@ -182,6 +193,23 @@ export const processSample = async ({
       dryRun,
     })}`,
   });
+
+  // JOB-731 observability: Prometheus textfile write. Deliberately AFTER the
+  // heartbeat and best-effort — additive, fail-soft, never reorders the
+  // page-first flow. detectorOk mirrors the detector's own verdict (!isBad).
+  if (effects.writeMetrics) {
+    await runSafely({
+      action: () =>
+        effects.writeMetrics!({
+          detectorOk: !decision.isBad,
+          consecutiveBad: decision.nextState.count,
+          pagedThisTick: decision.shouldPage,
+          recoveredThisTick: decision.shouldNotifyRecovered,
+        }),
+      label: "metrics write",
+      log: effects.log,
+    });
+  }
 
   return decision;
 };

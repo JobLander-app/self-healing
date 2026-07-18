@@ -12,6 +12,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { config } from "./config";
+import { incrementRunCounters } from "./metrics";
 
 export type RunOutcome =
   | "fixed"
@@ -71,6 +72,8 @@ export function recordRun(summary: RunSummary): void {
   traceEvent(summary.turnId, "run_summary", { ...summary });
   ring.unshift(summary);
   if (ring.length > RING_SIZE) ring.length = RING_SIZE;
+  // JOB-731: feed the monotonic Prometheus run counters (runs_total, cost_usd).
+  incrementRunCounters({ outcome: summary.outcome, costUsd: summary.costUsd });
 }
 
 export function getRecentRuns(limit = 20): RunSummary[] {
@@ -111,6 +114,14 @@ export function hydrateFromDisk(): void {
         if (ev.kind === "run_summary" && ev.data) {
           ring.unshift(ev.data);
           if (ring.length > RING_SIZE) ring.length = RING_SIZE;
+          // JOB-731: best-effort rehydrate the monotonic run counters so a
+          // daemon bounce doesn't zero recent history. hydrateFromDisk is not
+          // routed through recordRun, so increment here directly (no double
+          // count). An unrecognised outcome buckets to `unknown`.
+          incrementRunCounters({
+            outcome: ev.data.outcome,
+            costUsd: typeof ev.data.costUsd === "number" ? ev.data.costUsd : 0,
+          });
         }
       }
     } catch {

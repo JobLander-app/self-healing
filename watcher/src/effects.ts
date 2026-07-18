@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { LINEAR, SECRETS, type WatchConfig } from "./config.js";
 import { buildLinearTicket } from "./messages.js";
+import { writeWatcherMetrics } from "./metricsFile.js";
 import type { TickEffects } from "./processSample.js";
 import { saveStateFile } from "./state.js";
 import { buildNotifyOwner } from "./telegram.js";
@@ -116,5 +117,18 @@ export const buildRealEffects = ({
 
   log: ({ line }) => {
     console.log(line);
+  },
+
+  // JOB-731: Prometheus textfile write. writeWatcherMetrics is itself fail-soft
+  // (skips when the node_exporter textfile dir is absent, never throws).
+  writeMetrics: async ({ detectorOk, consecutiveBad, pagedThisTick, recoveredThisTick }) => {
+    await writeWatcherMetrics({
+      path: config.metricsFile,
+      now: Date.now(),
+      detectorOk,
+      consecutiveBad,
+      pagedThisTick,
+      recoveredThisTick,
+    });
   },
 });

@@ -3,6 +3,7 @@ import { config } from "./config";
 import { statusRouter } from "./routes/status";
 import { triggerRouter } from "./routes/trigger";
 import { feedRouter } from "./routes/feed";
+import { metricsRouter } from "./routes/metrics";
 
 export function startApi(): Promise<void> {
   const app = express();
@@ -22,6 +23,7 @@ export function startApi(): Promise<void> {
 
   app.use("/trigger", triggerRouter);
   app.use("/feed", feedRouter);
+  app.use("/metrics", metricsRouter);
   app.use("/", statusRouter);
 
   app.get("/", (_req, res) => {
@@ -29,7 +31,7 @@ export function startApi(): Promise<void> {
       name: "claude-code-vm-job-dispatcher",
       version: "1.0.0",
       description: "Autonomous JobLander Linear ticket fixer — self-poll, no human in the loop",
-      endpoints: ["/health", "/status", "/trigger", "/feed"],
+      endpoints: ["/health", "/status", "/trigger", "/feed", "/metrics"],
     });
   });
 
