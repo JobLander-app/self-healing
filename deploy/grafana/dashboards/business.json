@@ -44,7 +44,7 @@
       "title": "Починилось само",
       "gridPos": { "h": 6, "w": 8, "x": 0, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [ { "expr": "sum(increase(selfheal_dispatcher_runs_total{outcome=\"fixed\"}[$__range]))", "refId": "A", "instant": true } ],
+      "targets": [ { "expr": "sum(increase(selfheal_dispatcher_runs_total{outcome=\"fixed\"}[$__range])) or vector(0)", "refId": "A", "instant": true } ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "value", "justifyMode": "center" },
       "fieldConfig": { "defaults": {
         "unit": "none", "decimals": 0, "displayName": "сбоев исправлено без вас",
@@ -57,7 +57,7 @@
       "title": "Проблем поймано",
       "gridPos": { "h": 6, "w": 8, "x": 8, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [ { "expr": "sum(increase(selfheal_watcher_pages_total[$__range]))", "refId": "A", "instant": true } ],
+      "targets": [ { "expr": "sum(increase(selfheal_watcher_pages_total[$__range])) or vector(0)", "refId": "A", "instant": true } ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "value", "justifyMode": "center" },
       "fieldConfig": { "defaults": {
         "unit": "none", "decimals": 0, "displayName": "сбоев замечено вовремя",
