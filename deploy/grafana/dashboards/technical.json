@@ -180,6 +180,9 @@
         ]
       } ],
       "options": { "showHeader": true, "cellHeight": "sm" },
+      "transformations": [
+        { "id": "organize", "options": { "indexByName": { "State": 0, "Ticket": 1, "Title": 2, "Created": 3 } } }
+      ],
       "fieldConfig": {
         "defaults": { "custom": { "align": "left", "filterable": false } },
         "overrides": [

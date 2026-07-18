@@ -334,11 +334,14 @@ if [ -d "$SH_DIR" ]; then
   # Infinity datasource plugin — the "Linear" datasource above is of this type.
   # Without it the incident timeline panel has no datasource. Idempotent: skip
   # if already present. grafana-cli ships with the grafana package (step 5).
+  # --homepath is required or grafana-cli aborts with "Could not find config
+  # defaults"; --pluginsDir targets the provisioned plugins path.
   INFINITY_PLUGIN_ID=yesoreyeram-infinity-datasource
   if [ ! -d "/var/lib/grafana/plugins/$INFINITY_PLUGIN_ID" ]; then
-    grafana-cli --pluginsDir /var/lib/grafana/plugins plugins install "$INFINITY_PLUGIN_ID" \
+    grafana cli --homepath /usr/share/grafana --pluginsDir /var/lib/grafana/plugins \
+      plugins install "$INFINITY_PLUGIN_ID" \
       && chown -R grafana:grafana /var/lib/grafana/plugins \
-      || add_todo "grafana-cli failed to install $INFINITY_PLUGIN_ID — the Linear datasource + incident timeline are unavailable; re-run init or install manually"
+      || add_todo "grafana cli failed to install $INFINITY_PLUGIN_ID — the Linear datasource + incident timeline are unavailable; re-run init or install manually"
   else
     log "grafana plugin $INFINITY_PLUGIN_ID already installed"
   fi
