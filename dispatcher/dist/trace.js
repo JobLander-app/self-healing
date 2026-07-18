@@ -51,6 +51,7 @@ exports.hydrateFromDisk = hydrateFromDisk;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const config_1 = require("./config");
+const metrics_1 = require("./metrics");
 const RING_SIZE = 50;
 const ring = [];
 function ensureLogDir() {
@@ -84,6 +85,8 @@ function recordRun(summary) {
     ring.unshift(summary);
     if (ring.length > RING_SIZE)
         ring.length = RING_SIZE;
+    // JOB-731: feed the monotonic Prometheus run counters (runs_total, cost_usd).
+    (0, metrics_1.incrementRunCounters)({ outcome: summary.outcome, costUsd: summary.costUsd });
 }
 function getRecentRuns(limit = 20) {
     return ring.slice(0, limit);
@@ -123,6 +126,14 @@ function hydrateFromDisk() {
                     ring.unshift(ev.data);
                     if (ring.length > RING_SIZE)
                         ring.length = RING_SIZE;
+                    // JOB-731: best-effort rehydrate the monotonic run counters so a
+                    // daemon bounce doesn't zero recent history. hydrateFromDisk is not
+                    // routed through recordRun, so increment here directly (no double
+                    // count). An unrecognised outcome buckets to `unknown`.
+                    (0, metrics_1.incrementRunCounters)({
+                        outcome: ev.data.outcome,
+                        costUsd: typeof ev.data.costUsd === "number" ? ev.data.costUsd : 0,
+                    });
                 }
             }
         }

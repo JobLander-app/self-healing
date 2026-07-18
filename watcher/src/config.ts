@@ -10,6 +10,12 @@ export interface WatchConfig {
   triggerUrl: string;
   /** DISPATCH_TOKEN env override (falls back to Secret Manager when unset). */
   dispatchToken: string | null;
+  /**
+   * Prometheus textfile-collector target (JOB-731). Each tick writes this
+   * `.prom` file for node_exporter to expose. If its directory does not exist
+   * (node_exporter not installed), the write is skipped silently — fail-soft.
+   */
+  metricsFile: string;
   dryRun: boolean;
   forceBad: boolean;
 }
@@ -46,6 +52,8 @@ export const readConfig = ({ env }: { env: NodeJS.ProcessEnv }): WatchConfig => 
     env.DISPATCH_TOKEN !== undefined && env.DISPATCH_TOKEN.length > 0
       ? env.DISPATCH_TOKEN
       : null,
+  metricsFile:
+    env.WATCH_METRICS_FILE ?? "/var/lib/node_exporter/textfile/selfheal_watcher.prom",
   dryRun: env.DRY_RUN === "1",
   forceBad: env.FORCE_BAD === "1",
 });
