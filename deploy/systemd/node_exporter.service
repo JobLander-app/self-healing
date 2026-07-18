@@ -1,0 +1,28 @@
+# node_exporter systemd unit (JOB-731 observability v1).
+# Installed as a pinned release binary at /usr/local/bin, unit installed to
+# /etc/systemd/system/node_exporter.service by init.sh.
+#
+# Binds to 127.0.0.1:9100 — localhost only (Prometheus scrapes it). NOT in
+# any firewall rule.
+#
+# The textfile collector exposes the watcher's selfheal_watcher.prom (written
+# by the watcher cron to /var/lib/node_exporter/textfile) alongside host
+# metrics, so Prometheus scrapes both from one target.
+[Unit]
+Description=Prometheus node_exporter (self-healing observability)
+Documentation=https://github.com/prometheus/node_exporter
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+ExecStart=/usr/local/bin/node_exporter \
+  --web.listen-address=127.0.0.1:9100 \
+  --collector.textfile.directory=/var/lib/node_exporter/textfile
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

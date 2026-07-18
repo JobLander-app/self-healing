@@ -1,0 +1,26 @@
+# Prometheus config for the self-healing observability console
+# (JOB-731 observability v1). Installed to /etc/prometheus/prometheus.yml
+# by init.sh. Prometheus binds to 127.0.0.1:9090 (localhost only — reached
+# through Grafana, which is the only thing that queries it).
+#
+# Scrape targets are the two selfheal_* exporters (built on the parallel
+# feat-prometheus-metrics branch):
+#   - dispatcher: an HTTP /metrics handler on localhost:4100
+#   - node:       node_exporter on localhost:9100, which ALSO surfaces the
+#                 watcher's textfile metrics (selfheal_watcher.prom via the
+#                 --collector.textfile.directory collector).
+#
+# Default local TSDB retention (15d) is fine for v1.
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: dispatcher
+    static_configs:
+      - targets: ["localhost:4100"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["localhost:9100"]

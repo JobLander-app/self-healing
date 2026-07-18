@@ -59,8 +59,18 @@ output "instance_name" {
 }
 
 output "external_ip" {
-  description = "Ephemeral NAT IP of self-healing-1."
+  description = "External NAT IP of self-healing-1 (reserved static console IP)."
   value       = module.self_healing.external_ip
+}
+
+output "console_static_ip" {
+  description = "Reserved static IP the console_domain A record must point at."
+  value       = module.self_healing.console_static_ip
+}
+
+output "console_dns_record" {
+  description = "DNS record to create (owner, via Namecheap API): console.joblander.app A <ip>."
+  value       = module.self_healing.console_dns_record
 }
 
 output "service_account_email" {
