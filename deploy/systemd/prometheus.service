@@ -1,0 +1,27 @@
+# Prometheus systemd unit (JOB-731 observability v1).
+# Prometheus is installed as a pinned release binary at /usr/local/bin
+# (no official apt repo), so its unit ships from this repo. Installed to
+# /etc/systemd/system/prometheus.service by init.sh.
+#
+# Binds to 127.0.0.1:9090 — localhost only, reached through Grafana. NOT in
+# any firewall rule.
+[Unit]
+Description=Prometheus (self-healing observability)
+Documentation=https://prometheus.io/docs/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=prometheus
+Group=prometheus
+Type=simple
+ExecStart=/usr/local/bin/prometheus \
+  --config.file=/etc/prometheus/prometheus.yml \
+  --storage.tsdb.path=/var/lib/prometheus/data \
+  --web.listen-address=127.0.0.1:9090
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -25,6 +25,16 @@ WORKSPACE_REPO_URL="${workspace_repo_url}"
 REPO_BRANCH="${repo_branch}"
 DISPATCHER_ENV_SECRET="${dispatcher_env_secret}"
 GH_TOKEN_SECRET="${gh_token_secret}"
+CONSOLE_DOMAIN="${console_domain}"
+GRAFANA_ADMIN_SECRET="${grafana_admin_secret}"
+# -----------------------------------------------------------------------------
+
+# ---- pinned observability tool versions (no official apt repo) --------------
+# Prometheus & node_exporter install as pinned release binaries for a
+# reproducible build (Grafana & Caddy come from their official apt repos).
+# Bump deliberately; checksums are verified against the release sha256sums.txt.
+PROMETHEUS_VERSION=2.53.2
+NODE_EXPORTER_VERSION=1.8.2
 # -----------------------------------------------------------------------------
 
 export DEBIAN_FRONTEND=noninteractive
@@ -43,13 +53,13 @@ as_agent() { sudo -u $AGENT_USER -H "$@"; }
 log "=== self-healing init started (project=$PROJECT_ID branch=$REPO_BRANCH) ==="
 
 # ---- 1. base packages --------------------------------------------------------
-log "[1/9] base packages"
+log "[1/11] base packages"
 apt-get update -qq
 apt-get install -y -qq git curl wget unzip jq ca-certificates gnupg \
   python3 python3-venv python3-pip xvfb cron
 
 # ---- 2. node 20 (nodesource) ---------------------------------------------------
-log "[2/9] node 20"
+log "[2/11] node 20"
 NODE_MAJOR=0
 if command -v node >/dev/null 2>&1; then
   NODE_MAJOR=$(node -v | sed 's/^v//' | cut -d. -f1)
@@ -61,7 +71,7 @@ fi
 log "node: $(node -v)"
 
 # ---- 3. gh CLI ----------------------------------------------------------------
-log "[3/9] gh CLI"
+log "[3/11] gh CLI"
 if ! command -v gh >/dev/null 2>&1; then
   curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     -o /usr/share/keyrings/githubcli-archive-keyring.gpg
@@ -73,22 +83,90 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 # ---- 4. docker + Claude Code CLI + chromium ------------------------------------
-log "[4/9] docker, claude, chromium"
+log "[4/11] docker, claude, chromium"
 if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
 fi
 command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
 
-# ---- 5. agent user -------------------------------------------------------------
-log "[5/9] user $AGENT_USER"
+# ---- 5. observability stack packages -------------------------------------------
+# Grafana + Caddy from their OFFICIAL apt repos (reproducible, auto-updated
+# via apt). Prometheus + node_exporter have NO official apt repo, so they
+# install as version-pinned release binaries with checksum verification
+# (the robust/reproducible option). Configs + systemd units + service start
+# happen later (step 11), once the repo is cloned. All idempotent.
+log "[5/11] observability packages (grafana, caddy, prometheus, node_exporter)"
+ARCH=$(dpkg --print-architecture) # amd64 on e2-standard-2
+
+# --- Grafana apt repo ---
+if ! command -v grafana-server >/dev/null 2>&1; then
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" \
+    > /etc/apt/sources.list.d/grafana.list
+fi
+
+# --- Caddy apt repo ---
+if ! command -v caddy >/dev/null 2>&1; then
+  curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+    | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+    > /etc/apt/sources.list.d/caddy-stable.list
+fi
+
+if ! command -v grafana-server >/dev/null 2>&1 || ! command -v caddy >/dev/null 2>&1; then
+  apt-get update -qq
+  apt-get install -y -qq grafana caddy
+fi
+
+# --- Prometheus + node_exporter: pinned binaries + checksum verify ---
+# System users (nologin) that own the data dirs and run the services.
+id -u prometheus    >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin prometheus
+id -u node_exporter >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin node_exporter
+
+# $1 = github owner/repo, $2 = version, $3 = base name (dir + tarball stem),
+# remaining args = binaries to install from the extracted dir into /usr/local/bin.
+install_pinned_release() {
+  local repo=$1 ver=$2 base=$3
+  shift 3
+  local tmp url
+  tmp=$(mktemp -d)
+  url="https://github.com/$repo/releases/download/v$ver"
+  curl -fsSL "$url/$base.tar.gz" -o "$tmp/$base.tar.gz"
+  curl -fsSL "$url/sha256sums.txt" -o "$tmp/sha256sums.txt"
+  # Verify only the file we downloaded (the sums file lists every asset).
+  (cd "$tmp" && sha256sum -c --ignore-missing sha256sums.txt)
+  tar -xzf "$tmp/$base.tar.gz" -C "$tmp"
+  local bin
+  for bin in "$@"; do
+    install -m 0755 "$tmp/$base/$bin" "/usr/local/bin/$bin"
+  done
+  rm -rf "$tmp"
+}
+
+if ! /usr/local/bin/prometheus --version 2>&1 | grep -q "version $PROMETHEUS_VERSION"; then
+  install_pinned_release prometheus/prometheus "$PROMETHEUS_VERSION" \
+    "prometheus-$PROMETHEUS_VERSION.linux-$ARCH" prometheus promtool
+fi
+if ! /usr/local/bin/node_exporter --version 2>&1 | grep -q "version $NODE_EXPORTER_VERSION"; then
+  install_pinned_release prometheus/node_exporter "$NODE_EXPORTER_VERSION" \
+    "node_exporter-$NODE_EXPORTER_VERSION.linux-$ARCH" node_exporter
+fi
+
+# --- Prometheus data dir + install its systemd unit ---
+mkdir -p /etc/prometheus /var/lib/prometheus/data
+chown -R prometheus:prometheus /var/lib/prometheus
+
+# ---- 6. agent user -------------------------------------------------------------
+log "[6/11] user $AGENT_USER"
 id -u $AGENT_USER >/dev/null 2>&1 || useradd -m -s /bin/bash $AGENT_USER
 usermod -aG docker $AGENT_USER || true
 
 as_agent git config --global user.name "JobLander Self-Healing Agent"
 as_agent git config --global user.email "agent@joblander.app"
 
-# ---- 6. gh auth (fail-soft) -----------------------------------------------------
-log "[6/9] gh auth from Secret Manager ($GH_TOKEN_SECRET)"
+# ---- 7. gh auth (fail-soft) -----------------------------------------------------
+log "[7/11] gh auth from Secret Manager ($GH_TOKEN_SECRET)"
 GH_TOKEN_VALUE=$(gcloud secrets versions access latest \
   --secret="$GH_TOKEN_SECRET" --project="$PROJECT_ID" 2>/dev/null || true)
 if [ -n "$GH_TOKEN_VALUE" ]; then
@@ -103,8 +181,8 @@ else
 fi
 unset GH_TOKEN_VALUE
 
-# ---- 7. clone/update repos -------------------------------------------------------
-log "[7/9] repos"
+# ---- 8. clone/update repos -------------------------------------------------------
+log "[8/11] repos"
 clone_or_update() {
   # $1 = url, $2 = target dir
   local url=$1 dir=$2
@@ -144,9 +222,9 @@ if [ ! -d "$SH_DIR" ]; then
   add_todo "self-healing repo absent — dispatcher/watcher/cron steps were SKIPPED entirely; fix clone and re-run init"
 fi
 
-# ---- 8. dispatcher + watcher ------------------------------------------------------
+# ---- 9. dispatcher + watcher ------------------------------------------------------
 if [ -d "$SH_DIR" ]; then
-  log "[8/9] dispatcher .env + builds"
+  log "[9/11] dispatcher .env + builds"
 
   # dispatcher .env from Secret Manager (never on disk outside this file)
   if gcloud secrets versions access latest \
@@ -191,8 +269,8 @@ if [ -d "$SH_DIR" ]; then
     fi
   done
 
-  # ---- 9. systemd unit + cron -----------------------------------------------------
-  log "[9/9] systemd + cron"
+  # ---- 10. systemd unit + cron ----------------------------------------------------
+  log "[10/11] systemd + cron"
   # Dispatcher trace/turn logs (LOG_DIR in .env). Found during the stage-2 fire
   # drill: without it every traceEvent hits EACCES and per-turn traces are lost
   # (run still works — trace is fail-soft — but /feed history dies on restart).
@@ -212,6 +290,91 @@ if [ -d "$SH_DIR" ]; then
   # whole-crontab install: deploy/cron/self-healing.crontab OWNS joblander's crontab
   crontab -u $AGENT_USER "$SH_DIR/deploy/cron/self-healing.crontab"
   log "crontab installed for $AGENT_USER"
+fi
+
+# ---- 11. observability config + services -----------------------------------------
+# Install the repo's prometheus/grafana/caddy configs, seed the Grafana admin
+# password from Secret Manager, and start the stack. Configs live in the repo,
+# so this is guarded on the clone. Idempotent: install/overwrite + enable are
+# safe to re-run. Everything binds to localhost except Caddy (80/443).
+if [ -d "$SH_DIR" ]; then
+  log "[11/11] observability config + services"
+
+  # node_exporter textfile dir — the watcher cron (runs as $AGENT_USER) writes
+  # selfheal_watcher.prom here; node_exporter (its own user) reads it. Owned by
+  # the writer, world-readable so the reader picks it up.
+  mkdir -p /var/lib/node_exporter/textfile
+  chown -R $AGENT_USER:$AGENT_USER /var/lib/node_exporter
+  chmod 0755 /var/lib/node_exporter /var/lib/node_exporter/textfile
+
+  # Prometheus + node_exporter systemd units (binaries installed in step 5).
+  install -m 0644 "$SH_DIR/deploy/systemd/prometheus.service" \
+    /etc/systemd/system/prometheus.service
+  install -m 0644 "$SH_DIR/deploy/systemd/node_exporter.service" \
+    /etc/systemd/system/node_exporter.service
+
+  # Prometheus scrape config.
+  install -m 0644 "$SH_DIR/deploy/prometheus/prometheus.yml" /etc/prometheus/prometheus.yml
+  chown prometheus:prometheus /etc/prometheus/prometheus.yml
+
+  # Grafana provisioning (datasource + dashboard provider) + dashboards dir.
+  mkdir -p /etc/grafana/provisioning/datasources \
+    /etc/grafana/provisioning/dashboards /etc/grafana/dashboards
+  install -m 0644 "$SH_DIR/deploy/grafana/provisioning/datasources/prometheus.yml" \
+    /etc/grafana/provisioning/datasources/prometheus.yml
+  install -m 0644 "$SH_DIR/deploy/grafana/provisioning/dashboards/dashboards.yml" \
+    /etc/grafana/provisioning/dashboards/dashboards.yml
+  # Dashboard JSONs (none yet — .gitkeep only). Glob may not match; keep going.
+  cp -f "$SH_DIR"/deploy/grafana/dashboards/*.json /etc/grafana/dashboards/ 2>/dev/null || true
+
+  # Grafana main config: render __CONSOLE_DOMAIN__ then install (root:grafana 0640).
+  sed "s/__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN/g" "$SH_DIR/deploy/grafana/grafana.ini" \
+    > /etc/grafana/grafana.ini
+  chown root:grafana /etc/grafana/grafana.ini
+  chmod 0640 /etc/grafana/grafana.ini
+
+  # Caddyfile: render __CONSOLE_DOMAIN__ then install.
+  mkdir -p /etc/caddy
+  sed "s/__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN/g" "$SH_DIR/deploy/caddy/Caddyfile" \
+    > /etc/caddy/Caddyfile
+
+  # Seed Grafana admin password from Secret Manager into a root-only systemd
+  # EnvironmentFile — keeps plaintext out of grafana.ini/git. Applies on
+  # Grafana's FIRST start (initial admin creation); rotate later via grafana-cli.
+  mkdir -p /etc/systemd/system/grafana-server.service.d
+  cat > /etc/systemd/system/grafana-server.service.d/10-self-healing.conf <<'DROPIN'
+[Service]
+EnvironmentFile=/etc/grafana/self-healing-admin.env
+DROPIN
+  GRAFANA_ADMIN_PW=$(gcloud secrets versions access latest \
+    --secret="$GRAFANA_ADMIN_SECRET" --project="$PROJECT_ID" 2>/dev/null || true)
+  if [ -n "$GRAFANA_ADMIN_PW" ]; then
+    ( umask 077; printf 'GF_SECURITY_ADMIN_PASSWORD=%s\n' "$GRAFANA_ADMIN_PW" \
+      > /etc/grafana/self-healing-admin.env )
+    chown root:grafana /etc/grafana/self-healing-admin.env
+    chmod 0640 /etc/grafana/self-healing-admin.env
+    log "grafana admin password seeded from secret '$GRAFANA_ADMIN_SECRET'"
+  else
+    # EnvironmentFile must exist or the unit fails to start — ensure an empty one.
+    [ -f /etc/grafana/self-healing-admin.env ] || : > /etc/grafana/self-healing-admin.env
+    chown root:grafana /etc/grafana/self-healing-admin.env 2>/dev/null || true
+    chmod 0640 /etc/grafana/self-healing-admin.env
+    add_todo "Grafana admin password NOT seeded (secret '$GRAFANA_ADMIN_SECRET' missing/unreadable) — admin stays default admin/admin. Create the secret, ensure it is granted to the VM SA (grafana_admin_secret), re-run init."
+  fi
+  unset GRAFANA_ADMIN_PW
+
+  # Enable + start. All localhost-bound except Caddy (80/443).
+  systemctl daemon-reload
+  systemctl enable prometheus node_exporter grafana-server caddy
+  systemctl restart prometheus    || add_todo "prometheus failed to start — journalctl -u prometheus"
+  systemctl restart node_exporter || add_todo "node_exporter failed to start — journalctl -u node_exporter"
+  systemctl restart grafana-server || add_todo "grafana-server failed to start — journalctl -u grafana-server"
+  systemctl restart caddy         || add_todo "caddy failed to start — journalctl -u caddy"
+
+  add_todo "Create DNS A record '$CONSOLE_DOMAIN' -> the reserved static IP (Terraform outputs 'console_static_ip' / 'console_dns_record') via the Namecheap API (GET all hosts, append this A record, setHosts). Until it resolves, Caddy cannot issue a TLS cert and the console is unreachable by name."
+  add_todo "(optional, v2) Google OAuth client for Grafana SSO: redirect https://$CONSOLE_DOMAIN/login/google, store id/secret in Secret Manager, set grafana_google_oauth_* Terraform vars, uncomment [auth.google] in grafana.ini."
+else
+  add_todo "self-healing repo absent — observability config (prometheus/grafana/caddy) SKIPPED; fix clone and re-run init"
 fi
 
 # ---- unavoidable one-time steps ------------------------------------------------------

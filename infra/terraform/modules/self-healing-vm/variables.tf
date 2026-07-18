@@ -174,6 +174,55 @@ variable "heartbeat_absence_seconds" {
   default     = 300
 }
 
+# ---- observability console (JOB-731 observability v1) -----------------------
+
+variable "console_domain" {
+  description = <<-EOT
+    Public FQDN the observability console is served on. Caddy issues a
+    Let's Encrypt cert for it and reverse-proxies to Grafana; Grafana's
+    root_url is set to https://<console_domain>. An A record pointing this
+    name at the reserved static IP must be created out-of-band (surfaced as
+    the `console_dns_record` output + a POST-INIT-TODO line — the owner adds
+    it via the Namecheap API, same precedent as *.mcp.joblander.app).
+  EOT
+  type        = string
+  default     = "console.joblander.app"
+}
+
+variable "grafana_admin_secret" {
+  description = <<-EOT
+    Secret Manager secret_id holding the seeded Grafana admin password.
+    init.sh reads it and renders GF_SECURITY_ADMIN_PASSWORD into a
+    root-only systemd EnvironmentFile (never committed, never in grafana.ini
+    on disk). The VM's SA is granted secretAccessor on it (iam.tf). The
+    secret must exist before `terraform apply` (granting IAM on a
+    nonexistent secret fails the apply); init.sh fails soft with a TODO if
+    the value is unreadable at boot.
+  EOT
+  type        = string
+  default     = "self-healing-grafana-admin"
+}
+
+variable "grafana_google_oauth_client_id_secret" {
+  description = <<-EOT
+    OPTIONAL (v2). Secret Manager secret_id holding the Google OAuth client
+    id for Grafana SSO. Empty for v1 (admin-login only). When set, the SA is
+    granted secretAccessor on it; wiring OAuth into grafana.ini is a
+    follow-up (owner supplies the OAuth client).
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "grafana_google_oauth_client_secret_secret" {
+  description = <<-EOT
+    OPTIONAL (v2). Secret Manager secret_id holding the Google OAuth client
+    secret for Grafana SSO. Empty for v1. Granted secretAccessor when set.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "deletion_protection" {
   description = <<-EOT
     GCE deletion-protection. Defaults to FALSE while this is the

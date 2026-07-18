@@ -1,0 +1,3 @@
+# Placeholder — selfheal_* dashboard JSONs land here in a follow-up.
+# The Grafana file provider (provisioning/dashboards/dashboards.yml) points
+# at /etc/grafana/dashboards, where init.sh installs the contents of this dir.

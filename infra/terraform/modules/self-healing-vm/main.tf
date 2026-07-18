@@ -1,13 +1,18 @@
-# Self-healing loop VM (JOB-731 Phase 2).
+# Self-healing loop VM (JOB-731 Phase 2 + observability v1).
 #
 # Creates a NEW parallel VM — the legacy `joblander-agents` VM is
 # deliberately NOT managed, imported or referenced here. Cutover from the
 # legacy VM is Phase 4 and happens only on explicit owner signal.
 #
-# No static external IP: the loop is outbound-only (polls /health/output,
-# calls Linear/Telegram/GitHub APIs). SSH goes through IAP, the dispatcher
-# trigger port :4100 stays on localhost (watcher and dispatcher are
-# co-located). An ephemeral NAT IP is enough.
+# Static external IP: the VM now also hosts the public observability
+# console (Grafana behind Caddy on `console_domain`), so the external IP
+# must be STABLE — it is the A-record target for `console_domain`. The
+# regional `google_compute_address` below is reserved and pinned with
+# prevent_destroy so a DNS'd IP cannot silently vanish. The console is the
+# ONLY public surface: 80/443 (Caddy) are the only firewall openings; the
+# dispatcher :4100, Prometheus :9090, Grafana :3000 and node_exporter :9100
+# all stay localhost-only. Everything else stays outbound-only (the loop
+# polls /health/output, calls Linear/Telegram/GitHub APIs) and SSH is IAP.
 
 # Boot disk declared as a separate resource (not inline) — same convention
 # as modules/livekit-vm in ai-voice-agent-python: disk identity survives
@@ -27,6 +32,22 @@ resource "google_compute_disk" "boot" {
     # drift from the family as new LTS point releases ship. Without this,
     # Terraform would call for destroy+recreate on every apply.
     ignore_changes = [image]
+  }
+}
+
+# Reserved regional static external IP — the A-record target for
+# `console_domain`. prevent_destroy: a public, DNS'd IP must not vanish on
+# a `terraform destroy` / instance rebuild (recreating it hands out a NEW
+# address and breaks TLS + the console until DNS is re-pointed).
+resource "google_compute_address" "console" {
+  project      = var.project_id
+  name         = "${var.vm_name}-console"
+  region       = var.region
+  address_type = "EXTERNAL"
+  labels       = var.labels
+
+  lifecycle {
+    prevent_destroy = true
   }
 }
 
@@ -50,8 +71,11 @@ resource "google_compute_instance" "this" {
   network_interface {
     network    = var.network
     subnetwork = var.subnetwork
-    # Empty access_config = ephemeral external IP (outbound-only needs).
-    access_config {}
+    # Pin the reserved static IP (was ephemeral) — it is the console DNS
+    # target, so it must survive stop/start and instance rebuilds.
+    access_config {
+      nat_ip = google_compute_address.console.address
+    }
   }
 
   service_account {
@@ -70,6 +94,8 @@ resource "google_compute_instance" "this" {
       repo_branch           = var.repo_branch
       dispatcher_env_secret = var.dispatcher_env_secret
       gh_token_secret       = var.gh_token_secret
+      console_domain        = var.console_domain
+      grafana_admin_secret  = var.grafana_admin_secret
     })
   }
 

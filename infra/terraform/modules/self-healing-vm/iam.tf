@@ -32,9 +32,19 @@ resource "google_project_iam_member" "roles" {
 
 # Per-secret accessor grants instead of project-wide
 # secretmanager.secretAccessor — the SA can read exactly the secrets the
-# loop needs and nothing else.
+# loop needs and nothing else. Includes the Grafana admin password secret
+# and, when set, the Google OAuth id/secret (empty strings compacted out —
+# v1 is admin-login only).
 resource "google_secret_manager_secret_iam_member" "secrets" {
-  for_each = toset(concat(var.secret_ids, var.extra_secret_ids))
+  for_each = toset(compact(concat(
+    var.secret_ids,
+    var.extra_secret_ids,
+    [
+      var.grafana_admin_secret,
+      var.grafana_google_oauth_client_id_secret,
+      var.grafana_google_oauth_client_secret_secret,
+    ],
+  )))
 
   project   = var.project_id
   secret_id = each.value

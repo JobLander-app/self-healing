@@ -1,0 +1,18 @@
+# Grafana dashboard provider (JOB-731 observability v1).
+# Installed to /etc/grafana/provisioning/dashboards/dashboards.yml.
+# File provider: Grafana loads any *.json dropped into /etc/grafana/dashboards.
+# That directory ships empty (only .gitkeep) — the actual selfheal_* dashboard
+# JSONs are a separate follow-up; this wiring just makes them auto-load.
+apiVersion: 1
+
+providers:
+  - name: self-healing
+    orgId: 1
+    folder: Self-Healing
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

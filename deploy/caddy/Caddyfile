@@ -1,0 +1,18 @@
+# Caddy config for the self-healing observability console
+# (JOB-731 observability v1). Installed to /etc/caddy/Caddyfile by init.sh,
+# which replaces __CONSOLE_DOMAIN__ with the console_domain Terraform var.
+#
+# Caddy is the ONLY public listener (firewall opens 80/443 only). It obtains
+# and renews a Let's Encrypt cert automatically (ACME HTTP-01 on :80) and
+# reverse-proxies to Grafana on localhost:3000. Access control is Grafana's
+# own auth — Caddy just terminates TLS.
+
+__CONSOLE_DOMAIN__ {
+	reverse_proxy localhost:3000
+
+	# TODO(JOB-731 observability v2): onboarding flow — proxy /onboard/* to
+	# the onboarding service once it exists, e.g.
+	#   handle_path /onboard/* {
+	#     reverse_proxy localhost:8080
+	#   }
+}
