@@ -1,0 +1,83 @@
+{
+  "uid": "selfheal-technical",
+  "title": "Self-Healing — Технический",
+  "tags": ["self-healing", "technical"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Dispatcher", "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "max(selfheal_dispatcher_up)", "refId": "A", "instant": true } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "1": { "text": "UP", "color": "green" }, "0": { "text": "DOWN", "color": "red" } } } ], "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] } } }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Healthcheck", "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "min(selfheal_dispatcher_healthcheck_healthy)", "refId": "A", "instant": true } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "displayName": "деп здоровы / 5", "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 5, "color": "green" } ] } } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Стоимость (всего)", "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "max(selfheal_dispatcher_cost_usd_total)", "refId": "A", "instant": true } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "none" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "Посл. прогон, длит.", "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "max(selfheal_dispatcher_last_run_duration_seconds)", "refId": "A", "instant": true } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "none" },
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 5, "type": "stat", "title": "Детектор выхода", "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "max(selfheal_watcher_detector_ok)", "refId": "A", "instant": true } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "1": { "text": "OK", "color": "green" }, "0": { "text": "FAIL", "color": "red" } } } ], "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] } } }
+    },
+    {
+      "id": 6, "type": "stat", "title": "Watcher heartbeat, назад", "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "time() - max(selfheal_watcher_last_tick_timestamp_seconds)", "refId": "A", "instant": true } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "green" }, { "value": 180, "color": "red" } ] } } }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Прогоны фиксера по исходу (increase 1ч)", "gridPos": { "h": 8, "w": 16, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "sum by (outcome) (increase(selfheal_dispatcher_runs_total[1h]))", "refId": "A", "legendFormat": "{{outcome}}" } ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 40, "stacking": { "mode": "normal" } } } }
+    },
+    {
+      "id": 8, "type": "state-timeline", "title": "Здоровье зависимостей", "gridPos": { "h": 8, "w": 8, "x": 16, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "selfheal_dispatcher_healthcheck_dep", "refId": "A", "legendFormat": "{{dep}}" } ],
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "1": { "text": "OK", "color": "green" }, "0": { "text": "DOWN", "color": "red" } } } ], "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] } } }
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Детектор выхода / подряд-плохих", "gridPos": { "h": 7, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "max(selfheal_watcher_detector_ok)", "refId": "A", "legendFormat": "detector_ok" },
+        { "expr": "max(selfheal_watcher_consecutive_bad)", "refId": "B", "legendFormat": "consecutive_bad" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } } }
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Пейджи / восстановления (накопительно)", "gridPos": { "h": 7, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "max(selfheal_watcher_pages_total)", "refId": "A", "legendFormat": "pages" },
+        { "expr": "max(selfheal_watcher_recoveries_total)", "refId": "B", "legendFormat": "recoveries" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } } }
+    }
+  ]
+}
