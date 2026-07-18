@@ -121,20 +121,28 @@
       "targets": [ {
         "refId": "A",
         "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "linear" },
-        "type": "uql",
+        "type": "graphql",
         "source": "url",
         "format": "table",
+        "parser": "backend",
         "url": "https://api.linear.app/graphql",
         "url_options": {
           "method": "POST",
           "body_type": "graphql",
-          "body_graphql_query": "query { issues(first: 100, filter: { labels: { name: { eq: \"monitor\" } }, team: { name: { eq: \"JobLander\" } }, completedAt: { gte: \"${__from:date:iso}\" } }) { nodes { createdAt completedAt } } }"
+          "body_graphql_query": "query { issues(first: 100, filter: { labels: { name: { eq: \"monitor\" } }, team: { name: { eq: \"JobLander\" } }, createdAt: { gte: \"${__from:date:iso}\" }, completedAt: { null: false } }) { nodes { createdAt completedAt } } }"
         },
-        "uql": "parse-json\n| scope \"data.issues.nodes\"\n| extend \"mttr_min\"=(todatetime(\"completedAt\") - todatetime(\"createdAt\")) / 60000\n| summarize \"value\"=percentile(\"mttr_min\", 50)"
+        "root_selector": "data.issues.nodes",
+        "columns": [
+          { "selector": "createdAt", "text": "createdAt", "type": "timestamp" },
+          { "selector": "completedAt", "text": "completedAt", "type": "timestamp" }
+        ]
       } ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/.*/" }, "colorMode": "value", "graphMode": "none", "textMode": "value" },
+      "transformations": [
+        { "id": "calculateField", "options": { "mode": "binary", "binary": { "left": "completedAt", "operator": "-", "right": "createdAt" }, "alias": "resolve_ms", "replaceFields": true } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["median"], "fields": "/resolve_ms/" }, "colorMode": "value", "graphMode": "none", "textMode": "value" },
       "fieldConfig": { "defaults": {
-        "unit": "m", "decimals": 1, "displayName": "minutes",
+        "unit": "ms", "decimals": 0, "displayName": "median",
         "color": { "mode": "fixed", "fixedColor": "#2dd4bf" }
       } }
     },
@@ -235,7 +243,7 @@
       "gridPos": { "h": 7, "w": 10, "x": 14, "y": 18 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [ { "expr": "selfheal_dispatcher_healthcheck_dep", "refId": "A", "instant": true, "legendFormat": "{{dep}}" } ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" }, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "justifyMode": "center", "orientation": "horizontal" },
+      "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "justifyMode": "center", "orientation": "horizontal" },
       "fieldConfig": { "defaults": {
         "mappings": [ { "type": "value", "options": { "1": { "text": "OK", "color": "green", "index": 0 }, "0": { "text": "DOWN", "color": "red", "index": 1 } } } ],
         "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] }
