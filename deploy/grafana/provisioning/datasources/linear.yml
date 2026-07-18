@@ -1,0 +1,32 @@
+# Grafana datasource provisioning — Linear via the Infinity datasource
+# (JOB-731 observability v1). Installed to
+# /etc/grafana/provisioning/datasources/linear.yml.
+#
+# The incident timeline on the Technical dashboard lists the real [Monitor]
+# tickets, which live in Linear (not Prometheus). Infinity queries the Linear
+# GraphQL API and renders the rows as a table.
+#
+# Auth: Linear personal API keys are sent as the RAW key in the Authorization
+# header (NOT "Bearer <key>") — verified against api.linear.app. So this uses
+# apiKey auth with header name "Authorization" rather than bearerToken.
+#
+# The key never touches git: init.sh seeds LINEAR_API_KEY into Grafana's
+# systemd EnvironmentFile (/etc/grafana/self-healing-admin.env) from Secret
+# Manager ("linear-api-key"), and Grafana interpolates $LINEAR_API_KEY here.
+apiVersion: 1
+
+datasources:
+  - name: Linear
+    uid: linear
+    type: yesoreyeram-infinity-datasource
+    access: proxy
+    isDefault: false
+    editable: false
+    jsonData:
+      auth_method: apiKey
+      apiKeyKey: Authorization
+      apiKeyType: header
+      allowedHosts:
+        - https://api.linear.app
+    secureJsonData:
+      apiKeyValue: $LINEAR_API_KEY

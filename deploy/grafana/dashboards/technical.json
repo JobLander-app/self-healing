@@ -1,83 +1,242 @@
 {
   "uid": "selfheal-technical",
-  "title": "Self-Healing — Технический",
+  "title": "Self-Healing — Technical",
   "tags": ["self-healing", "technical"],
   "timezone": "browser",
   "schemaVersion": 39,
   "refresh": "30s",
-  "time": { "from": "now-24h", "to": "now" },
+  "time": { "from": "now-30d", "to": "now" },
   "panels": [
     {
-      "id": 1, "type": "stat", "title": "Dispatcher", "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [ { "expr": "max(selfheal_dispatcher_up)", "refId": "A", "instant": true } ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
-      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "1": { "text": "UP", "color": "green" }, "0": { "text": "DOWN", "color": "red" } } } ], "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] } } }
+      "id": 1,
+      "type": "text",
+      "title": "",
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "# Self-Healing Loop\nAutonomous production repair · consumer: **JobLander**"
+      }
     },
     {
-      "id": 2, "type": "stat", "title": "Healthcheck", "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [ { "expr": "min(selfheal_dispatcher_healthcheck_healthy)", "refId": "A", "instant": true } ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
-      "fieldConfig": { "defaults": { "displayName": "деп здоровы / 5", "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 5, "color": "green" } ] } } }
+      "id": 2,
+      "type": "text",
+      "title": "",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 3 },
+      "options": {
+        "mode": "markdown",
+        "content": "> ### 🚀 First fully-autonomous fix shipped\n> **JOB-746** — recurring CORS errors detected, patched & merged to prod with **no human in the loop**.\n>\n> `detect → done 23 min`  ·  `cost $1.79`  ·  `merged 00:24 UTC`"
+      }
     },
+
     {
-      "id": 3, "type": "stat", "title": "Стоимость (всего)", "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [ { "expr": "max(selfheal_dispatcher_cost_usd_total)", "refId": "A", "instant": true } ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "none" },
-      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 } }
-    },
-    {
-      "id": 4, "type": "stat", "title": "Посл. прогон, длит.", "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [ { "expr": "max(selfheal_dispatcher_last_run_duration_seconds)", "refId": "A", "instant": true } ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "none" },
-      "fieldConfig": { "defaults": { "unit": "s" } }
-    },
-    {
-      "id": 5, "type": "stat", "title": "Детектор выхода", "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [ { "expr": "max(selfheal_watcher_detector_ok)", "refId": "A", "instant": true } ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
-      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "1": { "text": "OK", "color": "green" }, "0": { "text": "FAIL", "color": "red" } } } ], "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] } } }
-    },
-    {
-      "id": 6, "type": "stat", "title": "Watcher heartbeat, назад", "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "id": 3,
+      "type": "stat",
+      "title": "Watcher uptime",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [ { "expr": "time() - max(selfheal_watcher_last_tick_timestamp_seconds)", "refId": "A", "instant": true } ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
-      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "green" }, { "value": 180, "color": "red" } ] } } }
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "textMode": "value" },
+      "fieldConfig": { "defaults": {
+        "unit": "s",
+        "mappings": [ { "type": "range", "options": { "from": 0, "to": 180, "result": { "text": "Live", "color": "green", "index": 0 } } } ],
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "green" }, { "value": 180, "color": "red" } ] }
+      } }
     },
     {
-      "id": 7, "type": "timeseries", "title": "Прогоны фиксера по исходу (increase 1ч)", "gridPos": { "h": 8, "w": 16, "x": 0, "y": 4 },
+      "id": 4,
+      "type": "stat",
+      "title": "Dependency health",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [ { "expr": "sum by (outcome) (increase(selfheal_dispatcher_runs_total[1h]))", "refId": "A", "legendFormat": "{{outcome}}" } ],
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 40, "stacking": { "mode": "normal" } } } }
+      "targets": [ { "expr": "clamp_max(min(selfheal_dispatcher_healthcheck_healthy), 5)", "refId": "A", "instant": true } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "textMode": "value" },
+      "fieldConfig": { "defaults": {
+        "unit": "none",
+        "displayName": "of 5 healthy",
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 4, "color": "orange" }, { "value": 5, "color": "green" } ] }
+      } }
     },
     {
-      "id": 8, "type": "state-timeline", "title": "Здоровье зависимостей", "gridPos": { "h": 8, "w": 8, "x": 16, "y": 4 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [ { "expr": "selfheal_dispatcher_healthcheck_dep", "refId": "A", "legendFormat": "{{dep}}" } ],
-      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "1": { "text": "OK", "color": "green" }, "0": { "text": "DOWN", "color": "red" } } } ], "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] } } }
+      "id": 5,
+      "type": "stat",
+      "title": "Incidents filed",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 7 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "linear" },
+      "targets": [ {
+        "refId": "A",
+        "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "linear" },
+        "type": "graphql",
+        "source": "url",
+        "format": "table",
+        "parser": "backend",
+        "url": "https://api.linear.app/graphql",
+        "url_options": {
+          "method": "POST",
+          "body_type": "graphql",
+          "body_graphql_query": "query { issues(first: 100, filter: { labels: { name: { eq: \"monitor\" } }, team: { name: { eq: \"JobLander\" } }, createdAt: { gte: \"${__from:date:iso}\" } }) { nodes { identifier } } }"
+        },
+        "root_selector": "data.issues.nodes",
+        "columns": [ { "selector": "identifier", "text": "Ticket", "type": "string" } ]
+      } ],
+      "options": { "reduceOptions": { "calcs": ["count"], "fields": "/.*/" }, "colorMode": "value", "graphMode": "none", "textMode": "value" },
+      "fieldConfig": { "defaults": {
+        "unit": "none", "decimals": 0, "displayName": "tickets (period)",
+        "color": { "mode": "fixed", "fixedColor": "#2dd4bf" }
+      } }
     },
     {
-      "id": 9, "type": "timeseries", "title": "Детектор выхода / подряд-плохих", "gridPos": { "h": 7, "w": 12, "x": 0, "y": 12 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "max(selfheal_watcher_detector_ok)", "refId": "A", "legendFormat": "detector_ok" },
-        { "expr": "max(selfheal_watcher_consecutive_bad)", "refId": "B", "legendFormat": "consecutive_bad" }
-      ],
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } } }
+      "id": 6,
+      "type": "stat",
+      "title": "Autonomous actions",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 7 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "linear" },
+      "targets": [ {
+        "refId": "A",
+        "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "linear" },
+        "type": "graphql",
+        "source": "url",
+        "format": "table",
+        "parser": "backend",
+        "url": "https://api.linear.app/graphql",
+        "url_options": {
+          "method": "POST",
+          "body_type": "graphql",
+          "body_graphql_query": "query { issues(first: 100, filter: { labels: { name: { eq: \"monitor\" } }, team: { name: { eq: \"JobLander\" } }, createdAt: { gte: \"${__from:date:iso}\" }, or: [ { state: { type: { eq: \"completed\" } } }, { state: { type: { eq: \"canceled\" } } } ] }) { nodes { identifier } } }"
+        },
+        "root_selector": "data.issues.nodes",
+        "columns": [ { "selector": "identifier", "text": "Ticket", "type": "string" } ]
+      } ],
+      "options": { "reduceOptions": { "calcs": ["count"], "fields": "/.*/" }, "colorMode": "value", "graphMode": "none", "textMode": "value" },
+      "fieldConfig": { "defaults": {
+        "unit": "none", "decimals": 0, "displayName": "fixed + not-a-bug",
+        "color": { "mode": "fixed", "fixedColor": "#2dd4bf" }
+      } }
     },
     {
-      "id": 10, "type": "timeseries", "title": "Пейджи / восстановления (накопительно)", "gridPos": { "h": 7, "w": 12, "x": 12, "y": 12 },
+      "id": 7,
+      "type": "stat",
+      "title": "Median time-to-resolve",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 7 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "linear" },
+      "targets": [ {
+        "refId": "A",
+        "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "linear" },
+        "type": "uql",
+        "source": "url",
+        "format": "table",
+        "url": "https://api.linear.app/graphql",
+        "url_options": {
+          "method": "POST",
+          "body_type": "graphql",
+          "body_graphql_query": "query { issues(first: 100, filter: { labels: { name: { eq: \"monitor\" } }, team: { name: { eq: \"JobLander\" } }, completedAt: { gte: \"${__from:date:iso}\" } }) { nodes { createdAt completedAt } } }"
+        },
+        "uql": "parse-json\n| scope \"data.issues.nodes\"\n| extend \"mttr_min\"=(todatetime(\"completedAt\") - todatetime(\"createdAt\")) / 60000\n| summarize \"value\"=percentile(\"mttr_min\", 50)"
+      } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/.*/" }, "colorMode": "value", "graphMode": "none", "textMode": "value" },
+      "fieldConfig": { "defaults": {
+        "unit": "m", "decimals": 1, "displayName": "minutes",
+        "color": { "mode": "fixed", "fixedColor": "#2dd4bf" }
+      } }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Fixer spend",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "max(selfheal_watcher_pages_total)", "refId": "A", "legendFormat": "pages" },
-        { "expr": "max(selfheal_watcher_recoveries_total)", "refId": "B", "legendFormat": "recoveries" }
-      ],
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } } }
+      "targets": [ { "expr": "max(selfheal_dispatcher_cost_usd_total)", "refId": "A", "instant": true } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "value" },
+      "fieldConfig": { "defaults": {
+        "unit": "currencyUSD", "decimals": 2, "displayName": "spent to date",
+        "color": { "mode": "fixed", "fixedColor": "#2dd4bf" }
+      } }
+    },
+
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Incident timeline",
+      "gridPos": { "h": 14, "w": 14, "x": 0, "y": 11 },
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "linear" },
+      "targets": [ {
+        "refId": "A",
+        "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "linear" },
+        "type": "graphql",
+        "source": "url",
+        "format": "table",
+        "parser": "backend",
+        "url": "https://api.linear.app/graphql",
+        "url_options": {
+          "method": "POST",
+          "body_type": "graphql",
+          "body_graphql_query": "query { issues(first: 30, filter: { labels: { name: { eq: \"monitor\" } }, team: { name: { eq: \"JobLander\" } } }, orderBy: createdAt) { nodes { identifier title createdAt completedAt state { name type } } } }"
+        },
+        "root_selector": "data.issues.nodes",
+        "columns": [
+          { "selector": "state.name", "text": "State", "type": "string" },
+          { "selector": "identifier", "text": "Ticket", "type": "string" },
+          { "selector": "title", "text": "Title", "type": "string" },
+          { "selector": "createdAt", "text": "Created", "type": "timestamp" }
+        ]
+      } ],
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "left", "filterable": false } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "State" },
+            "properties": [
+              { "id": "custom.width", "value": 110 },
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "basic" } },
+              { "id": "mappings", "value": [
+                { "type": "value", "options": {
+                  "Done": { "text": "Done", "color": "green", "index": 0 },
+                  "Canceled": { "text": "Canceled", "color": "#6b7280", "index": 1 },
+                  "In Progress": { "text": "In Progress", "color": "blue", "index": 2 },
+                  "To Do": { "text": "To Do", "color": "orange", "index": 3 },
+                  "Triage": { "text": "Triage", "color": "orange", "index": 4 },
+                  "Backlog": { "text": "Backlog", "color": "#6b7280", "index": 5 }
+                } }
+              ] }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Ticket" },
+            "properties": [ { "id": "custom.width", "value": 100 } ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Created" },
+            "properties": [ { "id": "custom.width", "value": 170 }, { "id": "unit", "value": "dateTimeAsIso" } ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "type": "bargauge",
+      "title": "Fixer activity — by outcome",
+      "gridPos": { "h": 7, "w": 10, "x": 14, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "sum by (outcome) (selfheal_dispatcher_runs_total)", "refId": "A", "instant": true, "legendFormat": "{{outcome}}" } ],
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": {
+        "unit": "none", "decimals": 0,
+        "color": { "mode": "fixed", "fixedColor": "#2dd4bf" },
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "#2dd4bf" } ] }
+      } }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Dependencies",
+      "gridPos": { "h": 7, "w": 10, "x": 14, "y": 18 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "selfheal_dispatcher_healthcheck_dep", "refId": "A", "instant": true, "legendFormat": "{{dep}}" } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" }, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "justifyMode": "center", "orientation": "horizontal" },
+      "fieldConfig": { "defaults": {
+        "mappings": [ { "type": "value", "options": { "1": { "text": "OK", "color": "green", "index": 0 }, "0": { "text": "DOWN", "color": "red", "index": 1 } } } ],
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] }
+      } }
     }
   ]
 }

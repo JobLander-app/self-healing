@@ -317,15 +317,31 @@ if [ -d "$SH_DIR" ]; then
   install -m 0644 "$SH_DIR/deploy/prometheus/prometheus.yml" /etc/prometheus/prometheus.yml
   chown prometheus:prometheus /etc/prometheus/prometheus.yml
 
-  # Grafana provisioning (datasource + dashboard provider) + dashboards dir.
+  # Grafana provisioning (datasources + dashboard provider) + dashboards dir.
   mkdir -p /etc/grafana/provisioning/datasources \
     /etc/grafana/provisioning/dashboards /etc/grafana/dashboards
   install -m 0644 "$SH_DIR/deploy/grafana/provisioning/datasources/prometheus.yml" \
     /etc/grafana/provisioning/datasources/prometheus.yml
+  # Linear datasource (Infinity) — powers the Technical dashboard's incident
+  # timeline (the real [Monitor] tickets, which live in Linear not Prometheus).
+  install -m 0644 "$SH_DIR/deploy/grafana/provisioning/datasources/linear.yml" \
+    /etc/grafana/provisioning/datasources/linear.yml
   install -m 0644 "$SH_DIR/deploy/grafana/provisioning/dashboards/dashboards.yml" \
     /etc/grafana/provisioning/dashboards/dashboards.yml
-  # Dashboard JSONs (none yet — .gitkeep only). Glob may not match; keep going.
+  # Dashboard JSONs (business + technical). Glob may not match; keep going.
   cp -f "$SH_DIR"/deploy/grafana/dashboards/*.json /etc/grafana/dashboards/ 2>/dev/null || true
+
+  # Infinity datasource plugin — the "Linear" datasource above is of this type.
+  # Without it the incident timeline panel has no datasource. Idempotent: skip
+  # if already present. grafana-cli ships with the grafana package (step 5).
+  INFINITY_PLUGIN_ID=yesoreyeram-infinity-datasource
+  if [ ! -d "/var/lib/grafana/plugins/$INFINITY_PLUGIN_ID" ]; then
+    grafana-cli --pluginsDir /var/lib/grafana/plugins plugins install "$INFINITY_PLUGIN_ID" \
+      && chown -R grafana:grafana /var/lib/grafana/plugins \
+      || add_todo "grafana-cli failed to install $INFINITY_PLUGIN_ID — the Linear datasource + incident timeline are unavailable; re-run init or install manually"
+  else
+    log "grafana plugin $INFINITY_PLUGIN_ID already installed"
+  fi
 
   # Grafana main config: render __CONSOLE_DOMAIN__ then install (root:grafana 0640).
   sed "s/__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN/g" "$SH_DIR/deploy/grafana/grafana.ini" \
@@ -338,30 +354,46 @@ if [ -d "$SH_DIR" ]; then
   sed "s/__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN/g" "$SH_DIR/deploy/caddy/Caddyfile" \
     > /etc/caddy/Caddyfile
 
-  # Seed Grafana admin password from Secret Manager into a root-only systemd
-  # EnvironmentFile — keeps plaintext out of grafana.ini/git. Applies on
-  # Grafana's FIRST start (initial admin creation); rotate later via grafana-cli.
+  # Grafana secrets → a root-only systemd EnvironmentFile. Keeps plaintext out
+  # of grafana.ini / git. Two secrets live here, both interpolated by Grafana:
+  #   GF_SECURITY_ADMIN_PASSWORD — initial admin password (Grafana's FIRST start;
+  #                                rotate later via grafana-cli)
+  #   LINEAR_API_KEY             — read by the provisioned Linear (Infinity)
+  #                                datasource via $LINEAR_API_KEY
   mkdir -p /etc/systemd/system/grafana-server.service.d
   cat > /etc/systemd/system/grafana-server.service.d/10-self-healing.conf <<'DROPIN'
 [Service]
 EnvironmentFile=/etc/grafana/self-healing-admin.env
 DROPIN
+  # Start fresh (must exist even if empty, or the unit fails to start).
+  GRAFANA_ENV_FILE=/etc/grafana/self-healing-admin.env
+  ( umask 077; : > "$GRAFANA_ENV_FILE" )
+
   GRAFANA_ADMIN_PW=$(gcloud secrets versions access latest \
     --secret="$GRAFANA_ADMIN_SECRET" --project="$PROJECT_ID" 2>/dev/null || true)
   if [ -n "$GRAFANA_ADMIN_PW" ]; then
     ( umask 077; printf 'GF_SECURITY_ADMIN_PASSWORD=%s\n' "$GRAFANA_ADMIN_PW" \
-      > /etc/grafana/self-healing-admin.env )
-    chown root:grafana /etc/grafana/self-healing-admin.env
-    chmod 0640 /etc/grafana/self-healing-admin.env
+      >> "$GRAFANA_ENV_FILE" )
     log "grafana admin password seeded from secret '$GRAFANA_ADMIN_SECRET'"
   else
-    # EnvironmentFile must exist or the unit fails to start — ensure an empty one.
-    [ -f /etc/grafana/self-healing-admin.env ] || : > /etc/grafana/self-healing-admin.env
-    chown root:grafana /etc/grafana/self-healing-admin.env 2>/dev/null || true
-    chmod 0640 /etc/grafana/self-healing-admin.env
     add_todo "Grafana admin password NOT seeded (secret '$GRAFANA_ADMIN_SECRET' missing/unreadable) — admin stays default admin/admin. Create the secret, ensure it is granted to the VM SA (grafana_admin_secret), re-run init."
   fi
   unset GRAFANA_ADMIN_PW
+
+  # Linear API key for the Infinity "Linear" datasource (incident timeline).
+  LINEAR_API_KEY_VALUE=$(gcloud secrets versions access latest \
+    --secret="linear-api-key" --project="$PROJECT_ID" 2>/dev/null || true)
+  if [ -n "$LINEAR_API_KEY_VALUE" ]; then
+    ( umask 077; printf 'LINEAR_API_KEY=%s\n' "$LINEAR_API_KEY_VALUE" \
+      >> "$GRAFANA_ENV_FILE" )
+    log "LINEAR_API_KEY seeded from secret 'linear-api-key' (Infinity/Linear datasource)"
+  else
+    add_todo "LINEAR_API_KEY NOT seeded (secret 'linear-api-key' missing/unreadable) — the Linear (Infinity) datasource cannot authenticate; the incident timeline will be empty. Ensure the secret exists and is granted to the VM SA (secret_ids), re-run init."
+  fi
+  unset LINEAR_API_KEY_VALUE
+
+  chown root:grafana "$GRAFANA_ENV_FILE"
+  chmod 0640 "$GRAFANA_ENV_FILE"
 
   # Enable + start. All localhost-bound except Caddy (80/443).
   systemctl daemon-reload
