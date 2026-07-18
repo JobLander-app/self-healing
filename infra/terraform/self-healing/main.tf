@@ -69,7 +69,7 @@ output "console_static_ip" {
 }
 
 output "console_dns_record" {
-  description = "DNS record to create (owner, via Namecheap API): console.joblander.app A <ip>."
+  description = "DNS record to create (owner, via Namecheap API): self-healing.joblander.app A <ip>."
   value       = module.self_healing.console_dns_record
 }
 

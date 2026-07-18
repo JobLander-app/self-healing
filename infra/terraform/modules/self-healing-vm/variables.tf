@@ -186,7 +186,7 @@ variable "console_domain" {
     it via the Namecheap API, same precedent as *.mcp.joblander.app).
   EOT
   type        = string
-  default     = "console.joblander.app"
+  default     = "self-healing.joblander.app"
 }
 
 variable "grafana_admin_secret" {
