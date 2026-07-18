@@ -1,6 +1,6 @@
 {
   "uid": "selfheal-business",
-  "title": "Ваш продукт — статус",
+  "title": "Your product — status",
   "tags": ["self-healing", "business"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -10,15 +10,15 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Ваш продукт сейчас",
+      "title": "Your product right now",
       "gridPos": { "h": 7, "w": 12, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [ { "expr": "max(selfheal_watcher_detector_ok)", "refId": "A", "instant": true } ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "textMode": "value", "justifyMode": "center" },
       "fieldConfig": { "defaults": {
         "mappings": [
-          { "type": "value", "options": { "1": { "text": "✅ Работает нормально", "color": "green", "index": 0 } } },
-          { "type": "value", "options": { "0": { "text": "🔧 Идёт сбой — система чинит", "color": "red", "index": 1 } } }
+          { "type": "value", "options": { "1": { "text": "✅ Running normally", "color": "green", "index": 0 } } },
+          { "type": "value", "options": { "0": { "text": "🔧 Outage — auto-healing", "color": "red", "index": 1 } } }
         ],
         "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] }
       } }
@@ -26,55 +26,55 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Система следит за собой",
+      "title": "The system watches itself",
       "gridPos": { "h": 7, "w": 12, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [ { "expr": "clamp_max(min(selfheal_dispatcher_healthcheck_healthy), 5)", "refId": "A", "instant": true } ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "justifyMode": "center" },
       "fieldConfig": { "defaults": {
         "unit": "none",
-        "displayName": "инструментов здоровы из 5",
-        "mappings": [ { "type": "value", "options": { "5": { "text": "5 — всё в порядке", "color": "green", "index": 0 } } } ],
+        "displayName": "tools healthy of 5",
+        "mappings": [ { "type": "value", "options": { "5": { "text": "5 — all good", "color": "green", "index": 0 } } } ],
         "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 4, "color": "orange" }, { "value": 5, "color": "green" } ] }
       } }
     },
     {
       "id": 3,
       "type": "stat",
-      "title": "Починилось само",
+      "title": "Fixed automatically",
       "gridPos": { "h": 6, "w": 8, "x": 0, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [ { "expr": "sum(increase(selfheal_dispatcher_runs_total{outcome=\"fixed\"}[$__range])) or vector(0)", "refId": "A", "instant": true } ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "value", "justifyMode": "center" },
       "fieldConfig": { "defaults": {
-        "unit": "none", "decimals": 0, "displayName": "сбоев исправлено без вас",
+        "unit": "none", "decimals": 0, "displayName": "outages fixed without you",
         "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "green" } ] }
       } }
     },
     {
       "id": 4,
       "type": "stat",
-      "title": "Проблем поймано",
+      "title": "Problems caught",
       "gridPos": { "h": 6, "w": 8, "x": 8, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [ { "expr": "sum(increase(selfheal_watcher_pages_total[$__range])) or vector(0)", "refId": "A", "instant": true } ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "value", "justifyMode": "center" },
       "fieldConfig": { "defaults": {
-        "unit": "none", "decimals": 0, "displayName": "сбоев замечено вовремя",
+        "unit": "none", "decimals": 0, "displayName": "outages caught in time",
         "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "blue" } ] }
       } }
     },
     {
       "id": 5,
       "type": "stat",
-      "title": "Наблюдение активно",
+      "title": "Monitoring active",
       "gridPos": { "h": 6, "w": 8, "x": 16, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [ { "expr": "time() - max(selfheal_watcher_last_tick_timestamp_seconds)", "refId": "A", "instant": true } ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "textMode": "value", "justifyMode": "center" },
       "fieldConfig": { "defaults": {
         "unit": "s",
-        "mappings": [ { "type": "range", "options": { "from": 0, "to": 180, "result": { "text": "✅ Следит за продуктом", "color": "green", "index": 0 } } } ],
+        "mappings": [ { "type": "range", "options": { "from": 0, "to": 180, "result": { "text": "✅ Watching your product", "color": "green", "index": 0 } } } ],
         "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "green" }, { "value": 180, "color": "red" } ] }
       } }
     },
@@ -83,7 +83,7 @@
       "type": "text",
       "title": "",
       "gridPos": { "h": 5, "w": 24, "x": 0, "y": 13 },
-      "options": { "mode": "markdown", "content": "### Что это за экран\n\nВаш продукт под круглосуточным присмотром. Система сама **замечает**, когда что-то ломается для пользователей, **чинит** это (пишет исправление, проверяет и выкатывает в прод) и присылает вам итог в Telegram — вмешиваться не нужно.\n\n- **Работает нормально** — пользователи получают то, за чем пришли.\n- **Починилось само** — сбои, которые система исправила без вас за выбранный период.\n- **Система следит за собой** — 5 внутренних инструментов проверяют сами себя каждые 6 часов.\n\nНужны инженерные детали (какие именно сбои, за сколько, во сколько обошлось) — переключитесь на дашборд **«Технический»** сверху слева." }
+      "options": { "mode": "markdown", "content": "### What this screen shows\n\nYour product is watched around the clock. The system **notices** when something breaks for your users, **fixes** it (writes the change, verifies it, ships it to production) and sends you the result in Telegram — no action needed from you.\n\n- **Running normally** — users get what they came for.\n- **Fixed automatically** — outages the system resolved on its own over the selected period.\n- **The system watches itself** — 5 internal tools check themselves every 6 hours.\n\nNeed the engineering detail (which outages, how fast, what it cost)? Switch to the **Technical** dashboard, top-left." }
     }
   ]
 }
