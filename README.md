@@ -183,6 +183,54 @@ the only steps init cannot script:
 
 ---
 
+## Domain & HTTPS (the console)
+
+The observability console (Grafana + dashboards) is served by Caddy, which
+obtains and renews a Let's Encrypt certificate automatically — you just point a
+domain at your instance.
+
+**1. Get the instance IP.** After `terraform apply`, read the outputs:
+
+```console
+$ terraform output console_static_ip
+"203.0.113.10"
+$ terraform output console_dns_record
+"self-healing.example.com A 203.0.113.10"
+```
+
+**2. Create one DNS `A` record** at your DNS provider — Host = your chosen
+subdomain, Type = `A`, Value = the IP above. Any provider works; e.g. in
+Namecheap (*Advanced DNS → Host Records*):
+
+| Type | Host | Value | TTL |
+|---|---|---|---|
+| A Record | `self-healing` | `203.0.113.10` | Automatic |
+
+**3. Set your domain** and re-apply, so the instance renders it into Caddy + Grafana:
+
+```hcl
+# terraform.tfvars
+console_domain = "self-healing.example.com"
+```
+```console
+$ terraform apply
+```
+
+**4. Open `https://<your-domain>`.** Once DNS resolves (usually minutes), Caddy
+issues the certificate on the first request — no manual cert steps. You land on
+the Grafana login; the admin password is the Secret Manager secret
+`self-healing-grafana-admin`.
+
+> **Prefer no public domain?** Skip steps 2–3 and reach the console over an SSH
+> tunnel instead:
+> ```console
+> $ gcloud compute ssh <vm> --tunnel-through-iap -- -L 3000:localhost:3000
+> ```
+> then open `http://localhost:3000`. Nothing is exposed to the internet — you can
+> even leave ports 80/443 closed.
+
+---
+
 ## Deploying a code change
 
 The VM runs from a git checkout of this repo's `main`; there is no CI/CD to the VM
