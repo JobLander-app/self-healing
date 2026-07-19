@@ -231,6 +231,20 @@ test("gcpAuditExtract: Cloud Run v1 ReplaceService → run_deploy (not misclassi
   ]);
 });
 
+test("gcpAuditExtract: resource-scoped setIamPolicy → iam_change (lowercase method)", () => {
+  const entry: GcpAuditLogEntry = {
+    insertId: "iam-1",
+    timestamp: "2026-07-18T07:00:00Z",
+    protoPayload: {
+      methodName: "v1.compute.instances.setIamPolicy",
+      resourceName: "projects/meet-assistant-6d8ad/zones/europe-west1-b/instances/some-vm",
+      authenticationInfo: { principalEmail: "human@joblander.app" },
+    },
+  };
+  const { event } = gcpAuditExtract({ entry });
+  assert.equal(event.kind, "iam_change");
+});
+
 test("githubExtract: merged PR → gh id, repo entity, ts=merged_at, title+body intent", () => {
   const pr: GithubPr = {
     number: 262,

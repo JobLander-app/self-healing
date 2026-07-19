@@ -31,7 +31,11 @@ function buildFilter(sinceIso: string): string {
     `OR protoPayload.methodName="v1.compute.instances.insert" ` +
     `OR protoPayload.methodName:"run.v2.Services" ` +
     `OR protoPayload.methodName:"run.v1.Services" ` +
-    `OR protoPayload.methodName="SetIamPolicy") ` +
+    // Substring (`:`), not equality (`=`): catches BOTH the project-level
+    // `SetIamPolicy` and resource-scoped `v1.compute.instances.setIamPolicy`
+    // (Codex P2). `.setIamPolicy` also matches the resource-scoped lowercase form.
+    `OR protoPayload.methodName:"SetIamPolicy" ` +
+    `OR protoPayload.methodName:".setIamPolicy") ` +
     `AND timestamp>"${sinceIso}"`
   );
 }
@@ -85,21 +89,26 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
       ],
       { timeout: EXEC_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 },
     );
+    // Ingestion-lag horizon: never advance the cursor closer to now than the lag,
+    // so a late-arriving audit entry (event timestamp < pullStart, not yet
+    // queryable) is still re-scanned next tick instead of skipped (Codex P1).
+    const horizon = pullStart - config.auditIngestLagMs;
     const trimmed = stdout.trim();
-    // No rows = the whole [since, now] window is drained → advance to the poll
-    // start so a quiet period doesn't pin the cursor at the 72h backfill and let
-    // `--freshness` balloon to days on every 2-min tick (Codex P2, PR #13).
-    if (!trimmed) return { changes: [], nextCursor: pullStart };
+    // No rows = the [since, now] window is drained → advance up to the lag horizon
+    // (not to `now`) so a quiet period neither pins the cursor at the 72h backfill
+    // nor jumps past un-ingested delayed logs.
+    if (!trimmed) return { changes: [], nextCursor: horizon };
     const entries = JSON.parse(trimmed) as unknown;
     if (!Array.isArray(entries)) throw new Error("gcloud logging read: non-array JSON");
     const changes = (entries as GcpAuditLogEntry[]).map((entry) => gcpAuditExtract({ entry }));
-    // Ascending order: we took the OLDEST rows in the window. Only a FULL page
-    // (=== LIMIT) may have more above it → resume from the newest ingested ts. A
-    // short page means the window is fully drained → advance to the poll start.
+    // Ascending order: we took the OLDEST rows in the window. A FULL page
+    // (=== LIMIT) may have more above it → resume from the newest ingested ts; a
+    // short page means the window is drained → advance to the lag horizon. Either
+    // way, never advance past the horizon.
     let maxTs = since;
     for (const c of changes) if (c.event.ts > maxTs) maxTs = c.event.ts;
     const drained = changes.length < LIMIT;
-    return { changes, nextCursor: drained ? Math.max(pullStart, maxTs) : maxTs };
+    return { changes, nextCursor: Math.min(drained ? pullStart : maxTs, horizon) };
   } catch (err) {
     console.error("[ingest:gcpAudit] pull failed (fail open):", err instanceof Error ? err.message : err);
     return { changes: [], nextCursor: since };

@@ -84,6 +84,15 @@ export const config = {
   // id upsert are the real dedupe; --freshness is only a scan bound.
   auditFreshness: process.env.AUDIT_FRESHNESS || "15m",
 
+  // Cloud Logging ingestion lag: an audit entry's event `timestamp` can be
+  // BEFORE it becomes queryable (Google documents separate event vs receive
+  // time). So the audit cursor must NEVER advance closer to now than this lag —
+  // otherwise a late-arriving instance-delete with timestamp < cursor is skipped
+  // forever (the exact decommission the gate exists to catch). The cursor stays
+  // `now - lag` behind and re-scans that window every tick; idempotent id upsert
+  // makes the overlap free. Codex P1, PR #13.
+  auditIngestLagMs: parseInt(process.env.AUDIT_INGEST_LAG_MS || "600000", 10),
+
   // Serving default page size (§6).
   defaultLimit: parseInt(process.env.DEFAULT_LIMIT || "200", 10),
 
