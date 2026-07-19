@@ -1,0 +1,27 @@
+{
+  "name": "self-healing-change-ingest",
+  "version": "1.0.0",
+  "description": "Deterministic prod-change ingest + store + serving for the self-healing loop's intent-correlation gate (JOB-731). Pulls GitHub PR merges, GCP audit-log changes, and Linear issue closes into a normalized ChangeEvent SQLite store, served read-only on 127.0.0.1:4200. NO LLM inference anywhere.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "seed": "node dist/seed.js",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "express": "^4.21.0",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "@types/node-cron": "^3.0.11",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,116 @@
+/**
+ * GCP Cloud Audit Logs poller (§3.1, §4) — the source that would have caught the
+ * au delete. Runs a `gcloud logging read` of the Admin Activity audit log with
+ * the EXACT §4.1 filter, using the same execFile subprocess pattern
+ * monitor/triage.py already proved under the minimal SA (roles/logging.viewer,
+ * no new IAM). Maps each entry via gcpAuditExtract.
+ *
+ * FAIL OPEN: a gcloud failure / bad JSON yields [] — same `collection_errors`
+ * soft-fail discipline as triage.py; the tick logs and retries next beat.
+ */
+
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { config } from "../config";
+import { GcpAuditLogEntry, gcpAuditExtract } from "../extract";
+import { ExtractedChange } from "../model";
+
+const execFileAsync = promisify(execFile);
+const EXEC_TIMEOUT_MS = 60_000;
+const LIMIT = 100;
+
+/** The §4.1 change classes: instance delete/create, Cloud Run deploy, IAM set.
+ *  Both Cloud Run admin API versions land here — v2 (`run.v2.Services.*`) and v1
+ *  (`run.v1.Services.ReplaceService`, still emitted by some deploy paths). The
+ *  extractor already classifies both as `run_deploy`; dropping v1 at the filter
+ *  would leave an intentional v1 deploy/cutover absent from the change feed. */
+function buildFilter(sinceIso: string): string {
+  return (
+    `logName="projects/${config.gcpProject}/logs/cloudaudit.googleapis.com%2Factivity" ` +
+    `AND (protoPayload.methodName="v1.compute.instances.delete" ` +
+    `OR protoPayload.methodName="v1.compute.instances.insert" ` +
+    `OR protoPayload.methodName:"run.v2.Services" ` +
+    `OR protoPayload.methodName:"run.v1.Services" ` +
+    // Substring (`:`), not equality (`=`): catches BOTH the project-level
+    // `SetIamPolicy` and resource-scoped `v1.compute.instances.setIamPolicy`
+    // (Codex P2). `.setIamPolicy` also matches the resource-scoped lowercase form.
+    `OR protoPayload.methodName:"SetIamPolicy" ` +
+    `OR protoPayload.methodName:".setIamPolicy") ` +
+    `AND timestamp>"${sinceIso}"`
+  );
+}
+
+/** Parse a gcloud-style duration ("15m", "2h", "90s", "1d") to whole minutes;
+ *  falls back to 15 on anything unexpected. Used only as a floor. */
+function durationToMinutes(raw: string): number {
+  const m = raw.trim().match(/^(\d+)\s*([smhd])$/i);
+  if (!m) return 15;
+  const n = parseInt(m[1], 10);
+  const perMin = { s: 1 / 60, m: 1, h: 60, d: 1440 }[m[2].toLowerCase() as "s" | "m" | "h" | "d"];
+  return Math.max(1, Math.ceil(n * perMin));
+}
+
+/**
+ * `--freshness` must COVER the whole [since, now] scan window, else it silently
+ * caps the backfill: on a fresh-VM 72h backfill a static 15m freshness would
+ * scan only the last 15 min. Derive it from `since` (+2m overlap buffer), never
+ * below the configured floor. The precise lower bound is the `timestamp>` clause.
+ */
+function freshnessArg(since: number): string {
+  const spanMin = Math.ceil((Date.now() - since) / 60_000) + 2;
+  const floor = durationToMinutes(config.auditFreshness);
+  return `${Math.max(floor, spanMin)}m`;
+}
+
+/**
+ * Pull audit changes since `since` (epoch ms). Reads **ascending** (oldest
+ * first) with a bounded `--limit`: if a startup/outage interval has >LIMIT
+ * matching events, this ingests the OLDEST LIMIT, the caller advances the cursor
+ * to the max ingested ts, and the next tick drains forward from there — so no
+ * older event inside the intent lookback is ever skipped (Codex P2, PR #13). The
+ * `timestamp>` clause + idempotent id upsert make overlap harmless.
+ */
+export async function pull({ since }: { since: number }): Promise<{ changes: ExtractedChange[]; nextCursor: number }> {
+  const pullStart = Date.now();
+  const sinceIso = new Date(since).toISOString();
+  const filter = buildFilter(sinceIso);
+  try {
+    const { stdout } = await execFileAsync(
+      "gcloud",
+      [
+        "logging",
+        "read",
+        filter,
+        `--project=${config.gcpProject}`,
+        `--limit=${LIMIT}`,
+        "--order=asc",
+        `--freshness=${freshnessArg(since)}`,
+        "--format=json",
+      ],
+      { timeout: EXEC_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 },
+    );
+    // Ingestion-lag horizon: never advance the cursor closer to now than the lag,
+    // so a late-arriving audit entry (event timestamp < pullStart, not yet
+    // queryable) is still re-scanned next tick instead of skipped (Codex P1).
+    const horizon = pullStart - config.auditIngestLagMs;
+    const trimmed = stdout.trim();
+    // No rows = the [since, now] window is drained → advance up to the lag horizon
+    // (not to `now`) so a quiet period neither pins the cursor at the 72h backfill
+    // nor jumps past un-ingested delayed logs.
+    if (!trimmed) return { changes: [], nextCursor: horizon };
+    const entries = JSON.parse(trimmed) as unknown;
+    if (!Array.isArray(entries)) throw new Error("gcloud logging read: non-array JSON");
+    const changes = (entries as GcpAuditLogEntry[]).map((entry) => gcpAuditExtract({ entry }));
+    // Ascending order: we took the OLDEST rows in the window. A FULL page
+    // (=== LIMIT) may have more above it → resume from the newest ingested ts; a
+    // short page means the window is drained → advance to the lag horizon. Either
+    // way, never advance past the horizon.
+    let maxTs = since;
+    for (const c of changes) if (c.event.ts > maxTs) maxTs = c.event.ts;
+    const drained = changes.length < LIMIT;
+    return { changes, nextCursor: Math.min(drained ? pullStart : maxTs, horizon) };
+  } catch (err) {
+    console.error("[ingest:gcpAudit] pull failed (fail open):", err instanceof Error ? err.message : err);
+    return { changes: [], nextCursor: since };
+  }
+}
