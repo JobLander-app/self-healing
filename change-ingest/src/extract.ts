@@ -108,6 +108,7 @@ export interface GithubPr {
   title?: string;
   body?: string | null;
   merged_at?: string | null;
+  updated_at?: string | null;
   html_url?: string;
   merged_by?: { login?: string } | null;
   user?: { login?: string } | null;

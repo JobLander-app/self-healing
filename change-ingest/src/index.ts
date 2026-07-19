@@ -19,9 +19,12 @@ import { pull as pullGcpAudit } from "./ingest/gcpAudit";
 import { pull as pullLinear } from "./ingest/linear";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-// First run (no cursor yet) backfills this far. Bounded so a fresh VM doesn't
-// try to replay all of history; the sources' own retention caps it anyway.
-const INITIAL_BACKFILL_MS = 24 * 60 * 60 * 1000;
+// First run (no cursor yet) backfills this far. MUST cover the dispatcher's
+// INTENT-GATE lookback (config.initialBackfillHrs >= dispatcher intentLookbackHrs)
+// so the advertised /changes window is actually populated on a fresh VM / a
+// recreated changes.db — else an explained anomaly reads as unexplained during
+// the rollout window (Codex P2, PR #13). Bounded by the sources' own retention.
+const INITIAL_BACKFILL_MS = config.initialBackfillHrs * 60 * 60 * 1000;
 
 type Puller = (args: { since: number }) => Promise<ExtractedChange[]>;
 

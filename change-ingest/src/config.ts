@@ -71,6 +71,14 @@ export const config = {
   // hours-scale correlation and keeps the DB tiny.
   retentionDays: parseInt(process.env.RETENTION_DAYS || "90", 10),
 
+  // First-run backfill (no cursor yet — fresh VM or a recreated changes.db).
+  // MUST be >= the dispatcher's INTENT-GATE lookback (dispatcher config
+  // intentLookbackHrs, default 72h): otherwise, in the rollout/recovery window,
+  // an intentional decommission/decision from 25–72h ago is ABSENT from
+  // /changes, and the agent would treat an explained anomaly as unexplained and
+  // fix it (the exact failure the gate exists to prevent). Codex P2, PR #13.
+  initialBackfillHrs: parseInt(process.env.INITIAL_BACKFILL_HRS || "72", 10),
+
   // `gcloud logging read --freshness` window — bounds the query, overlaps the
   // 2-min cron generously so a missed tick self-heals (§9). Cursor + idempotent
   // id upsert are the real dedupe; --freshness is only a scan bound.

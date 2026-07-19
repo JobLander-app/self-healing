@@ -31,10 +31,35 @@ function buildFilter(sinceIso: string): string {
   );
 }
 
+/** Parse a gcloud-style duration ("15m", "2h", "90s", "1d") to whole minutes;
+ *  falls back to 15 on anything unexpected. Used only as a floor. */
+function durationToMinutes(raw: string): number {
+  const m = raw.trim().match(/^(\d+)\s*([smhd])$/i);
+  if (!m) return 15;
+  const n = parseInt(m[1], 10);
+  const perMin = { s: 1 / 60, m: 1, h: 60, d: 1440 }[m[2].toLowerCase() as "s" | "m" | "h" | "d"];
+  return Math.max(1, Math.ceil(n * perMin));
+}
+
 /**
- * Pull audit changes since `since` (epoch ms). `--freshness` bounds the scan
- * window (config.auditFreshness); the `timestamp>` clause + idempotent id upsert
- * are the real dedupe, so overlap is harmless.
+ * `--freshness` must COVER the whole [since, now] scan window, else it silently
+ * caps the backfill: on a fresh-VM 72h backfill a static 15m freshness would
+ * scan only the last 15 min. Derive it from `since` (+2m overlap buffer), never
+ * below the configured floor. The precise lower bound is the `timestamp>` clause.
+ */
+function freshnessArg(since: number): string {
+  const spanMin = Math.ceil((Date.now() - since) / 60_000) + 2;
+  const floor = durationToMinutes(config.auditFreshness);
+  return `${Math.max(floor, spanMin)}m`;
+}
+
+/**
+ * Pull audit changes since `since` (epoch ms). Reads **ascending** (oldest
+ * first) with a bounded `--limit`: if a startup/outage interval has >LIMIT
+ * matching events, this ingests the OLDEST LIMIT, the caller advances the cursor
+ * to the max ingested ts, and the next tick drains forward from there — so no
+ * older event inside the intent lookback is ever skipped (Codex P2, PR #13). The
+ * `timestamp>` clause + idempotent id upsert make overlap harmless.
  */
 export async function pull({ since }: { since: number }): Promise<ExtractedChange[]> {
   const sinceIso = new Date(since).toISOString();
@@ -48,7 +73,8 @@ export async function pull({ since }: { since: number }): Promise<ExtractedChang
         filter,
         `--project=${config.gcpProject}`,
         `--limit=${LIMIT}`,
-        `--freshness=${config.auditFreshness}`,
+        "--order=asc",
+        `--freshness=${freshnessArg(since)}`,
         "--format=json",
       ],
       { timeout: EXEC_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 },
