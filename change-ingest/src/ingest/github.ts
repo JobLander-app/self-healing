@@ -68,12 +68,14 @@ export type PageFetcher = (args: {
 export interface RepoScan {
   /** Merged PRs with merged_at > since, across all scanned pages. */
   merged: GithubPr[];
-  /** True iff we stopped because MAX_PAGES was hit WITHOUT reaching the cursor —
-   *  i.e. older un-scanned PRs may remain (Codex P2, PR #13). */
+  /** True iff we stopped because MAX_PAGES was hit (or a rate-limit) WITHOUT
+   *  reaching the cursor — i.e. older un-scanned PRs may remain. When capped, the
+   *  caller must NOT advance the cursor at all: because we page newest-first from
+   *  `now`, ANY forward cursor (even the oldest we scanned) would make the next
+   *  scan stop above the un-scanned older PRs and skip them permanently (Codex
+   *  P2, PR #13). The cursor stays at `since` and the newest page is re-ingested
+   *  (idempotent) each tick until the burst clears. */
   capped: boolean;
-  /** Oldest `updated_at` we actually scanned (epoch ms), or null if none. When
-   *  capped, this is the floor below which coverage is NOT guaranteed. */
-  oldestScannedUpdatedAt: number | null;
 }
 
 /**
@@ -84,8 +86,8 @@ export interface RepoScan {
  * closed PRs would miss a merge on page 2, and a first page of only unmerged
  * closures would re-scan page 1 forever (Codex P2, PR #13).
  *
- * Returns `capped` + `oldestScannedUpdatedAt` so the caller can keep the shared
- * cursor from advancing past PRs it never scanned.
+ * Returns `capped` so the caller keeps the shared cursor from advancing while a
+ * repo's older PRs remain unscanned.
  */
 export async function collectMergedSince({
   owner,
@@ -101,14 +103,12 @@ export async function collectMergedSince({
   fetchPage?: PageFetcher;
 }): Promise<RepoScan> {
   const merged: GithubPr[] = [];
-  let oldestScannedUpdatedAt: number | null = null;
   let capped = false;
 
   for (let page = 1; page <= MAX_PAGES; page++) {
     const pageResult = await fetchPage({ owner, repo, token, page });
     if (pageResult === "rate-limited") {
-      // Treat a rate-limit as "may have missed older PRs" → capped, so the
-      // caller does not advance the cursor past what we managed to scan.
+      // Rate-limited after some pages → older PRs may be unscanned → capped.
       capped = true;
       break;
     }
@@ -123,11 +123,6 @@ export async function collectMergedSince({
         reachedCursor = true;
         break;
       }
-      if (Number.isFinite(updatedAt)) {
-        if (oldestScannedUpdatedAt === null || updatedAt < oldestScannedUpdatedAt) {
-          oldestScannedUpdatedAt = updatedAt;
-        }
-      }
       if (!pr.merged_at) continue;
       const mergedAt = Date.parse(pr.merged_at);
       if (Number.isNaN(mergedAt) || mergedAt <= since) continue;
@@ -139,11 +134,11 @@ export async function collectMergedSince({
     if (page === MAX_PAGES) {
       capped = true;
       console.warn(
-        `[ingest:github] ${owner}/${repo} hit MAX_PAGES=${MAX_PAGES} (>${MAX_PAGES * PER_PAGE} closed PRs since cursor) — cursor held at the oldest scanned PR; older ones drain on the next tick`,
+        `[ingest:github] ${owner}/${repo} hit MAX_PAGES=${MAX_PAGES} (>${MAX_PAGES * PER_PAGE} closed PRs since cursor) — cursor HELD at 'since'; newest page re-ingested each tick until the burst clears`,
       );
     }
   }
-  return { merged, capped, oldestScannedUpdatedAt };
+  return { merged, capped };
 }
 
 /**
@@ -151,10 +146,12 @@ export async function collectMergedSince({
  * Independent per repo — one repo's failure never drops another's results.
  *
  * The github cursor is shared across all repos, so it may only advance to a point
- * below which EVERY repo is fully covered: `min` over repos of each repo's safe
- * floor. A fully-drained repo permits advancing to the poll's start time; a
- * capped (or rate-limited, or failed) repo pins the floor at the oldest PR it
- * scanned (or at `since`), so no unscanned older merge is ever skipped.
+ * below which EVERY repo is fully covered. Because we page newest-first from `now`
+ * with no server-side since-filter, a capped repo cannot drain its older tail via
+ * any forward cursor, so it PINS the shared cursor at `since` (the newest page is
+ * re-ingested idempotently each tick). Only when ALL repos fully drain does the
+ * cursor advance to the poll start. Realistic 72h volume for these repos is far
+ * below the cap, so the pin is a pathological-burst safeguard, always logged.
  */
 export async function pull({ since }: { since: number }): Promise<{ changes: ExtractedChange[]; nextCursor: number }> {
   let token: string;
@@ -167,22 +164,21 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
 
   const pullStart = Date.now();
   const out: ExtractedChange[] = [];
-  let floor = pullStart; // lowest safe cursor across repos (optimistic start)
+  let allDrained = true; // becomes false if any repo is capped or fails
 
   for (const { owner, repo } of config.trackedRepos) {
     try {
       const scan = await collectMergedSince({ owner, repo, token, since });
       for (const pr of scan.merged) out.push(githubExtract({ pr }));
-      // Capped repo → don't advance past the oldest PR we scanned (or `since` if
-      // we scanned nothing before the cap). Fully-drained repo → safe to `pullStart`.
-      const repoFloor = scan.capped ? scan.oldestScannedUpdatedAt ?? since : pullStart;
-      if (repoFloor < floor) floor = repoFloor;
+      if (scan.capped) allDrained = false;
     } catch (err) {
       console.error(`[ingest:github] ${owner}/${repo} pull failed (fail open):`, err instanceof Error ? err.message : err);
-      // A failed repo's state is unknown → hold the cursor at `since` for safety.
-      floor = since;
+      // A failed repo's state is unknown → hold the cursor for safety.
+      allDrained = false;
     }
   }
 
-  return { changes: out, nextCursor: Math.max(floor, since) };
+  // Advance only when every repo fully drained; otherwise hold at `since` so no
+  // unscanned older merge is skipped.
+  return { changes: out, nextCursor: allDrained ? pullStart : since };
 }

@@ -104,7 +104,7 @@ test("collectMergedSince: hitting the page cap flags capped + reports oldest sca
       pr({ number: page * 100 + i, updatedMsAgo: (page * 30 + i + 1) * 60_000, mergedMsAgo: (page * 30 + i + 1) * 60_000 }),
     );
 
-  const { merged, capped, oldestScannedUpdatedAt } = await collectMergedSince({
+  const { merged, capped } = await collectMergedSince({
     owner: "o",
     repo: "backend",
     token: "t",
@@ -114,5 +114,4 @@ test("collectMergedSince: hitting the page cap flags capped + reports oldest sca
 
   assert.equal(capped, true, "must flag capped when MAX_PAGES exhausted without reaching cursor");
   assert.ok(merged.length > 0);
-  assert.ok(oldestScannedUpdatedAt !== null && oldestScannedUpdatedAt > since, "oldest scanned is the cursor floor, still above `since`");
 });
