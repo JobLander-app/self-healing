@@ -43,7 +43,7 @@ test("collectMergedSince: finds a merge on page 2 behind a full page of unmerged
   const fetchPage: PageFetcher = async ({ page }) =>
     page === 1 ? page1 : page === 2 ? page2 : [];
 
-  const merged = await collectMergedSince({
+  const { merged, capped } = await collectMergedSince({
     owner: "JobLander-app",
     repo: "backend",
     token: "t",
@@ -53,6 +53,7 @@ test("collectMergedSince: finds a merge on page 2 behind a full page of unmerged
 
   assert.equal(merged.length, 1);
   assert.equal(merged[0].number, 262);
+  assert.equal(capped, false);
 });
 
 // The scan stops the moment a PR's updated_at is at/before the cursor — later
@@ -70,17 +71,18 @@ test("collectMergedSince: stops at the cursor and excludes older merges", async 
     return page === 1 ? page1 : [];
   };
 
-  const merged = await collectMergedSince({ owner: "o", repo: "backend", token: "t", since, fetchPage });
+  const { merged } = await collectMergedSince({ owner: "o", repo: "backend", token: "t", since, fetchPage });
 
   assert.equal(merged.length, 1);
   assert.equal(merged[0].number, 1);
   assert.equal(page2Fetched, false, "must not page past the cursor");
 });
 
-// A rate-limit on the first page fails open (returns what was collected so far).
-test("collectMergedSince: rate-limit fails open", async () => {
+// A rate-limit on the first page fails open AND flags capped (so the caller does
+// not advance the cursor past PRs it could not read).
+test("collectMergedSince: rate-limit fails open + flags capped", async () => {
   const fetchPage: PageFetcher = async () => "rate-limited";
-  const merged = await collectMergedSince({
+  const { merged, capped } = await collectMergedSince({
     owner: "o",
     repo: "backend",
     token: "t",
@@ -88,4 +90,29 @@ test("collectMergedSince: rate-limit fails open", async () => {
     fetchPage,
   });
   assert.equal(merged.length, 0);
+  assert.equal(capped, true);
+});
+
+// Exhausting MAX_PAGES on full pages that never reach the cursor → capped=true
+// and the oldest scanned updated_at is reported (the cursor floor).
+test("collectMergedSince: hitting the page cap flags capped + reports oldest scanned", async () => {
+  const since = Date.now() - 72 * HOUR;
+  // Every page is a FULL page of merged PRs all updated > since → never reaches
+  // the cursor, so the loop runs until MAX_PAGES and caps.
+  const fetchPage: PageFetcher = async ({ page }) =>
+    Array.from({ length: 30 }, (_v, i) =>
+      pr({ number: page * 100 + i, updatedMsAgo: (page * 30 + i + 1) * 60_000, mergedMsAgo: (page * 30 + i + 1) * 60_000 }),
+    );
+
+  const { merged, capped, oldestScannedUpdatedAt } = await collectMergedSince({
+    owner: "o",
+    repo: "backend",
+    token: "t",
+    since,
+    fetchPage,
+  });
+
+  assert.equal(capped, true, "must flag capped when MAX_PAGES exhausted without reaching cursor");
+  assert.ok(merged.length > 0);
+  assert.ok(oldestScannedUpdatedAt !== null && oldestScannedUpdatedAt > since, "oldest scanned is the cursor floor, still above `since`");
 });

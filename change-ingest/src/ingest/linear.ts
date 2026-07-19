@@ -14,9 +14,14 @@ import { ExtractedChange } from "../model";
 
 const FETCH_TIMEOUT_MS = 10_000;
 const PAGE = 50;
+// Safety cap on pages per tick (PAGE * MAX_PAGES = 2500 issues). A 72h window of
+// completed/canceled issues is far below this; hitting it is logged, and the
+// cursor is held (not advanced) so nothing is skipped (Codex P2, PR #13).
+const MAX_PAGES = 50;
 
-const QUERY = `query IngestLinear($filter: IssueFilter!, $first: Int!) {
-  issues(filter: $filter, first: $first, orderBy: updatedAt) {
+const QUERY = `query IngestLinear($filter: IssueFilter!, $first: Int!, $after: String) {
+  issues(filter: $filter, first: $first, after: $after, orderBy: updatedAt) {
+    pageInfo { hasNextPage endCursor }
     nodes {
       identifier
       title
@@ -45,18 +50,64 @@ interface LinearGqlNode {
   comments?: { nodes?: { body?: string }[] } | null;
 }
 
+/** One page fetch — throws on transport/GraphQL error (caught by pull's loop). */
+async function fetchPage({
+  key,
+  filter,
+  after,
+}: {
+  key: string;
+  filter: unknown;
+  after: string | null;
+}): Promise<{ nodes: LinearGqlNode[]; hasNextPage: boolean; endCursor: string | null }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(config.linearApiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: key },
+      body: JSON.stringify({ query: QUERY, variables: { filter, first: PAGE, after } }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Linear HTTP ${res.status}`);
+    const body = (await res.json()) as {
+      data?: { issues?: { nodes?: LinearGqlNode[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } } };
+      errors?: unknown[];
+    };
+    if (body.errors && body.errors.length > 0) {
+      throw new Error(`Linear GraphQL errors: ${JSON.stringify(body.errors).slice(0, 300)}`);
+    }
+    const issues = body.data?.issues;
+    if (!issues || !Array.isArray(issues.nodes)) throw new Error("Linear: malformed response shape");
+    return {
+      nodes: issues.nodes,
+      hasNextPage: issues.pageInfo?.hasNextPage ?? false,
+      endCursor: issues.pageInfo?.endCursor ?? null,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
- * Pull terminal-state Linear issues with `updatedAt > since` (epoch ms). The
- * closing comment (last comment on the issue) is folded into the node so
- * linearExtract can inline it in intent_text.
+ * Pull terminal-state Linear issues with `updatedAt > since` (epoch ms),
+ * following `pageInfo.after` until the whole window is drained. Without full
+ * pagination a >50-issue backfill would read only the first page and advance the
+ * cursor off a partial result, dropping older decommission/decision tickets
+ * (Codex P2, PR #13). The closing comment (last comment) is folded into each node
+ * so linearExtract can inline it in intent_text.
+ *
+ * nextCursor: on a FULLY drained window, the max `updatedAt` ingested is safe
+ * (everything > since is in). If the MAX_PAGES safety cap is hit (pathological),
+ * hold the cursor at `since` and re-drain next tick — never advance past unread.
  */
-export async function pull({ since }: { since: number }): Promise<ExtractedChange[]> {
+export async function pull({ since }: { since: number }): Promise<{ changes: ExtractedChange[]; nextCursor: number }> {
   let key: string;
   try {
     key = await resolveLinearApiKey();
   } catch (err) {
     console.error("[ingest:linear] key resolve failed (fail open):", err instanceof Error ? err.message : err);
-    return [];
+    return { changes: [], nextCursor: since };
   }
 
   const filter = {
@@ -65,45 +116,51 @@ export async function pull({ since }: { since: number }): Promise<ExtractedChang
     state: { type: { in: ["completed", "canceled"] } },
   };
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(config.linearApiUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: key },
-      body: JSON.stringify({ query: QUERY, variables: { filter, first: PAGE } }),
-      signal: controller.signal,
-    });
-    if (!res.ok) throw new Error(`Linear HTTP ${res.status}`);
-    const body = (await res.json()) as {
-      data?: { issues?: { nodes?: LinearGqlNode[] } };
-      errors?: unknown[];
-    };
-    if (body.errors && body.errors.length > 0) {
-      throw new Error(`Linear GraphQL errors: ${JSON.stringify(body.errors).slice(0, 300)}`);
-    }
-    const nodes = body.data?.issues?.nodes;
-    if (!Array.isArray(nodes)) throw new Error("Linear: malformed response shape");
+  const changes: ExtractedChange[] = [];
+  let maxTs = since;
+  let after: string | null = null;
+  let drained = false;
 
-    return nodes.map((n) => {
-      const issue: LinearIssueNode = {
-        identifier: n.identifier,
-        title: n.title,
-        description: n.description,
-        updatedAt: n.updatedAt,
-        completedAt: n.completedAt,
-        canceledAt: n.canceledAt,
-        state: n.state,
-        assignee: n.assignee,
-        labels: n.labels,
-        closingComment: n.comments?.nodes?.[0]?.body ?? null,
-      };
-      return linearExtract({ issue });
-    });
+  try {
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const { nodes, hasNextPage, endCursor }: { nodes: LinearGqlNode[]; hasNextPage: boolean; endCursor: string | null } =
+        await fetchPage({ key, filter, after });
+      for (const n of nodes) {
+        const issue: LinearIssueNode = {
+          identifier: n.identifier,
+          title: n.title,
+          description: n.description,
+          updatedAt: n.updatedAt,
+          completedAt: n.completedAt,
+          canceledAt: n.canceledAt,
+          state: n.state,
+          assignee: n.assignee,
+          labels: n.labels,
+          closingComment: n.comments?.nodes?.[0]?.body ?? null,
+        };
+        const change = linearExtract({ issue });
+        changes.push(change);
+        if (change.event.ts > maxTs) maxTs = change.event.ts;
+      }
+      if (!hasNextPage || !endCursor) {
+        drained = true;
+        break;
+      }
+      after = endCursor;
+      if (page === MAX_PAGES - 1) {
+        console.warn(
+          `[ingest:linear] hit MAX_PAGES=${MAX_PAGES} (>${MAX_PAGES * PAGE} issues since cursor) — holding cursor, re-draining next tick`,
+        );
+      }
+    }
   } catch (err) {
     console.error("[ingest:linear] pull failed (fail open):", err instanceof Error ? err.message : err);
-    return [];
-  } finally {
-    clearTimeout(timer);
+    // Partial result: keep what we ingested (idempotent) but do NOT advance the
+    // cursor past a window we could not fully read.
+    return { changes, nextCursor: since };
   }
+
+  // Only advance the cursor when the window was fully drained; a capped run holds
+  // at `since` so the un-read tail is retried.
+  return { changes, nextCursor: drained ? maxTs : since };
 }

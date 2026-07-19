@@ -26,7 +26,17 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // the rollout window (Codex P2, PR #13). Bounded by the sources' own retention.
 const INITIAL_BACKFILL_MS = config.initialBackfillHrs * 60 * 60 * 1000;
 
-type Puller = (args: { since: number }) => Promise<ExtractedChange[]>;
+/**
+ * A source poll. Returns the changes to ingest AND the timestamp the cursor
+ * should advance to — each source owns its own cursor semantics, because they
+ * drain differently: audit/linear go oldest-first (advance to the newest seen),
+ * while GitHub pages newest-first from `now` (no server-side since-filter), so a
+ * capped backfill must advance only to the OLDEST fully-scanned point, never past
+ * unscanned older merges (Codex P2, PR #13). `nextCursor` must never exceed a
+ * point below which coverage is complete.
+ */
+type PullResult = { changes: ExtractedChange[]; nextCursor: number };
+type Puller = (args: { since: number }) => Promise<PullResult>;
 
 interface PollState {
   at: string;
@@ -66,16 +76,16 @@ async function runPoll({ source, puller, store }: { source: string; puller: Pull
     const parsed = cursorRaw ? parseInt(cursorRaw, 10) : NaN;
     const since = Number.isFinite(parsed) ? parsed : Date.now() - INITIAL_BACKFILL_MS;
 
-    const changes = await puller({ since });
-    let maxTs = since;
-    for (const change of changes) {
-      store.upsert(change);
-      if (change.event.ts > maxTs) maxTs = change.event.ts;
-    }
-    if (changes.length > 0) store.setCursor(source, String(maxTs));
+    const { changes, nextCursor } = await puller({ since });
+    for (const change of changes) store.upsert(change);
+    // Advance only forward — never let a source's cursor regress (a fail-open
+    // empty pull returns nextCursor === since; a partial/capped pull returns a
+    // point below which coverage is complete). Persist even when 0 changes so a
+    // fully-drained window records progress.
+    if (nextCursor > since) store.setCursor(source, String(nextCursor));
 
     lastPollBySource[source] = { at: new Date().toISOString(), ok: true, count: changes.length };
-    if (changes.length > 0) console.log(`[change-ingest] ${source}: ingested ${changes.length} change(s), cursor → ${maxTs}`);
+    if (changes.length > 0) console.log(`[change-ingest] ${source}: ingested ${changes.length} change(s), cursor → ${nextCursor}`);
   } catch (err) {
     lastPollBySource[source] = { at: new Date().toISOString(), ok: false, count: 0 };
     console.error(`[change-ingest] ${source} poll error (isolated):`, err instanceof Error ? err.message : err);

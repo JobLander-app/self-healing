@@ -61,7 +61,7 @@ function freshnessArg(since: number): string {
  * older event inside the intent lookback is ever skipped (Codex P2, PR #13). The
  * `timestamp>` clause + idempotent id upsert make overlap harmless.
  */
-export async function pull({ since }: { since: number }): Promise<ExtractedChange[]> {
+export async function pull({ since }: { since: number }): Promise<{ changes: ExtractedChange[]; nextCursor: number }> {
   const sinceIso = new Date(since).toISOString();
   const filter = buildFilter(sinceIso);
   try {
@@ -80,12 +80,18 @@ export async function pull({ since }: { since: number }): Promise<ExtractedChang
       { timeout: EXEC_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 },
     );
     const trimmed = stdout.trim();
-    if (!trimmed) return [];
+    if (!trimmed) return { changes: [], nextCursor: since };
     const entries = JSON.parse(trimmed) as unknown;
     if (!Array.isArray(entries)) throw new Error("gcloud logging read: non-array JSON");
-    return (entries as GcpAuditLogEntry[]).map((entry) => gcpAuditExtract({ entry }));
+    const changes = (entries as GcpAuditLogEntry[]).map((entry) => gcpAuditExtract({ entry }));
+    // Ascending order + forward cursor: advance to the newest ingested ts. If we
+    // hit LIMIT there are older-still... no — asc means we took the OLDEST LIMIT,
+    // so the next tick resumes from maxTs and drains forward, never skipping.
+    let maxTs = since;
+    for (const c of changes) if (c.event.ts > maxTs) maxTs = c.event.ts;
+    return { changes, nextCursor: maxTs };
   } catch (err) {
     console.error("[ingest:gcpAudit] pull failed (fail open):", err instanceof Error ? err.message : err);
-    return [];
+    return { changes: [], nextCursor: since };
   }
 }
