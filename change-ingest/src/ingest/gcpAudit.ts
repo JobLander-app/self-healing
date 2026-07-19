@@ -19,13 +19,18 @@ const execFileAsync = promisify(execFile);
 const EXEC_TIMEOUT_MS = 60_000;
 const LIMIT = 100;
 
-/** The §4.1 change classes: instance delete/create, Cloud Run deploy, IAM set. */
+/** The §4.1 change classes: instance delete/create, Cloud Run deploy, IAM set.
+ *  Both Cloud Run admin API versions land here — v2 (`run.v2.Services.*`) and v1
+ *  (`run.v1.Services.ReplaceService`, still emitted by some deploy paths). The
+ *  extractor already classifies both as `run_deploy`; dropping v1 at the filter
+ *  would leave an intentional v1 deploy/cutover absent from the change feed. */
 function buildFilter(sinceIso: string): string {
   return (
     `logName="projects/${config.gcpProject}/logs/cloudaudit.googleapis.com%2Factivity" ` +
     `AND (protoPayload.methodName="v1.compute.instances.delete" ` +
     `OR protoPayload.methodName="v1.compute.instances.insert" ` +
     `OR protoPayload.methodName:"run.v2.Services" ` +
+    `OR protoPayload.methodName:"run.v1.Services" ` +
     `OR protoPayload.methodName="SetIamPolicy") ` +
     `AND timestamp>"${sinceIso}"`
   );
@@ -62,6 +67,7 @@ function freshnessArg(since: number): string {
  * `timestamp>` clause + idempotent id upsert make overlap harmless.
  */
 export async function pull({ since }: { since: number }): Promise<{ changes: ExtractedChange[]; nextCursor: number }> {
+  const pullStart = Date.now();
   const sinceIso = new Date(since).toISOString();
   const filter = buildFilter(sinceIso);
   try {
@@ -80,16 +86,20 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
       { timeout: EXEC_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 },
     );
     const trimmed = stdout.trim();
-    if (!trimmed) return { changes: [], nextCursor: since };
+    // No rows = the whole [since, now] window is drained → advance to the poll
+    // start so a quiet period doesn't pin the cursor at the 72h backfill and let
+    // `--freshness` balloon to days on every 2-min tick (Codex P2, PR #13).
+    if (!trimmed) return { changes: [], nextCursor: pullStart };
     const entries = JSON.parse(trimmed) as unknown;
     if (!Array.isArray(entries)) throw new Error("gcloud logging read: non-array JSON");
     const changes = (entries as GcpAuditLogEntry[]).map((entry) => gcpAuditExtract({ entry }));
-    // Ascending order + forward cursor: advance to the newest ingested ts. If we
-    // hit LIMIT there are older-still... no — asc means we took the OLDEST LIMIT,
-    // so the next tick resumes from maxTs and drains forward, never skipping.
+    // Ascending order: we took the OLDEST rows in the window. Only a FULL page
+    // (=== LIMIT) may have more above it → resume from the newest ingested ts. A
+    // short page means the window is fully drained → advance to the poll start.
     let maxTs = since;
     for (const c of changes) if (c.event.ts > maxTs) maxTs = c.event.ts;
-    return { changes, nextCursor: maxTs };
+    const drained = changes.length < LIMIT;
+    return { changes, nextCursor: drained ? Math.max(pullStart, maxTs) : maxTs };
   } catch (err) {
     console.error("[ingest:gcpAudit] pull failed (fail open):", err instanceof Error ? err.message : err);
     return { changes: [], nextCursor: since };

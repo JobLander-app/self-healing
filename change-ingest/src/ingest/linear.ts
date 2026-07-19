@@ -116,8 +116,8 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
     state: { type: { in: ["completed", "canceled"] } },
   };
 
+  const pullStart = Date.now();
   const changes: ExtractedChange[] = [];
-  let maxTs = since;
   let after: string | null = null;
   let drained = false;
 
@@ -138,9 +138,7 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
           labels: n.labels,
           closingComment: n.comments?.nodes?.[0]?.body ?? null,
         };
-        const change = linearExtract({ issue });
-        changes.push(change);
-        if (change.event.ts > maxTs) maxTs = change.event.ts;
+        changes.push(linearExtract({ issue }));
       }
       if (!hasNextPage || !endCursor) {
         drained = true;
@@ -160,7 +158,11 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
     return { changes, nextCursor: since };
   }
 
-  // Only advance the cursor when the window was fully drained; a capped run holds
-  // at `since` so the un-read tail is retried.
-  return { changes, nextCursor: drained ? maxTs : since };
+  // Advance the cursor in the SAME field the filter uses (updatedAt), NOT the
+  // effective event.ts (completedAt/canceledAt) — a terminal issue edited after
+  // it closed has updatedAt in-window but completedAt <= since, which would pin
+  // the cursor and re-fetch it forever (Codex P2, PR #13). A fully drained window
+  // means everything with updatedAt > since up to the poll start is ingested, so
+  // the poll start is the correct high-water mark; a capped run holds at `since`.
+  return { changes, nextCursor: drained ? pullStart : since };
 }

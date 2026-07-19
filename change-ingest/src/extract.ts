@@ -41,7 +41,7 @@ export function regionFromZone(zone: string): string {
 function auditKind(methodName: string): string {
   if (methodName.endsWith("compute.instances.delete")) return "instance_delete";
   if (methodName.endsWith("compute.instances.insert")) return "instance_create";
-  if (methodName.includes("run.v2.Services") || methodName.includes("run.v1.ReplaceService")) return "run_deploy";
+  if (methodName.includes("run.v2.Services") || methodName.includes("run.v1.Services")) return "run_deploy";
   if (methodName.includes("SetIamPolicy") || methodName.includes("iam.admin")) return "iam_change";
   return "audit_event";
 }

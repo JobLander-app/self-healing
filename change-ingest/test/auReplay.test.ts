@@ -213,6 +213,24 @@ test("gcpAuditExtract: Cloud Run update → run_deploy kind + service/region ent
   ]);
 });
 
+test("gcpAuditExtract: Cloud Run v1 ReplaceService → run_deploy (not misclassified)", () => {
+  const entry: GcpAuditLogEntry = {
+    insertId: "run-v1",
+    timestamp: "2026-07-18T06:00:00Z",
+    protoPayload: {
+      methodName: "google.cloud.run.v1.Services.ReplaceService",
+      resourceName: "projects/meet-assistant-6d8ad/locations/europe-west1/services/joblander-audio-engine",
+      authenticationInfo: { principalEmail: "cloudbuild@meet-assistant-6d8ad.iam.gserviceaccount.com" },
+    },
+  };
+  const { event, entities } = gcpAuditExtract({ entry });
+  assert.equal(event.kind, "run_deploy");
+  assert.deepEqual(entities, [
+    { type: "service", id: "joblander-audio-engine" },
+    { type: "region", id: "europe-west1" },
+  ]);
+});
+
 test("githubExtract: merged PR → gh id, repo entity, ts=merged_at, title+body intent", () => {
   const pr: GithubPr = {
     number: 262,
