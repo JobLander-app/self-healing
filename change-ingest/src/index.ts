@@ -110,8 +110,24 @@ async function main(): Promise<void> {
   const store = new ChangeStore(config.changesDb);
   console.log(`[change-ingest] Store open at ${config.changesDb} (${store.rowCount()} rows)`);
 
-  // Serving API — localhost only.
   const app = createApp({ store, health: makeHealth(store) });
+
+  // Initial backfill BEFORE serving. On a fresh VM / recreated changes.db the
+  // feed must NOT answer `200 []` while the 72h window is still loading — the
+  // dispatcher's intent gate reads an empty-but-successful response as
+  // "unexplained" (not "feed unavailable") and would fix an intentional change
+  // during the exact rollout window this service protects (Codex P2, PR #13).
+  // Each runPoll is fail-isolated and self-bounded by its own subprocess/fetch
+  // timeouts, so this await cannot hang the boot indefinitely.
+  console.log("[change-ingest] Running initial backfill before serving...");
+  await Promise.allSettled([
+    runPoll({ source: "github", puller: pullGithub, store }),
+    runPoll({ source: "gcp_audit", puller: pullGcpAudit, store }),
+    runPoll({ source: "linear", puller: pullLinear, store }),
+  ]);
+  console.log(`[change-ingest] Initial backfill done (${store.rowCount()} rows).`);
+
+  // Serving API — localhost only. Only now, with the feed warm.
   app.listen(config.ingestPort, "127.0.0.1", () => {
     console.log(`[change-ingest] Serving /changes + /healthz on 127.0.0.1:${config.ingestPort}`);
   });
@@ -132,11 +148,7 @@ async function main(): Promise<void> {
     }
   });
   console.log(`[change-ingest] Prune scheduled: "${config.pruneCron}" (retention ${config.retentionDays}d)`);
-
-  // Kick each poller once on startup (don't wait for the first cron beat).
-  void runPoll({ source: "github", puller: pullGithub, store });
-  void runPoll({ source: "gcp_audit", puller: pullGcpAudit, store });
-  void runPoll({ source: "linear", puller: pullLinear, store });
+  // (The initial poll of each source already ran, awaited, before serving above.)
 
   console.log("[change-ingest] Ready.");
 

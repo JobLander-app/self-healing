@@ -231,6 +231,11 @@ test("gcpAuditExtract: Cloud Run v1 ReplaceService → run_deploy (not misclassi
   ]);
 });
 
+test("entitiesFromResourceName: Cloud Run v1 namespaces shape → service (no region)", () => {
+  const ents = entitiesFromResourceName("namespaces/meet-assistant-6d8ad/services/joblander-audio-engine");
+  assert.deepEqual(ents, [{ type: "service", id: "joblander-audio-engine" }]);
+});
+
 test("gcpAuditExtract: resource-scoped setIamPolicy → iam_change (lowercase method)", () => {
   const entry: GcpAuditLogEntry = {
     insertId: "iam-1",

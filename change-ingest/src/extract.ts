@@ -63,12 +63,21 @@ export function entitiesFromResourceName(resourceName: string): EntityRef[] {
     return entities;
   }
 
-  // .../locations/<region>/services/<name>   (Cloud Run)
+  // .../locations/<region>/services/<name>   (Cloud Run v2 / regional v1)
   const svc = /\/locations\/([^/]+)\/services\/([^/]+)/.exec(resourceName);
   if (svc) {
     const [, region, name] = svc;
     entities.push({ type: "service", id: name });
     entities.push({ type: "region", id: region });
+    return entities;
+  }
+
+  // namespaces/<project>/services/<name>   (Cloud Run v1 / Knative shape — some
+  // v1 ReplaceService audit rows use this; no region in this form → service only,
+  // which still lets the intent gate match by entity=service:<svc>). Codex P2.
+  const nsSvc = /(?:^|\/)namespaces\/[^/]+\/services\/([^/]+)/.exec(resourceName);
+  if (nsSvc) {
+    entities.push({ type: "service", id: nsSvc[1] });
     return entities;
   }
 
