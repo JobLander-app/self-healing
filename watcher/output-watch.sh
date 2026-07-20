@@ -41,28 +41,41 @@ is_bad() { [ "$STATUS" = "fail" ] || [ "$STATUS" = "degraded" ] || { [ "$CODE" !
 
 # Hysteresis: require THRESHOLD consecutive bad samples (minutes) before paging.
 # A single/flapping bad sample (busy region briefly crossing a freshness line)
-# must NOT page — that is what spammed P0→recover. State = "COUNT PAGED".
+# must NOT page — that is what spammed P0→recover. State = "COUNT PAGED COOLDOWN_UNTIL".
 THRESHOLD="${WATCH_THRESHOLD:-3}"
-read -r PREV_COUNT PREV_PAGED _ < <(cat "$STATE" 2>/dev/null); PREV_COUNT="${PREV_COUNT:-0}"; PREV_PAGED="${PREV_PAGED:-0}"
+# JOB-787: 4-hour post-recovery cooldown prevents re-paging on brief false-positive
+# cycles. /health/output is fail-closed: a ~25s audio session (rmsMax>0) within
+# freshAudioSec=120s of the last hint gap (>300s) triggers fail_slow even when no
+# real interview questions exist. Multiple brief sessions can maintain this condition
+# for 3+ consecutive minutes → threshold met → re-page. Cooldown blocks re-paging
+# until the new COOLDOWN_UNTIL epoch; a sustained real outage RESETS COOLDOWN_UNTIL
+# to 0 once the page fires, so a second outage within the cooldown window WILL page.
+COOLDOWN_SEC="${WATCH_COOLDOWN_SEC:-14400}"
+read -r PREV_COUNT PREV_PAGED COOLDOWN_UNTIL < <(cat "$STATE" 2>/dev/null); PREV_COUNT="${PREV_COUNT:-0}"; PREV_PAGED="${PREV_PAGED:-0}"; COOLDOWN_UNTIL="${COOLDOWN_UNTIL:-0}"
 
 if ! is_bad; then
   # Healthy. Announce recovery only if we had actually paged this incident.
   if [ "$PREV_PAGED" = "1" ]; then
     say "notify RECOVERED ${STATUS}" || bash "$NOTIFY" "RECOVERED: /health/output = ${STATUS} (HTTP ${CODE}). Product output flowing again."
+    # Start cooldown to suppress brief re-trips that immediately follow recovery.
+    echo "0 0 $(( TS + COOLDOWN_SEC ))" > "$STATE"
+  else
+    echo "0 0 ${COOLDOWN_UNTIL}" > "$STATE"
   fi
-  echo "0 0" > "$STATE"
   exit 0
 fi
 
 # Bad sample.
 COUNT=$((PREV_COUNT + 1))
-if [ "$COUNT" -lt "$THRESHOLD" ] || [ "$PREV_PAGED" = "1" ]; then
-  # Still building up to the threshold, OR already paged this incident (dedup).
-  echo "$COUNT $PREV_PAGED" > "$STATE"
+if [ "$COUNT" -lt "$THRESHOLD" ] || [ "$PREV_PAGED" = "1" ] || [ "$TS" -lt "${COOLDOWN_UNTIL}" ]; then
+  # Still building up to the threshold, OR already paged this incident (dedup),
+  # OR within the post-recovery cooldown window.
+  echo "$COUNT $PREV_PAGED ${COOLDOWN_UNTIL}" > "$STATE"
   exit 0
 fi
 # Sustained bad for THRESHOLD consecutive samples and not yet paged → PAGE now.
-echo "$COUNT 1" > "$STATE"
+# Clear the cooldown so a second outage after the next recovery will page again.
+echo "$COUNT 1 0" > "$STATE"
 
 # JOB-725: no backslash inside f-string expressions — SyntaxError on the VM's
 # Python 3.10 made this ALWAYS print "(unreachable)" regardless of the body.
