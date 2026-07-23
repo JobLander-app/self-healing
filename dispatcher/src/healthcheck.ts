@@ -32,6 +32,7 @@ import {
   LINEAR_MONITOR_LABEL_ID,
   LINEAR_API_KEY_SECRET,
   CLAUDE_OAUTH_SECRET,
+  SENTRY_TOKEN_SECRET,
 } from "./config";
 import { sendTelegram } from "./notify";
 
@@ -61,6 +62,13 @@ function buildMcpEnv(): Record<string, string> {
   // resolveLinearApiKey() awaited at the top of probeLinear before probeMcp
   // spawns the child. Harmless for the firebase/sentry children.
   if (cachedLinearKey) env.LINEAR_API_KEY = env.LINEAR_API_KEY || cachedLinearKey;
+  // Sentry MCP child auth for probeSentry — cachedSentryToken is populated by
+  // resolveSentryToken() awaited before probeMcp spawns the child. When present,
+  // the child's getToken() finds SENTRY_TOKEN in env and skips its own gcloud
+  // call, so the sentry probe budget only covers spawn + handshake + Sentry API
+  // fetch (instead of gcloud + Sentry API — two sequential 15 s operations that
+  // together routinely breach the 15 s probe budget).
+  if (cachedSentryToken) env.SENTRY_TOKEN = env.SENTRY_TOKEN || cachedSentryToken;
   return env;
 }
 
@@ -229,6 +237,17 @@ async function resolveLinearApiKey(): Promise<string> {
   return key;
 }
 
+// Same pattern for the Sentry token — resolved OUTSIDE the MCP probe budget so
+// the sentry child can short-circuit its own gcloud call (see buildMcpEnv).
+let cachedSentryToken = "";
+async function resolveSentryToken(): Promise<string> {
+  if (cachedSentryToken) return cachedSentryToken;
+  const token = await resolveSecret({ envVar: "SENTRY_TOKEN", secret: SENTRY_TOKEN_SECRET, timeoutMs: 15_000 });
+  if (!token) throw new Error(`${SENTRY_TOKEN_SECRET} resolved empty`);
+  cachedSentryToken = token;
+  return token;
+}
+
 // ---------------------------------------------------------------------------
 // The five probes. Each returns {healthy, detail}; timing + try/catch is added
 // by the runner so one probe can never take down the others.
@@ -249,11 +268,23 @@ async function probeFirebase(): Promise<string> {
 async function probeSentry(): Promise<string> {
   // stdio MCP: initialize → tools/list(>0) → sentry_list_issues (not isError).
   // Exercises the sentry token (SENTRY_TOKEN env or Secret Manager).
+  //
+  // Token pre-resolution (mirrors probeLinear pattern): resolve the Sentry
+  // token HERE, outside the MCP probe budget, so the child process finds
+  // SENTRY_TOKEN already in env via buildMcpEnv() and skips its own gcloud
+  // call.  Without this, the child's getToken() calls gcloud (≤ 15 s) then
+  // sentryGet() calls the Sentry API (≤ 15 s), and BOTH happen inside the
+  // probe budget — two sequential 15 s operations inside a single 15 s window
+  // is the direct cause of the "tools/call: timed out" at the 12:00 healthcheck
+  // (observed: sentry probe took exactly 15 002 ms, JOB-808).
+  // With pre-resolution the budget only needs to cover spawn + MCP handshake +
+  // Sentry API fetch, so 20 s is ample.
+  await resolveSentryToken();
   const { detail } = await probeMcp({
     entry: SENTRY_MCP_ENTRY,
     smokeTool: "sentry_list_issues",
     smokeArgs: { statsPeriod: "24h", limit: 1 },
-    budgetMs: 15_000,
+    budgetMs: 20_000,
   });
   return detail;
 }
