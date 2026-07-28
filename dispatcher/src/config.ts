@@ -15,7 +15,17 @@ export const config = {
   httpPort: parseInt(process.env.HTTP_PORT || "4100", 10),
 
   claudeModel: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
-  claudeMaxTurns: parseInt(process.env.CLAUDE_MAX_TURNS || "60", 10),
+
+  // Turn budget for one investigation. Raised 60 → 120 on 2026-07-28.
+  //
+  // At 60 the budget was below what a real investigation costs: in the week of
+  // 07-21..07-28, three runs died on "Reached maximum number of turns (60)"
+  // burning $2.14 + $2.10 + $3.47 = $7.71 for zero outcome — 20% of the week's
+  // entire spend — and each left its ticket untouched to be re-filed later.
+  // Meanwhile completed runs legitimately reached 95 turns (JOB-844, $3.32,
+  // outcome not-a-bug). The cap was cutting off work that was still converging,
+  // which is the most expensive way to fail: full cost, no result.
+  claudeMaxTurns: parseInt(process.env.CLAUDE_MAX_TURNS || "120", 10),
 
   // Wall-clock ceiling for ONE dispatch run. claudeMaxTurns bounds the turn
   // COUNT but not time; without a wall-clock abort a single hung turn (a stuck

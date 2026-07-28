@@ -115,6 +115,13 @@ Read the issue's `repo: <name>` label. Valid repos:
 `ai-voice-agent-python`. (The MCP servers / daemons live in the `tools` repo,
 but Monitor bugs target the product repos above.)
 
+Plus **`self-healing`** — your own repo — for `[SelfHeal]` tickets (dependency
+healthcheck failures, watcher/dispatcher/change-ingest defects). Same gates as
+any other repo, with one carve-out: changes under `deploy/`, `init/`, or
+`infra/` are human-merge only (Step 4a.10) — a merge to `main` now auto-deploys
+here within 2 minutes, so breaking the deployer would also destroy your ability
+to ship its fix.
+
 If no `repo:` label exists, infer it from the error signature and the affected
 service (e.g. `joblander-audio-engine` ⇒ `backend`; frontend pages ⇒
 `joblander-app`; LiveKit voice worker ⇒ `ai-voice-agent-python`). Record your
@@ -261,6 +268,20 @@ Reach **exactly one** of two terminal outcomes:
 ### (a) Real, fixable bug → fix, PR, verify, merge, Done
 
 1. Write the minimal correct fix in the scratch checkout.
+1b. **Has this signature been fixed before? Then ship a regression test.**
+   Check first — `git log --all --grep="<signature or JOB-id>"`, prior Linear
+   tickets with the same signature, and `known-errors.json`. If this failure has
+   been fixed before and came back, a second point-fix without a test buys
+   nothing: it will return again. The PR MUST add a test that fails without your
+   fix and passes with it. If the repo genuinely cannot test that path, say so
+   explicitly in the PR body and name what would have to exist — do not pass over
+   it in silence.
+
+   *Concrete case: JOB-804 fixed `toLocaleString(locale)` on 2026-07-22
+   (PR #262). Human PR #266 reintroduced the identical bug in new components
+   five days later. JOB-852 fixed it again on 07-27 (PR #269). Neither fix
+   added a test, so nothing stopped the second regression and nothing stops a
+   third.*
 2. Branch: `git checkout -b fix/JOB-XXX-short-slug`.
 3. `git add <specific files>` (never `git add .`), commit:
    `git commit -m "fix(<area>): <what>"`.
@@ -289,8 +310,33 @@ Reach **exactly one** of two terminal outcomes:
    - For behaviour changes (greetings, prompts, parsing, response shapes):
      run a **real local e2e** that exercises the changed path. Static checks
      (typecheck/lint) are the floor, not proof.
-   - Confirm there is a plausible causal link between your change and the
-     logged error disappearing.
+   - **CAUSALITY, NOT COINCIDENCE — the errors going quiet is not evidence.**
+     "Silent since I merged" is the single easiest way for you to be wrong,
+     because *someone else's* change is the competing explanation and it is
+     often the true one. Before you may claim `fixed`, establish all three:
+     1. **Your revision is actually live.** Merged ≠ deployed. Get the
+        currently-serving revision and its create time (`gcloud run services
+        describe <svc> --region=<r> --project=meet-assistant-6d8ad
+        --format='value(status.latestReadyRevisionName)'`, then the revision's
+        createTime), or the equivalent for the target surface. A merge that has
+        not rolled out proves nothing about the logs.
+     2. **The signature stopped AFTER your revision went live** — not before.
+        If it fell silent *before* your deploy, your change did not cause it.
+     3. **No competing change explains it.** `git log --since="<your PR
+        opened>" origin/main -- <implicated paths>` and check merged PRs in the
+        window. If another commit touched the same failure path, you must rule
+        it out explicitly or close **`fixed-elsewhere`** crediting it.
+     Fail any of the three ⇒ you may NOT report `fixed`. Report
+     `fixed-elsewhere` (credit the real cause) or `stale`, and if you already
+     merged, say so plainly in the Linear comment.
+
+     *This rule exists because of JOB-838/843 (2026-07-27). PR #120 was
+     auto-merged at 11:13 on a root-cause hypothesis that was simply wrong. The
+     errors went quiet, self-verify accepted that as proof, and the ticket was
+     closed `fixed`. The actual fix was the owner's PR #121 at 11:55, which
+     routed India STT to a different region and reverted #120's change. The
+     loop had shipped an incorrect change to production autonomously and did
+     not notice for five hours.*
 9. **Pre-merge freshness guard.** `main` may have moved while you worked:
    `git -C <scratch> pull --rebase origin main` (resolve or rebuild the fix if it
    conflicts), and re-run your Step-8 signature self-verify against the rebased
@@ -299,6 +345,21 @@ Reach **exactly one** of two terminal outcomes:
 10. `[Monitor]`-origin auto-merge **is authorized** by the Self-Healing Loop in
    the root JobLander CLAUDE.md — this is the single sanctioned exception to
    "merge is human-only". Merge ONLY after gates 6+7+8+9 pass: `gh pr merge <N> --merge`.
+   (If the repo rejects merge commits, use `--squash`.)
+
+   **The `self-healing` repo is a valid auto-merge target too** — for
+   `[SelfHeal]` tickets, under the identical gates. You are allowed to repair
+   your own infrastructure; waiting for a human there is what let a fix for a
+   chronic false-positive sit in an open, fully-green PR for 8 days while the
+   loop burned ~$8/week re-investigating the same non-bug (self-healing#14,
+   filed 2026-07-20, closed unmerged 07-28 in favour of a measured fix).
+
+   **EXCEPT — never auto-merge the deploy mechanism itself.** Changes touching
+   `deploy/`, `init/`, or `infra/` in the `self-healing` repo require a human.
+   Since 2026-07-28 a merge to `main` auto-deploys to the VM within 2 minutes
+   (`self-healing-deploy.timer`), so a bad change to the deployer is the one
+   failure that also removes your ability to ship the fix for it. Open the PR,
+   post your evidence, leave it for the owner, and report `backlogged`.
 11. Linear: `update_issue` → **`Done`**; `create_comment` with the PR URL, the
     root cause, what you verified, and the Codex review verdict.
 
