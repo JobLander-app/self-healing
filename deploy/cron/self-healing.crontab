@@ -8,6 +8,30 @@
 # (default inside the watcher still points at the legacy /home/joblander/joblander/... path).
 WATCH_NOTIFY_SCRIPT=/home/joblander/workspace/scripts/notify.sh
 
+# Consecutive bad samples (= minutes) before the watcher pages. Default in
+# watcher/src/config.ts is 3; measured evidence says 3 is far too low.
+#
+# 12 days of per-minute heartbeats (17,254 samples, /home/joblander/output-watch.log),
+# last 7 days: 36 bad episodes — 7 crossed the threshold and paged, 29 died before it.
+#   paged-episode duration : min 3m / median 4m / MAX 13m
+#   page -> recovery       : min 1m / median 2m / MAX 11m
+# All 7 pages were investigated by the dispatcher and ALL 7 were false positives
+# (JOB-796/798/806/807/809/814/854 — every one closed not-a-bug or stale). Precision
+# of this pager over the week was zero, at ~$8 of investigation cost.
+#
+# No bad episode in the whole 12-day log lasted longer than 13 minutes, and every
+# single one self-resolved. A 15-minute threshold therefore suppresses all 36
+# episodes — including all 7 pages — while costing at most 15 minutes of detection
+# delay on a real outage. The failure class this pager exists for (JOB-651: silent
+# total STT outage) ran 19 HOURS, so 15 minutes is noise against it.
+#
+# This is a mitigation, not the fix. The root cause is that /health/output cannot
+# distinguish "audio present but nobody is being interviewed" from "pipeline dead" —
+# both produce zero hints. backend#332 fixed the gate-suppression class (1 of the 7);
+# the remaining 4 need a transcript-stage discriminator. Revisit this value once
+# that lands.
+WATCH_THRESHOLD=15
+
 # Watcher tick (JOB-670): product-output pager, every minute.
 # The `&& gcloud logging write ...` chain ships the heartbeat to Cloud Logging
 # ONLY on exit 0 — a crashed tick writes no heartbeat, which is exactly what
