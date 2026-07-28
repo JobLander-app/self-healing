@@ -31,6 +31,16 @@ router.get("/status", (_req: Request, res: Response) => {
     dryRun: config.dryRun,
     model: config.claudeModel,
     linearTeam: config.linearTeam,
+    // EFFECTIVE run budget — the values this process actually enforces, not the
+    // defaults in config.ts. These differ whenever the deployed .env (rendered
+    // from Secret Manager) pins a value, and that divergence was invisible:
+    // on 2026-07-28 the code default was raised 60 → 120 and verified in
+    // dist/config.js, but .env still pinned CLAUDE_MAX_TURNS=60, so a run failed
+    // on "maximum number of turns (60)" 16 minutes after the deploy that
+    // supposedly fixed it. Surfacing them here makes that class of drift a
+    // one-line check instead of a forensic exercise.
+    maxTurns: config.claudeMaxTurns,
+    maxRunMs: config.maxRunMs,
     recentRuns: recent.length,
     recentCostUsd: Math.round(recentCost * 100) / 100,
     // JOB-731: pre-check observability. null until the first pre-checked tick.

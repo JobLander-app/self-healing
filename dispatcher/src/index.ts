@@ -11,6 +11,18 @@ async function main() {
     `[claude-code-vm-job-dispatcher] Model: ${config.claudeModel}, Port: ${config.httpPort}, ` +
       `Team: ${config.linearTeam}, DRY_RUN: ${config.dryRun}`,
   );
+  // EFFECTIVE run budget, logged at startup. config.ts defaults are only the
+  // fallback — the deployed .env (rendered from Secret Manager) overrides them,
+  // and that override was silent. 2026-07-28: the default was raised 60 → 120
+  // and confirmed in dist/config.js, but .env still pinned
+  // CLAUDE_MAX_TURNS=60; a run died on "maximum number of turns (60)" 16 min
+  // after the deploy meant to prevent exactly that. A process that does not say
+  // what limits it is enforcing cannot be debugged from the outside.
+  console.log(
+    `[claude-code-vm-job-dispatcher] Run budget: maxTurns=${config.claudeMaxTurns}, ` +
+      `maxRunMs=${config.maxRunMs} (${Math.round(config.maxRunMs / 60000)}m), ` +
+      `poll=${config.pollCron}`,
+  );
 
   // 1. Rebuild recent-run state from disk so /status and /feed are useful
   //    immediately after a restart (no DB to read from).
