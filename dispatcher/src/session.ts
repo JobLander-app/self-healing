@@ -206,7 +206,20 @@ function newTurnId(): string {
  */
 export function buildRunNotification(s: RunSummary): string | null {
   if (s.outcome === "no-work") return null;
-  if (!s.issueId) return null; // no ticket picked → not a lifecycle event
+
+  // A run that ended in `error` ALWAYS notifies, even with no ticket attached.
+  // It used to be swallowed by the !issueId guard below, because an aborted run
+  // never prints the [DISPATCH_RESULT] marker that carries the issue id — so the
+  // most expensive failure mode was also the only silent one. In the week of
+  // 2026-07-21..28 four runs ended in `error` (three on the 60-turn cap, one on
+  // the 25-minute watchdog) costing $7.71 with not one Telegram sent. These are
+  // rare by construction, so they cannot spam.
+  if (s.outcome !== "error" && !s.issueId) return null;
+  if (s.outcome === "error") {
+    const ticket = s.issueId ? `${s.issueId}: ` : "";
+    const cost = s.costUsd > 0 ? ` ${`$${s.costUsd.toFixed(2)}`},` : " ";
+    return `${s.dryRun ? "[DRY_RUN] " : ""}⚠️ ${ticket}run FAILED — ${s.summary.trim() || "no detail"}.${cost}${s.durationSec}s, ${s.numTurns} turns`;
+  }
 
   const ticket = s.issueId;
   const summary = s.summary.trim().length > 0 ? s.summary.trim() : "no summary";
