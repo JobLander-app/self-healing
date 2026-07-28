@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Self-Healing CD regularly
+
+[Timer]
+# 3 min after boot so the loop's own services settle first, then every 2 min.
+# A no-op tick is one `git fetch` — cheap enough to keep the window between
+# merge and production small.
+OnBootSec=3m
+OnUnitActiveSec=2m
+Unit=self-healing-deploy.service
+
+[Install]
+WantedBy=timers.target
