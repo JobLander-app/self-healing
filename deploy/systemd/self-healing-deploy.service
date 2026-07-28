@@ -1,0 +1,15 @@
+[Unit]
+Description=Self-Healing CD — pull origin/main, rebuild what changed, restart and verify
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: needs systemctl restart and `crontab -u joblander`. All git and npm work
+# is dropped to the agent user inside the script via sudo -u, so the checkout
+# never ends up root-owned.
+User=root
+ExecStart=/home/joblander/self-healing/deploy/bin/self-healing-deploy.sh
+# npm ci on three packages (better-sqlite3 compiles natively) can be slow on an
+# e2-standard-2; the script's own flock prevents overlap, this is just a backstop.
+TimeoutStartSec=900

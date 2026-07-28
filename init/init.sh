@@ -239,13 +239,16 @@ if [ -d "$SH_DIR" ]; then
     add_todo "could not render dispatcher/.env from secret '$DISPATCHER_ENV_SECRET' — dispatcher will not start"
   fi
 
-  # dispatcher build. Phase 1 (TS reconstruction) ships src/ + tsconfig; until
-  # that merges, the repo carries the recovered dist/ — building is optional.
+  # dispatcher build. dist/ is no longer committed (2026-07-28): a tracked build
+  # artifact drifts from src on every VM build, which leaves the checkout
+  # permanently dirty and makes the automated `git reset --hard` in
+  # deploy/bin/self-healing-deploy.sh unsafe. Built from src here and on every
+  # deploy, exactly like watcher and change-ingest.
   if [ -f "$SH_DIR/dispatcher/tsconfig.json" ]; then
     (cd "$SH_DIR/dispatcher" && as_agent npm ci && as_agent npx tsc) \
       || add_todo "dispatcher build failed — check npm/tsc output in $LOG_FILE"
   else
-    log "dispatcher: no tsconfig.json (Phase 1 not merged yet) — using committed dist/"
+    add_todo "dispatcher/tsconfig.json absent — cannot build dist/index.js; the dispatcher service will not start"
   fi
 
   # watcher build (TS port, Phase 1). Until it merges only output-watch.sh exists.
@@ -319,6 +322,26 @@ if [ -d "$SH_DIR" ]; then
   # whole-crontab install: deploy/cron/self-healing.crontab OWNS joblander's crontab
   crontab -u $AGENT_USER "$SH_DIR/deploy/cron/self-healing.crontab"
   log "crontab installed for $AGENT_USER"
+
+  # CD timer. Installed LAST in this block so the units it restarts already
+  # exist. From here on a merge to origin/main reaches this VM on its own —
+  # before this, nothing rebuilt or restarted anything after a merge, and the
+  # dispatcher ran a five-day-old build of its own already-merged fix.
+  if [ -f "$SH_DIR/deploy/systemd/self-healing-deploy.service" ]; then
+    chmod 755 "$SH_DIR/deploy/bin/self-healing-deploy.sh"
+    touch /var/log/self-healing-deploy.log
+    chown $AGENT_USER:$AGENT_USER /var/log/self-healing-deploy.log
+    install -m 644 "$SH_DIR/deploy/systemd/self-healing-deploy.service" \
+      /etc/systemd/system/self-healing-deploy.service
+    install -m 644 "$SH_DIR/deploy/systemd/self-healing-deploy.timer" \
+      /etc/systemd/system/self-healing-deploy.timer
+    systemctl daemon-reload
+    systemctl enable --now self-healing-deploy.timer \
+      || add_todo "self-healing-deploy.timer failed to enable — merges will NOT reach this VM automatically"
+    log "CD timer enabled (pull origin/main every 2 min)"
+  else
+    add_todo "deploy/systemd/self-healing-deploy.* absent — no CD; merges will not reach this VM"
+  fi
 fi
 
 # ---- 11. observability config + services -----------------------------------------

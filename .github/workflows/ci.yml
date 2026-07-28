@@ -1,5 +1,11 @@
-# JOB-731 Phase 1: CI for the TypeScript watcher.
-# Dispatcher is deliberately NOT built here yet — it joins CI in a later phase.
+# CI for the self-healing loop.
+#
+# Every package that ships to the VM is built here. This is the gate that makes
+# pull-based CD safe: deploy/bin/self-healing-deploy.sh trusts origin/main
+# blindly, so origin/main must never carry code that fails to compile.
+#
+# Until 2026-07-28 only the watcher was built — the dispatcher, the component
+# that autonomously merges to production repos, had no CI at all.
 name: CI
 
 on:
@@ -25,3 +31,54 @@ jobs:
         run: npm run build
       - name: Unit tests
         run: npm test
+
+  dispatcher:
+    name: dispatcher (build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dispatcher
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dispatcher/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Typecheck + build
+        run: npm run build
+
+  change-ingest:
+    name: change-ingest (build + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: change-ingest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: change-ingest/package-lock.json
+      - name: Install
+        # better-sqlite3 is native; ubuntu-latest carries the toolchain.
+        run: npm ci
+      - name: Typecheck + build
+        run: npm run build
+      - name: Unit tests
+        run: npm test
+
+  deploy-script:
+    name: deploy script (shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        # This script runs as root and restarts production services — an
+        # unquoted expansion in it is an outage, so it gets linted like code.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck deploy/bin/self-healing-deploy.sh

@@ -233,18 +233,46 @@ the Grafana login; the admin password is the Secret Manager secret
 
 ## Deploying a code change
 
-The VM runs from a git checkout of this repo's `main`; there is no CI/CD to the VM
-(deliberate — the fixer must stay inspectable). To deploy:
+**Merging to `main` is deploying.** A systemd timer on the VM
+(`self-healing-deploy.timer`, every 2 min) runs
+`deploy/bin/self-healing-deploy.sh`, which pulls `origin/main`, rebuilds only the
+packages that changed, restarts the affected units, verifies them, and rolls back
+to the previous commit if the verify fails.
+
+> **This reverses an earlier deliberate choice.** Until 2026-07-28 this section
+> read *"there is no CI/CD to the VM (deliberate — the fixer must stay
+> inspectable)"*. Manual deploy did not survive contact with reality: nothing
+> rebuilt or restarted anything after a merge, so `dispatcher/dist` stayed at its
+> 2026-07-19 build and the process at `NRestarts=0`. PR #16 — the loop's own
+> healthcheck fix, merged 2026-07-23 — sat on disk for five days having never
+> executed, while its Linear ticket read Done. The loop could not distinguish
+> *merged* from *deployed*, and closed tickets on the strength of the former.
+> Inspectability is preserved by the deploy log and CI, not by withholding
+> automation. (Owner directive, 2026-07-28.)
+
+Guardrails in the deploy script:
+
+- **Never restarts mid-investigation.** It reads `/status` and defers if
+  `busy:true` — killing a run would strand a Linear ticket claimed `In Progress`.
+- **`flock`** so a slow `npm ci` cannot overlap the next timer tick.
+- **Rollback on failed verify** — unit not active, or `/health` not `ok`, resets
+  to the previous commit, rebuilds, restarts, and pages Telegram.
+- **Build artifacts are gitignored,** so a failed build leaves the last working
+  `dist/` in place instead of a half-written tree.
+
+Watch it: `journalctl -u self-healing-deploy` or `/var/log/self-healing-deploy.log`.
+
+CI (`.github/workflows/ci.yml`) is what makes this safe — the deploy trusts
+`origin/main` blindly, so every package that ships is built there on each PR:
+watcher, dispatcher, change-ingest, plus `shellcheck` on the deploy script.
+
+Manual deploy, if you need to force one:
 
 ```bash
-gcloud compute ssh self-healing-1 --zone europe-west1-b --tunnel-through-iap --command='
-  sudo -u joblander bash -c "cd /home/joblander/self-healing && git checkout -- dispatcher/dist && git pull"
-  # then, as the change requires:
-  sudo -u joblander bash -c "cd /home/joblander/self-healing/dispatcher && npm ci && npx tsc"
-  sudo systemctl restart claude-code-vm-job-dispatcher   # dispatcher changes (only when /status busy:false)
-  # watcher / monitor changes take effect on the next cron tick
-'
+gcloud compute ssh self-healing-1 --zone europe-west1-b --tunnel-through-iap \
+  --command='sudo systemctl start self-healing-deploy.service && sudo tail -20 /var/log/self-healing-deploy.log'
 ```
+
 After changing `init.sh` or Terraform, run `terraform apply` to refresh the VM's
 startup-script metadata so a future re-provision stays reproducible.
 
