@@ -49,6 +49,13 @@ export const config = {
   staleAgeHrs: parseInt(process.env.STALE_AGE_HRS || "12", 10),
   freshnessWindowHrs: parseInt(process.env.FRESHNESS_WINDOW_HRS || "6", 10),
 
+  // How long an `In Progress` monitor ticket must sit untouched before the
+  // poll pre-check treats it as a reclaimable stale claim. Mirrors the "~30 min"
+  // in the constitution's Step 1 stale-claim exception — the pre-check must use
+  // the SAME threshold as the agent, or it spawns sessions for tickets the agent
+  // will immediately decline.
+  staleClaimMinutes: parseInt(process.env.STALE_CLAIM_MINUTES || "30", 10),
+
   // node-cron expression for the self-poll tick. Default: every 10 minutes.
   pollCron: process.env.POLL_CRON || "*/10 * * * *",
 

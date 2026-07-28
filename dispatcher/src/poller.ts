@@ -78,10 +78,33 @@ async function precheckCandidates(): Promise<PrecheckOutcome> {
     // config.linearTeam is configured as a team NAME ("JobLander") but could
     // plausibly be set to the key ("JOB") — match either, so a config style
     // change can't silently turn every pre-check into a false "skip".
+    // `In Progress` is included ONLY as a stale claim — untouched for longer
+    // than config.staleClaimMinutes — because that is the only In Progress case
+    // the agent will act on (constitution Step 1, stale-claim exception).
+    //
+    // Counting every In Progress ticket made the pre-check strictly coarser than
+    // the agent's own filter, and a pre-check that greenlights work the agent
+    // then declines is worse than no pre-check: it costs a full session to learn
+    // nothing. 2026-07-28: a monitor-labelled ticket sat In Progress after a run
+    // died on the turn cap mid-claim. The pre-check greenlit every tick, each
+    // spawning a session that answered `no-work` for ~$0.10 — 21 consecutive
+    // such runs, ~$14/day against a weekly spend of $38, and it would have run
+    // until someone noticed by hand.
+    const staleClaimBefore = new Date(
+      Date.now() - config.staleClaimMinutes * 60_000,
+    ).toISOString();
     const filter = {
       team: { or: [{ name: { eq: config.linearTeam } }, { key: { eq: config.linearTeam } }] },
       labels: { name: { eq: "monitor" } },
-      state: { name: { in: ["To Do", "Backlog", "In Progress"] } },
+      or: [
+        { state: { name: { in: ["To Do", "Backlog"] } } },
+        {
+          and: [
+            { state: { name: { eq: "In Progress" } } },
+            { updatedAt: { lt: staleClaimBefore } },
+          ],
+        },
+      ],
     };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
