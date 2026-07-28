@@ -11,6 +11,38 @@
  * Port: handy-daemon owns :4000. We default to :4100 to avoid any collision.
  */
 
+/**
+ * Parse a positive-integer knob, or refuse to start.
+ *
+ * `parseInt` is far too forgiving for values that gate cost and safety: it
+ * yields NaN for malformed input and happily accepts negatives, and neither
+ * shows up until something downstream misbehaves — quietly. Concretely, for the
+ * three knobs below:
+ *   - NaN `staleClaimMinutes` → `new Date(Date.now() - NaN)` is an Invalid Date
+ *     → `.toISOString()` throws inside the poll pre-check → the pre-check's
+ *     catch treats it as an availability failure and fails OPEN → a full agent
+ *     session every tick. That is exactly the ~$14/day idle burn this PR fixes,
+ *     reinstated by a typo and invisible while it happens.
+ *   - Negative `staleClaimMinutes` → live claims read as stale, so the filter
+ *     inverts into greenlighting the very tickets it exists to exclude.
+ *   - NaN `maxRunMs` → `setTimeout(…, NaN)` fires immediately → every run
+ *     aborted at once by the watchdog.
+ *
+ * Throwing at startup is deliberate, and mirrors `loadSystemPrompt()` refusing
+ * to run without CLAUDE.md: a dispatcher that is dead is noticed in minutes
+ * (systemd, /health, the CD verify step), whereas one running with a silently
+ * disabled safeguard is not noticed at all — that is the failure mode this whole
+ * codebase keeps paying for.
+ */
+function positiveInt(name: string, raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`${name} must be a positive integer, got ${JSON.stringify(raw)}`);
+  }
+  return n;
+}
+
 export const config = {
   httpPort: parseInt(process.env.HTTP_PORT || "4100", 10),
 
@@ -25,7 +57,7 @@ export const config = {
   // Meanwhile completed runs legitimately reached 95 turns (JOB-844, $3.32,
   // outcome not-a-bug). The cap was cutting off work that was still converging,
   // which is the most expensive way to fail: full cost, no result.
-  claudeMaxTurns: parseInt(process.env.CLAUDE_MAX_TURNS || "120", 10),
+  claudeMaxTurns: positiveInt("CLAUDE_MAX_TURNS", process.env.CLAUDE_MAX_TURNS, 120),
 
   // Wall-clock ceiling for ONE dispatch run. claudeMaxTurns bounds the turn
   // COUNT but not time; without a wall-clock abort a single hung turn (a stuck
@@ -33,7 +65,7 @@ export const config = {
   // forever and leaves the busy lock stuck true — stalling the entire self-poll
   // loop (observed: a run hung ~5 days, 2026-06-22→27, zero tickets picked up).
   // On timeout the session is aborted and busy is released. Default 25 min.
-  maxRunMs: parseInt(process.env.MAX_RUN_MS || "1500000", 10),
+  maxRunMs: positiveInt("MAX_RUN_MS", process.env.MAX_RUN_MS, 1_500_000),
 
   // Freshness policy. A Monitor ticket is a hypothesis that a bug existed at
   // FILING time, not a fact at FIX time — the codebase ships fast (features +
@@ -48,6 +80,13 @@ export const config = {
   //                       still occurring (e.g. gcloud --freshness).
   staleAgeHrs: parseInt(process.env.STALE_AGE_HRS || "12", 10),
   freshnessWindowHrs: parseInt(process.env.FRESHNESS_WINDOW_HRS || "6", 10),
+
+  // How long an `In Progress` monitor ticket must sit untouched before the
+  // poll pre-check treats it as a reclaimable stale claim. Mirrors the "~30 min"
+  // in the constitution's Step 1 stale-claim exception — the pre-check must use
+  // the SAME threshold as the agent, or it spawns sessions for tickets the agent
+  // will immediately decline.
+  staleClaimMinutes: positiveInt("STALE_CLAIM_MINUTES", process.env.STALE_CLAIM_MINUTES, 30),
 
   // node-cron expression for the self-poll tick. Default: every 10 minutes.
   pollCron: process.env.POLL_CRON || "*/10 * * * *",
