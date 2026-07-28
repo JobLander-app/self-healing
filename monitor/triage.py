@@ -54,6 +54,22 @@ WINDOW_HOURS = 2
 STATE_DIR = os.environ.get("MONITOR_STATE_DIR", "teams/logs/monitoring")
 SENTRY_ORG = "joblander-z2"
 SENTRY_PROJECT_ID = "4511020395069520"
+# Sentry issues are counted over a 7-day window (its thresholds are 7d-based),
+# but a 7-day COUNT says nothing about whether the bug is still happening. An
+# issue fixed on Monday still shows 53 events on Friday, so the monitor kept
+# filing tickets for bugs that had already stopped.
+#
+# 2026-07-22: ResumeParseLlmError 524 was fixed by PR #259 (merged 04:49Z) yet
+# got re-filed three times — JOB-799 at 05:0x, JOB-800 at 06:02, JOB-801 at
+# 07:02, once per hourly monitor run. The dispatcher investigated all three
+# ($0.65 + $0.38 + $0.52) and closed each `fixed-elsewhere`, noting: "Monitor
+# re-filed on stale 7d rolling window." The signature had been silent 17.9h.
+#
+# So: keep the 7d window for COUNTING, but require at least one event within
+# SENTRY_FRESH_HOURS to file at all. 12h mirrors the dispatcher's own
+# staleAgeHrs, above which it treats a ticket as stale anyway — filing something
+# the fixer will only ever close as stale is pure waste.
+SENTRY_FRESH_HOURS = int(os.environ.get("SENTRY_FRESH_HOURS", "12"))
 
 collection_errors = []
 
@@ -438,6 +454,9 @@ def collect_sentry(groups):
         collection_errors.append({"cmd": "sentry", "error": str(e)[:300]})
         return
     kept = 0
+    stale = []
+    fresh_cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                    - datetime.timedelta(hours=SENTRY_FRESH_HOURS))
     for issue in issues:
         raw = json.dumps(issue)
         if "inpage.js" in raw or "posthog-recorder.js" in raw \
@@ -447,6 +466,20 @@ def collect_sentry(groups):
         count = int(issue.get("count", 0))
         if count == 0:
             continue
+        # Freshness gate — a 7d count is not evidence the bug still happens.
+        # Unparseable/absent lastSeen fails OPEN (keep the issue): losing a real
+        # regression to a date-format change is far worse than one stale ticket.
+        last_seen_raw = issue.get("lastSeen") or ""
+        try:
+            last_seen = datetime.datetime.fromisoformat(last_seen_raw.replace("Z", "+00:00"))
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=datetime.timezone.utc)
+            if last_seen < fresh_cutoff:
+                age_h = round((datetime.datetime.now(datetime.timezone.utc) - last_seen).total_seconds() / 3600, 1)
+                stale.append(f"{(issue.get('culprit') or 'unknown').split('/')[-1]}({age_h}h)")
+                continue
+        except ValueError:
+            pass
         uc = int(issue.get("userCount", 0))
         meta = issue.get("metadata", {})
         culprit = (issue.get("culprit") or "unknown").split("/")[-1] or "unknown"
@@ -475,7 +508,10 @@ def collect_sentry(groups):
             "sample_message": f"{meta.get('type', '')}: {str(meta.get('value', ''))[:200]}",
         }
         kept += 1
-    log(f"sentry: {len(issues)} issues, {kept} after noise filters")
+    if stale:
+        log(f"sentry: {len(stale)} issue(s) skipped as stale "
+            f"(no event in {SENTRY_FRESH_HOURS}h): {stale}")
+    log(f"sentry: {len(issues)} issues, {kept} after noise + freshness filters")
 
 
 def assign_severity(groups, lk_statuses, stage_counts, audio_timeouts,
