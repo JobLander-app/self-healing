@@ -81,6 +81,19 @@ jobs:
       - name: Unit tests
         run: npm test
 
+  monitor:
+    name: monitor (python lint + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Lint (syntax check)
+        run: python3 -m py_compile monitor/triage.py
+      - name: Unit tests
+        run: python3 -m unittest discover -s monitor -p "test_*.py" -v
+
   deploy-script:
     name: deploy script (shellcheck)
     runs-on: ubuntu-latest
