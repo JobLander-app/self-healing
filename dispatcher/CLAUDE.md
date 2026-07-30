@@ -415,14 +415,51 @@ For client-side errors, transient blips, already-fixed-in-`main`, expected
 2. Linear: set **`Done`** (if resolved/benign) or **`Canceled`** (if it should
    never have been filed), with a clear reasoned comment containing your
    evidence.
-3. If it is **recurring noise** that Monitor will keep re-filing, add its
-   signature to the monitor `known-errors.json` so it stops being re-filed.
+3. **Suppress the signature — MANDATORY, not a judgement call, whenever this
+   signature has been filed before.** You know it has if the ticket title says
+   `RECURRING` / `WORSENED` / names a `prior JOB-XXX`, or if
+   `mcp__linear__search_issues` finds an earlier ticket with the same signature.
+   In that case the write is part of closing the ticket; a `not-a-bug` verdict
+   without it is an incomplete run, because Monitor will file the identical
+   ticket again on its next window and the next you will pay to re-derive the
+   identical verdict.
+
+   *Measured: the `joblander-audio-engine europe-west1 CORS rejection` signature
+   was filed **7 times** between 2026-05-13 and 2026-07-27 — JOB-445, 639, 693,
+   746, 792, 793, 849 — costing $4.39 in dispatcher investigations. JOB-849
+   correctly concluded "WordPress vulnerability-scanner probes, not a real
+   defect" and closed Canceled, but never wrote the suppression, so nothing
+   stops filing number eight. Two of the earlier "fixes" merely added localhost
+   ports to the CORS allowlist — symptom-chasing that the final verdict shows
+   was never the cause.*
+
    The file lives on this VM at:
    `/home/joblander/workspace/teams/logs/monitoring/known-errors.json`
    (operational state, gitignored — edit it in place; if the path differs,
-   `find / -name known-errors.json 2>/dev/null` to locate it). Append a new
-   entry with the signature and a short reason; preserve existing JSON
-   structure and validity.
+   `find / -name known-errors.json 2>/dev/null` to locate it). Shape is
+   `{"patterns": [...]}`, one object per entry:
+
+   ```json
+   {
+     "signature_match": "joblander-audio-engine:europe-west1:cors-rejection",
+     "reason": "why this is noise, with the evidence — a future reader must be able to re-judge it without redoing your investigation",
+     "expires": "2026-10-28"
+   }
+   ```
+
+   `signature_match` supports `*` wildcards and must match the signature the
+   Monitor generates, not the ticket title. Append — never rewrite the array.
+
+   **Set `expires`, ~90 days out.** Every one of the 13 current entries is
+   permanent, which means a signature suppressed as noise today stays invisible
+   forever, including the day it becomes a real regression. `triage.py` already
+   honours `expires` and drops the entry once past it; a lapsed suppression
+   costs one ticket to re-confirm, a permanent one can cost an outage.
+
+   **Verify the write landed.** Re-read the file, confirm it still parses as
+   JSON and that your entry is present. A write that silently failed leaves you
+   believing the ticket is closed for good when nothing changed — and you will
+   not be the run that discovers otherwise.
 
 This (b) path is a **legitimate autonomous decision**. Do NOT park a noise
 ticket "for a human to confirm" — proving and closing it IS the job.
