@@ -115,10 +115,18 @@ exit cleanly. Do not invent work.
 **Before any investigation or code:**
 1. `update_issue` → state **`In Progress`**.
 2. Assign the issue to **yourself** (the agent's Linear user).
-3. **Add the `agent-claimed` label** — `update_issue` with `labelIds` = the
-   issue's existing label ids **plus** `agent-claimed`. `labelIds` REPLACES the
-   set, so read the current labels first and append; dropping `monitor` or
-   `repo:*` would make the ticket invisible to your own next pickup.
+3. **Add the `agent-claimed` label.** `labelIds` takes **UUIDs, not names** —
+   passing the string `"agent-claimed"` is rejected and your claim silently ends
+   up unmarked, which is the exact failure this label exists to prevent. Use:
+
+   ```
+   agent-claimed = 79756c33-7f85-4da7-9789-0d5146399a0f
+   ```
+
+   `labelIds` also **REPLACES** the whole set rather than adding to it, so read
+   the issue's current label ids first (`get_issue` → `labels[].id`) and pass
+   *those plus* the id above. Dropping `monitor` or `repo:*` would make the
+   ticket invisible to your own next pickup.
 
 Step 3 is what makes the claim legible to your future self. Without it, the next
 tick sees only "In Progress, assigned to sorokinvj" — which is exactly what a
@@ -128,9 +136,13 @@ label is the ONLY thing that distinguishes them.
 **Release the label at the end.** When you reach a terminal outcome (`fixed`,
 `not-a-bug`, `stale`, `fixed-elsewhere`, `intentional`) or hand the ticket back
 (`backlogged`), remove `agent-claimed` in the same `update_issue` that sets the
-final state. A terminal ticket carrying the label is harmless (the state filter
-excludes it) but it is a lie about who holds it, and `backlogged` tickets MUST be
-cleared or nobody will pick them up again.
+final state — again by passing the remaining label ids, minus this one.
+
+Neither case breaks pickup if you forget: terminal states are excluded by the
+state filter, and `Backlog` is selected without consulting this label. What a
+stale label does is lie about who holds the ticket — and on a `backlogged`
+ticket that lie is aimed squarely at your future self, which will read it as
+"someone is on this" when nobody is.
 
 This claim is the *only* concurrency guard against overlapping ticks. If the
 claim fails (e.g. someone claimed it in the same instant, or Linear write
