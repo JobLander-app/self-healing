@@ -12,7 +12,7 @@
 import * as cron from "node-cron";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { config } from "./config";
+import { config, LINEAR_AGENT_CLAIMED_LABEL } from "./config";
 import { isBusy, runDispatchSession } from "./session";
 import { readPause, clearPause, pauseRemainingMs } from "./pause";
 
@@ -99,9 +99,17 @@ async function precheckCandidates(): Promise<PrecheckOutcome> {
       or: [
         { state: { name: { in: ["To Do", "Backlog"] } } },
         {
+          // ...and a stale claim the agent itself left behind. The
+          // `agent-claimed` label is what makes that decidable: agent and Owner
+          // share one Linear account, so assignee cannot separate "my abandoned
+          // claim" from "the Owner is working on this". Without the label
+          // condition this branch greenlights tickets the agent will decline —
+          // JOB-860 cost five such sessions after a watchdog abort stranded its
+          // claim.
           and: [
             { state: { name: { eq: "In Progress" } } },
             { updatedAt: { lt: staleClaimBefore } },
+            { labels: { name: { eq: LINEAR_AGENT_CLAIMED_LABEL } } },
           ],
         },
       ],
