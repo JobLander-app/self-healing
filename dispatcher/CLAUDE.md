@@ -81,12 +81,26 @@ not handle the key.
 **Filter out:**
 - Any issue **without the `monitor` label** (features/improvements/epics are
   out of scope — leave them entirely alone).
-- Issues already in **`In Progress`** (someone — possibly a previous tick —
-  already claimed them). **EXCEPTION:** an `In Progress` ticket assigned to
-  **YOU** with no update in the last ~30 min is a *stale claim* from a run that
-  was interrupted (e.g. a subscription rate-limit hit mid-work) — reclaim it
-  and continue, don't skip it forever.
-- Issues assigned to a **human**.
+- Issues already in **`In Progress`** — with ONE exception, decided by label,
+  never by assignee:
+  - **carries `agent-claimed` AND untouched for ~30 min** ⇒ *stale claim* from a
+    run of yours that was interrupted (rate limit, watchdog abort, crash).
+    **Reclaim it and continue.**
+  - **carries `agent-claimed` and was touched recently** ⇒ another tick is
+    working it right now. Skip.
+  - **no `agent-claimed` label** ⇒ a human is holding it. Skip.
+
+  **Do NOT try to decide this from the assignee.** You and the Owner share one
+  Linear account, so "assigned to me" and "assigned to a human" are the same
+  bytes and you cannot tell them apart. Guessing here is measurably expensive:
+  across 138 recorded runs, **54 (39%) ended in `no-work` reporting that a
+  ticket was "assigned to a human"** — $5.30 of sessions spent re-deriving an
+  undecidable fact. JOB-860 is the worked example: a run claimed it at 07:10,
+  the watchdog killed that run at 07:50 leaving the claim behind, five
+  consecutive ticks then declined it as "the human owner's", and only the sixth
+  reclaimed and fixed it — 1h45m late, on identical data each time. The label
+  makes this a lookup instead of a guess.
+- Parent epics.
 - Parent epics.
 - Issues with no usable description.
 
@@ -101,12 +115,40 @@ exit cleanly. Do not invent work.
 **Before any investigation or code:**
 1. `update_issue` → state **`In Progress`**.
 2. Assign the issue to **yourself** (the agent's Linear user).
+3. **Add the `agent-claimed` label.** `labelIds` takes **UUIDs, not names** —
+   passing the string `"agent-claimed"` is rejected and your claim silently ends
+   up unmarked, which is the exact failure this label exists to prevent. Use:
+
+   ```
+   agent-claimed = 79756c33-7f85-4da7-9789-0d5146399a0f
+   ```
+
+   `labelIds` also **REPLACES** the whole set rather than adding to it, so read
+   the issue's current label ids first (`get_issue` → `labels[].id`) and pass
+   *those plus* the id above. Dropping `monitor` or `repo:*` would make the
+   ticket invisible to your own next pickup.
+
+Step 3 is what makes the claim legible to your future self. Without it, the next
+tick sees only "In Progress, assigned to sorokinvj" — which is exactly what a
+ticket the Owner is working on looks like, because you share that account. This
+label is the ONLY thing that distinguishes them.
+
+**Release the label at the end.** When you reach a terminal outcome (`fixed`,
+`not-a-bug`, `stale`, `fixed-elsewhere`, `intentional`) or hand the ticket back
+(`backlogged`), remove `agent-claimed` in the same `update_issue` that sets the
+final state — again by passing the remaining label ids, minus this one.
+
+Neither case breaks pickup if you forget: terminal states are excluded by the
+state filter, and `Backlog` is selected without consulting this label. What a
+stale label does is lie about who holds the ticket — and on a `backlogged`
+ticket that lie is aimed squarely at your future self, which will read it as
+"someone is on this" when nobody is.
 
 This claim is the *only* concurrency guard against overlapping ticks. If the
 claim fails (e.g. someone claimed it in the same instant, or Linear write
 errors), **do not proceed** — emit `[DISPATCH_RESULT]` with
-`outcome:"no-work"` and exit. (In `DRY_RUN`, print that you WOULD claim it,
-then continue the investigation read-only.)
+`outcome:"no-work"` and exit. (In `DRY_RUN`, print that you WOULD claim it and
+label it, then continue the investigation read-only.)
 
 ## Step 3 — Identify the target repo
 

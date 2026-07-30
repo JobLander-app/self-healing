@@ -139,6 +139,16 @@ export const config = {
 export const LINEAR_JOB_TEAM_ID = "b12df7a0-4845-47fd-be59-8f6d03d9ae8d";
 export const LINEAR_MONITOR_LABEL_ID = "3cf3f731-dccf-43fa-861e-cba73998b183";
 
+// Label the agent puts on a ticket when it claims one, and removes when it
+// reaches a terminal outcome (constitution Step 2). The agent and the Owner
+// share a single Linear account, so `assignee` cannot distinguish "my claim"
+// from "the Owner is working on this" — the label is the only signal that can.
+// Measured cost of not having it: 54 of 138 recorded runs (39%) ended in
+// `no-work` reporting a ticket as "assigned to a human", $5.30 of sessions
+// spent re-deriving an undecidable fact.
+export const LINEAR_AGENT_CLAIMED_LABEL = "agent-claimed";
+export const LINEAR_AGENT_CLAIMED_LABEL_ID = "79756c33-7f85-4da7-9789-0d5146399a0f";
+
 // Secret Manager secret names probed by the healthcheck.
 export const LINEAR_API_KEY_SECRET = "linear-api-key";
 export const CLAUDE_OAUTH_SECRET = "claude-code-oauth-token";
