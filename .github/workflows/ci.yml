@@ -11,6 +11,11 @@ name: CI
 on:
   pull_request:
 
+# Least privilege by default: these jobs only build and test. A compromised
+# action or npm lifecycle script must not inherit repo/org write defaults.
+permissions:
+  contents: read
+
 jobs:
   watcher:
     name: watcher (build + test)

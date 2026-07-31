@@ -282,7 +282,13 @@ export function toolUsesFrom(msg: unknown): Array<{ tool: string; cmd?: string }
     const command = block.input?.command;
     if (block.name === "Bash" && typeof command === "string") {
       const word = command.trim().split(/\s+/)[0];
-      if (word) entry.cmd = word.slice(0, 40);
+      // A leading `NAME=value` is a shell assignment, not a binary — and the
+      // value is routinely a credential (`LINEAR_API_KEY=... gcloud ...`).
+      // Truncating to 40 chars does NOT make that safe, it just ships a shorter
+      // secret. When the command starts with an assignment we record no `cmd`
+      // at all: the tool name still shows the run used Bash, and no run is
+      // worth leaking a token to diagnose.
+      if (word && !word.includes("=")) entry.cmd = word.slice(0, 40);
     }
     out.push(entry);
   }

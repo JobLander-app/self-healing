@@ -69,3 +69,26 @@ test("handles a Bash command with leading whitespace and a long binary path", ()
   );
   assert.deepEqual(uses, [{ tool: "Bash", cmd: "git" }]);
 });
+
+test("never traces a leading shell assignment — it carries the secret", () => {
+  // CodeRabbit Major on PR #26: the 40-char truncation does not make this safe,
+  // it just ships a shorter secret. The tool name alone is enough to diagnose.
+  const uses = toolUsesFrom(
+    assistant([
+      {
+        type: "tool_use",
+        name: "Bash",
+        input: { command: "LINEAR_API_KEY=sk-live-abcdef gcloud secrets list" },
+      },
+    ])
+  );
+  assert.deepEqual(uses, [{ tool: "Bash" }]);
+  assert.ok(!JSON.stringify(uses).includes("sk-live"), "assignment value must not be traced");
+});
+
+test("still records the binary when the command has no assignment prefix", () => {
+  assert.deepEqual(
+    toolUsesFrom(assistant([{ type: "tool_use", name: "Bash", input: { command: "gh pr view 26" } }])),
+    [{ tool: "Bash", cmd: "gh" }]
+  );
+});
