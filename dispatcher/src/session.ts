@@ -253,6 +253,43 @@ export function buildRunNotification(s: RunSummary): string | null {
 }
 
 /**
+ * Tool calls made in one SDK message, for the run trace.
+ *
+ * The SDK has NO top-level `tool_use` message — tool calls arrive as content
+ * blocks inside `SDKAssistantMessage.message.content[]` (see
+ * `@anthropic-ai/claude-agent-sdk/sdk.d.ts`: the union contains `assistant`,
+ * `user`, `result`, `system`… and no `tool_use`). The daemon used to check
+ * `msg.type === "tool_use"`, which can never be true: across 143 recorded runs,
+ * ZERO trace events of that kind were ever written. Every trace held only
+ * started/finished/outcome, so when a run burned $5.24 over 121 turns and
+ * failed there was nothing to say what it had been doing.
+ *
+ * Only the tool NAME is recorded, plus — for Bash — the leading command word.
+ * Arguments are deliberately excluded: a Bash line here can carry a token from
+ * `gcloud secrets versions access`, and a run trace is not a place for
+ * credentials. The command word alone still answers the diagnostic question
+ * ("80 Bash(gcloud), 30 Read, 6 mcp__linear__update_issue") without carrying
+ * anything sensitive.
+ */
+export function toolUsesFrom(msg: unknown): Array<{ tool: string; cmd?: string }> {
+  const m = msg as { type?: string; message?: { content?: unknown } };
+  if (m?.type !== "assistant" || !Array.isArray(m.message?.content)) return [];
+  const out: Array<{ tool: string; cmd?: string }> = [];
+  for (const raw of m.message.content as unknown[]) {
+    const block = raw as { type?: string; name?: string; input?: Record<string, unknown> };
+    if (block?.type !== "tool_use" || typeof block.name !== "string") continue;
+    const entry: { tool: string; cmd?: string } = { tool: block.name };
+    const command = block.input?.command;
+    if (block.name === "Bash" && typeof command === "string") {
+      const word = command.trim().split(/\s+/)[0];
+      if (word) entry.cmd = word.slice(0, 40);
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+/**
  * Run a single dispatch session. Returns the run summary. Never throws —
  * any failure is captured as an "error" outcome so the cron loop keeps
  * ticking.
@@ -386,8 +423,8 @@ export async function runDispatchSession(reason: string): Promise<RunSummary> {
         numTurns = (m.num_turns as number) || 0;
       }
 
-      if (m.type === "tool_use") {
-        traceEvent(turnId, "tool_use", { tool: m.name });
+      for (const use of toolUsesFrom(msg)) {
+        traceEvent(turnId, "tool_use", use);
       }
     }
   } catch (err) {
