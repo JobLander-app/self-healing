@@ -11,6 +11,11 @@ name: CI
 on:
   pull_request:
 
+# Least privilege by default: these jobs only build and test. A compromised
+# action or npm lifecycle script must not inherit repo/org write defaults.
+permissions:
+  contents: read
+
 jobs:
   watcher:
     name: watcher (build + test)
@@ -33,7 +38,7 @@ jobs:
         run: npm test
 
   dispatcher:
-    name: dispatcher (build)
+    name: dispatcher (build + test)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -49,6 +54,11 @@ jobs:
         run: npm ci
       - name: Typecheck + build
         run: npm run build
+      - name: Unit tests
+        # The dispatcher had no tests until 2026-07-31, which is how a check
+        # against a message type the SDK does not have survived 143 runs
+        # producing zero trace events without anyone noticing.
+        run: npm test
 
   change-ingest:
     name: change-ingest (build + test)

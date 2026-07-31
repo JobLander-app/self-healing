@@ -101,7 +101,6 @@ not handle the key.
   reclaimed and fixed it — 1h45m late, on identical data each time. The label
   makes this a lookup instead of a guess.
 - Parent epics.
-- Parent epics.
 - Issues with no usable description.
 
 **Sort** the survivors: priority **Urgent → High → Medium → Low**, then
