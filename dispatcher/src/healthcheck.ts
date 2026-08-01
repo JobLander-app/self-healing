@@ -278,13 +278,17 @@ async function probeSentry(): Promise<string> {
   // is the direct cause of the "tools/call: timed out" at the 12:00 healthcheck
   // (observed: sentry probe took exactly 15 002 ms, JOB-808).
   // With pre-resolution the budget only needs to cover spawn + MCP handshake +
-  // Sentry API fetch, so 20 s is ample.
+  // Sentry API fetch (≤ 20 s in mcp/sentry/tools.js FETCH_TIMEOUT_MS).
+  // Budget set to 28 s: spawn + handshake ~1-2 s + HTTP fetch max 20 s +
+  // 6 s headroom.  (JOB-878: inner 15 s HTTP timeout fired while the outer
+  // 20 s budget still had headroom — both values raised together to eliminate
+  // the mismatch.)
   await resolveSentryToken();
   const { detail } = await probeMcp({
     entry: SENTRY_MCP_ENTRY,
     smokeTool: "sentry_list_issues",
     smokeArgs: { statsPeriod: "24h", limit: 1 },
-    budgetMs: 20_000,
+    budgetMs: 28_000,
   });
   return detail;
 }
