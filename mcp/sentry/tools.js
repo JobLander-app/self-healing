@@ -6,7 +6,7 @@ const SENTRY_ORG = "joblander-z2";
 const SENTRY_PROJECT_ID = "4511020395069520";
 const SENTRY_SECRET = "joblander-sentry-monitor-token";
 const GCP_PROJECT = (process.env.GCP_PROJECT_ID || "meet-assistant-6d8ad").trim();
-const FETCH_TIMEOUT_MS = 15000;
+const FETCH_TIMEOUT_MS = 20000;
 const CHARACTER_LIMIT = 200000;
 
 let cachedToken = null;
