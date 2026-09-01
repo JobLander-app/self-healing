@@ -67,10 +67,61 @@ async function resolveLinearApiKey(): Promise<string> {
 }
 
 /**
+ * Build the Linear GraphQL IssueFilter object that defines "a monitor-origin
+ * candidate". Exported so tests can inspect the shape without mocking the
+ * network.
+ *
+ * A ticket qualifies if it satisfies EITHER:
+ *   • carries the `monitor` label (normal path: watcher / healthcheck), OR
+ *   • title starts with "[Monitor]" (human/tool filed it without the label).
+ * Both alternatives are OR-ed inside a top-level `and` alongside the state
+ * gate, so the two dimensions are independent. This keeps the pre-check filter
+ * in exact sync with the agent constitution's Step-1 pick criteria — a
+ * pre-check wider than the agent spawns sessions that return `no-work`,
+ * burning subscription quota (2026-07-28: 21 consecutive such runs, ~$14/day).
+ * JOB-915: fix for the label-only pre-check that silently dropped tickets
+ * filed with the correct prefix but without the label.
+ */
+export function buildPrecheckFilter(staleClaimBefore: string): object {
+  return {
+    team: { or: [{ name: { eq: config.linearTeam } }, { key: { eq: config.linearTeam } }] },
+    and: [
+      {
+        // Accept by `monitor` label OR `[Monitor]` title prefix.
+        // Must stay in sync with Step 1 of dispatcher/CLAUDE.md.
+        or: [
+          { labels: { name: { eq: "monitor" } } },
+          { title: { startsWith: "[Monitor]" } },
+        ],
+      },
+      {
+        or: [
+          { state: { name: { in: ["To Do", "Backlog"] } } },
+          {
+            // Stale-claim reclaim: In Progress + agent-claimed + untouched long
+            // enough. The `agent-claimed` label is what makes this decidable —
+            // agent and Owner share one Linear account, so assignee alone cannot
+            // separate "my abandoned claim" from "the Owner is working on this".
+            // Without the label condition this branch greenlights tickets the
+            // agent will decline — JOB-860 cost five such sessions.
+            and: [
+              { state: { name: { eq: "In Progress" } } },
+              { updatedAt: { lt: staleClaimBefore } },
+              { labels: { name: { eq: LINEAR_AGENT_CLAIMED_LABEL } } },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/**
  * Ask Linear whether ANY candidate ticket exists (team from config, label
- * `monitor`, state To Do / Backlog / In Progress — the states the agent's
- * pickup logic considers, incl. stale-claim reclaims). `first: 1` — we only
- * need existence, not the list. Never throws; errors map to "error" (fail open).
+ * `monitor` OR `[Monitor]` title prefix, state To Do / Backlog / In Progress —
+ * the states the agent's pickup logic considers, incl. stale-claim reclaims).
+ * `first: 1` — we only need existence, not the list. Never throws; errors map
+ * to "error" (fail open).
  */
 async function precheckCandidates(): Promise<PrecheckOutcome> {
   try {
@@ -93,27 +144,7 @@ async function precheckCandidates(): Promise<PrecheckOutcome> {
     const staleClaimBefore = new Date(
       Date.now() - config.staleClaimMinutes * 60_000,
     ).toISOString();
-    const filter = {
-      team: { or: [{ name: { eq: config.linearTeam } }, { key: { eq: config.linearTeam } }] },
-      labels: { name: { eq: "monitor" } },
-      or: [
-        { state: { name: { in: ["To Do", "Backlog"] } } },
-        {
-          // ...and a stale claim the agent itself left behind. The
-          // `agent-claimed` label is what makes that decidable: agent and Owner
-          // share one Linear account, so assignee cannot separate "my abandoned
-          // claim" from "the Owner is working on this". Without the label
-          // condition this branch greenlights tickets the agent will decline —
-          // JOB-860 cost five such sessions after a watchdog abort stranded its
-          // claim.
-          and: [
-            { state: { name: { eq: "In Progress" } } },
-            { updatedAt: { lt: staleClaimBefore } },
-            { labels: { name: { eq: LINEAR_AGENT_CLAIMED_LABEL } } },
-          ],
-        },
-      ],
-    };
+    const filter = buildPrecheckFilter(staleClaimBefore);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
     let res: Response;
