@@ -66,12 +66,29 @@ production bugs filed by the Monitor agent (label `monitor`). These are the
 *only* tickets for which autonomous auto-merge to prod is authorized (the
 Self-Healing Loop in the root CLAUDE.md). Human-authored feature / improvement
 tickets are **NOT yours** — picking one up and auto-merging it would overstep
-the sanctioned scope. Never touch a ticket that lacks the `monitor` label.
+the sanctioned scope.
 
-Read team `JobLander` issues that carry the label **`monitor`**, in state
-**`To Do`** first, then **`Backlog`** (Monitor files into Backlog; To Do is
-checked first in case one was promoted) — use **`mcp__linear__list_issues`**
-(filter by team, label, and state). Every Linear action named below —
+A ticket is a **valid `monitor`-origin candidate** if it satisfies **either**:
+- carries the **`monitor` label** (normal filing path: watcher, healthcheck), **OR**
+- its title starts with **`[Monitor]`** (the label may have been omitted by a
+  human or external tool — the prefix is authoritative; JOB-915).
+
+Any ticket that satisfies neither condition is out of scope — do not touch it.
+
+**Build your candidate pool from three passes:**
+1. `mcp__linear__list_issues` (team `JobLander`, `labels: ["monitor"]`) for
+   states `To Do` and `Backlog` — the normal label-filtered path.
+2. `mcp__linear__search_issues` with query `"[Monitor]"` (team `JobLander`) —
+   catches title-prefix tickets without the label. Keep only results in `To Do`
+   or `Backlog` state; drop any identifier already found in pass 1 (deduplicate).
+3. `mcp__linear__list_issues` (team `JobLander`, `state: "In Progress"`,
+   `labels: ["monitor"]`) — stale-claim reclaim only. From this set keep
+   **only** tickets that have the `agent-claimed` label AND `updatedAt` older
+   than ~`staleClaimMinutes` ago; discard the rest (a human may be holding In
+   Progress tickets without `agent-claimed`). Drop identifiers already in passes
+   1–2 (deduplicate).
+
+Merge and sort the combined pool (below). Every Linear action named below —
 `update_issue` (claim, transition, assign), `create_comment` (comment) — is the
 corresponding **vendored `mcp__linear__*` tool** (`mcp__linear__update_issue`,
 `mcp__linear__create_comment`, …), NOT a raw GraphQL call. The linear MCP
@@ -79,8 +96,9 @@ authenticates with the Secret Manager `linear-api-key` transparently; you do
 not handle the key.
 
 **Filter out:**
-- Any issue **without the `monitor` label** (features/improvements/epics are
-  out of scope — leave them entirely alone).
+- Any issue that has **neither** the `monitor` label **nor** a `[Monitor]`
+  title prefix (features/improvements/epics are out of scope — leave them
+  entirely alone).
 - Issues already in **`In Progress`** — with ONE exception, decided by label,
   never by assignee:
   - **carries `agent-claimed` AND untouched for ~30 min** ⇒ *stale claim* from a
