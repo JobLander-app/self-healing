@@ -1,0 +1,14 @@
+[Unit]
+Description=Run self-healing netwatch every 2 minutes
+
+[Timer]
+# 90 s after boot (let networkd finish its own first attempt), then every 2 min.
+# Escalation to reboot needs 5 consecutive failures ≈ 10 minutes of real
+# unreachability — long enough that a live-migration blip cannot trigger it.
+OnBootSec=90s
+OnUnitActiveSec=2m
+AccuracySec=10s
+Unit=selfheal-netwatch.service
+
+[Install]
+WantedBy=timers.target

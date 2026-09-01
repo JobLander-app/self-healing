@@ -11,5 +11,28 @@ Restart=always
 RestartSec=10
 EnvironmentFile=/home/joblander/self-healing/dispatcher/.env
 
+# ---- memory containment (incident 2026-08-26) -------------------------------
+# An investigation session reached 1.5 GB anon-rss with no limit above it and
+# took the host's memory — and with it the DHCP lease — down. The session tree
+# (this node process, the `claude` CLI it spawns, and the stdio MCP servers)
+# all inherit this cgroup, so the cap covers the whole run.
+#
+# MemoryHigh throttles and reclaims first: a session that drifts over 2 GB is
+# slowed, not killed, and usually finishes. MemoryMax is the hard wall — past
+# 3 GB the kernel OOM-kills inside THIS cgroup only. `Restart=always` then
+# brings the dispatcher back in 10 s; the ticket it held is released by the
+# stale-claim reaper. Losing one run is the cheap outcome. Losing the host's
+# network for six days was the expensive one.
+Slice=selfheal.slice
+MemoryAccounting=yes
+MemoryHigh=2G
+MemoryMax=3G
+# A cgroup OOM kill must not be treated as "the service should stay dead".
+OOMPolicy=continue
+# Never stop restarting: this daemon is the fixer, an unattended crash loop is
+# still better than an unattended silence. Rate-limit visibility comes from
+# NRestarts in the CD verify and the Grafana panel, not from systemd giving up.
+StartLimitIntervalSec=0
+
 [Install]
 WantedBy=multi-user.target

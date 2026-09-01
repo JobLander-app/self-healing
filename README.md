@@ -43,10 +43,32 @@ monitor, dispatcher) is the reusable engine.
 | **Watcher** | polls the detector 1/min; on 3 consecutive bad samples: Telegram P0 → Linear `[Monitor]` ticket → wakes the dispatcher; RECOVERED on clear. Hysteresis avoids flapping (JOB-670, JOB-725) | `watcher/` | minute cron on the VM |
 | **Hourly monitor** | error-side triage (Cloud Run / Cloud Functions / LiveKit VMs / Sentry) → escalations + verbatim P0 alerts; a Claude session sends only what the deterministic `triage.py` prepared | `monitor/` | hourly cron on the VM |
 | **Dispatcher** | autonomous fixer: picks ONE `monitor`-labeled Linear ticket per tick, investigates prod, writes a fix, opens a PR, and auto-merges (the sanctioned Self-Healing Loop exception) — or proves it's not a bug | `dispatcher/` | systemd on the VM, HTTP :4100 (`/trigger`, `/status`, `/feed`) |
+| **Watchdog** (off-box) | the only layer that is not on the VM: reads heartbeat age from Cloud Logging every 5 min, pages Telegram, and resets the instance on its own — budgeted, and never on a signal it has never seen (2026-08-26) | `watchdog/` | Cloud Scheduler → Cloud Functions gen2, `europe-west1` |
 
 The watcher files a ticket → the dispatcher picks it up → the fix merges → Cloud
 Build deploys. A closed loop from "output died" to "fix in prod", with the owner
 watching in Telegram but not in the critical path.
+
+
+### Why one layer lives outside the VM
+
+On 2026-08-26 the loop lost its DHCP address under memory pressure and ran blind
+for six days: cron ticked, the dispatcher restarted, the watcher watched, and
+none of it could reach Cloud Logging, Linear or Telegram. Every detector lived
+on the VM or reported through its network, the dead-man alert notified an email
+channel that has never delivered a message, and nothing anywhere could issue a
+reset. Full account: `docs/POSTMORTEM-2026-08-26-network-blackout.md`.
+
+So the loop now watches itself from three places at once:
+
+- **inside, preventively** — `selfheal.slice` caps what an agent session may
+  take, `earlyoom` kills a runaway before the host thrashes, and
+  `KeepConfiguration=dhcp` keeps the address through a failed lease renewal;
+- **inside, curatively** — `selfheal-netwatch.timer` probes the metadata server
+  every two minutes and escalates reconfigure → restart networkd → reboot;
+- **outside** — the watchdog function, which can page and reset without the VM's
+  cooperation, and an alert relay (Pub/Sub → Telegram) so a page actually
+  arrives.
 
 ---
 

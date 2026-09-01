@@ -95,10 +95,22 @@ rollback() {
 
 # deploy/ owns the units and the crontab wholesale — reinstall before restarting.
 if changed deploy/; then
-  install -m 644 "$SH_DIR/deploy/systemd/"*.service "$SH_DIR/deploy/systemd/"*.timer /etc/systemd/system/ 2>>"$LOG_FILE"
+  install -m 644 "$SH_DIR/deploy/systemd/"*.service "$SH_DIR/deploy/systemd/"*.timer \
+    "$SH_DIR/deploy/systemd/"*.slice /etc/systemd/system/ 2>>"$LOG_FILE"
   systemctl daemon-reload
   crontab -u "$AGENT_USER" "$SH_DIR/deploy/cron/self-healing.crontab" 2>>"$LOG_FILE" \
     && log "crontab reinstalled"
+  # Host hardening (memory caps, DHCP lease survival, earlyoom, netwatch timer).
+  # Idempotent and non-fatal: a hardening failure must not roll back a good
+  # code deploy, but it must be loud in the log and in Telegram.
+  if [ -x "$SH_DIR/deploy/bin/self-healing-harden.sh" ]; then
+    if "$SH_DIR/deploy/bin/self-healing-harden.sh" >>"$LOG_FILE" 2>&1; then
+      log "host hardening applied"
+    else
+      log "WARNING: host hardening reported failures — see $LOG_FILE"
+      notify "self-healing CD: host hardening reported failures on $(hostname) — see $LOG_FILE"
+    fi
+  fi
 fi
 
 changed dispatcher/    && systemctl restart "$DISPATCHER_UNIT" 2>>"$LOG_FILE"

@@ -232,3 +232,17 @@ variable "deletion_protection" {
   type        = bool
   default     = false
 }
+
+variable "extra_notification_channel_ids" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Additional notification channels for this module's alert policies.
+
+    The module's own channel is email, and in this project email has never
+    delivered a Cloud Monitoring alert — the 2026-08-26 dead-man fired into it
+    and nothing arrived, which is why a six-day outage went unnoticed. The root
+    passes the Pub/Sub->relay->Telegram channel here so these policies reach a
+    human on a path that is verified end to end.
+  EOT
+}
