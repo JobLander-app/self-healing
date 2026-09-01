@@ -26,12 +26,17 @@
 # Runs as root from selfheal-netwatch.timer, every 2 minutes.
 set -uo pipefail
 
-METADATA_URL="http://169.254.169.254/computeMetadata/v1/instance/id"
+# Overridable so the escalation ladder can be exercised for real (against an
+# unroutable address) without waiting for an outage. NETWATCH_DRY_RUN=1 logs
+# the action each rung would take and executes none of them — the only honest
+# way to test a script whose last rung is `systemctl reboot`.
+METADATA_URL="${NETWATCH_METADATA_URL:-http://169.254.169.254/computeMetadata/v1/instance/id}"
+DRY_RUN="${NETWATCH_DRY_RUN:-0}"
 PROBE_TIMEOUT_SEC="${NETWATCH_PROBE_TIMEOUT_SEC:-5}"
-STATE_DIR=/run/selfheal-netwatch
+STATE_DIR="${NETWATCH_STATE_DIR:-/run/selfheal-netwatch}"
 FAIL_FILE="$STATE_DIR/consecutive-failures"
 # Survives reboots on purpose — it is the reboot rate limiter.
-PERSIST_DIR=/var/lib/self-healing
+PERSIST_DIR="${NETWATCH_PERSIST_DIR:-/var/lib/self-healing}"
 REBOOT_STAMP="$PERSIST_DIR/netwatch-last-reboot"
 REBOOT_MIN_INTERVAL_SEC="${NETWATCH_REBOOT_MIN_INTERVAL_SEC:-3600}"
 
@@ -39,8 +44,19 @@ FAILS_RECONFIGURE=2
 FAILS_RESTART_NETWORKD=3
 FAILS_REBOOT=5
 
-log() { logger -t selfheal-netwatch -p daemon.notice -- "$*"; }
-warn() { logger -t selfheal-netwatch -p daemon.warning -- "$*"; }
+log() { logger -t selfheal-netwatch -p daemon.notice -- "$*"; [ "$DRY_RUN" = "1" ] && echo "[log] $*"; return 0; }
+warn() { logger -t selfheal-netwatch -p daemon.warning -- "$*"; [ "$DRY_RUN" = "1" ] && echo "[warn] $*"; return 0; }
+
+# Every state-changing call goes through this, so dry-run cannot miss one.
+act() {
+  if [ "$DRY_RUN" = "1" ]; then
+    # stderr, not stdout: the callers pipe stdout into logger, which would
+    # otherwise swallow the one line a dry run exists to print.
+    echo "[dry-run] would run: $*" >&2
+    return 0
+  fi
+  "$@"
+}
 
 mkdir -p "$STATE_DIR" "$PERSIST_DIR"
 
@@ -72,13 +88,13 @@ warn "metadata server unreachable (consecutive failures: $FAILS, iface: $IFACE)"
 
 if [ "$FAILS" -eq "$FAILS_RECONFIGURE" ]; then
   warn "reconfiguring $IFACE (DHCP renew)"
-  networkctl reconfigure "$IFACE" 2>&1 | logger -t selfheal-netwatch
+  act networkctl reconfigure "$IFACE" 2>&1 | logger -t selfheal-netwatch
   exit 0
 fi
 
 if [ "$FAILS" -eq "$FAILS_RESTART_NETWORKD" ]; then
   warn "restarting systemd-networkd"
-  systemctl restart systemd-networkd 2>&1 | logger -t selfheal-netwatch
+  act systemctl restart systemd-networkd 2>&1 | logger -t selfheal-netwatch
   exit 0
 fi
 
@@ -93,7 +109,7 @@ if [ "$FAILS" -ge "$FAILS_REBOOT" ]; then
   fi
   echo "$NOW" >"$REBOOT_STAMP"
   warn "network down after $FAILS consecutive probes — rebooting"
-  systemctl reboot
+  act systemctl reboot
 fi
 
 exit 0
