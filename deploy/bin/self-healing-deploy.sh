@@ -93,6 +93,18 @@ rollback() {
 
 [ -n "$FAILED" ] && rollback "build failed:$FAILED"
 
+# What needs a restart. Tracked as flags rather than restarting inline, because
+# a unit-FILE change needs a restart just as much as a code change does:
+# `systemctl daemon-reload` re-reads the unit but leaves the running process in
+# the cgroup (and therefore under the memory limits) it started with. Installing
+# selfheal.slice without restarting would have left the dispatcher uncapped in
+# system.slice until some unrelated future restart — the containment would have
+# looked deployed and not been. Caught in review of PR #29.
+NEED_RESTART_DISPATCHER=0
+NEED_RESTART_INGEST=0
+changed dispatcher/    && NEED_RESTART_DISPATCHER=1
+changed change-ingest/ && NEED_RESTART_INGEST=1
+
 # deploy/ owns the units and the crontab wholesale — reinstall before restarting.
 if changed deploy/; then
   install -m 644 "$SH_DIR/deploy/systemd/"*.service "$SH_DIR/deploy/systemd/"*.timer \
@@ -111,10 +123,16 @@ if changed deploy/; then
       notify "self-healing CD: host hardening reported failures on $(hostname) — see $LOG_FILE"
     fi
   fi
+  # A changed .service/.slice only takes effect on the next start of the unit.
+  if changed deploy/systemd/; then
+    NEED_RESTART_DISPATCHER=1
+    NEED_RESTART_INGEST=1
+    log "unit files changed — dispatcher and change-ingest will be restarted to pick up their slice/limits"
+  fi
 fi
 
-changed dispatcher/    && systemctl restart "$DISPATCHER_UNIT" 2>>"$LOG_FILE"
-changed change-ingest/ && systemctl restart "$INGEST_UNIT" 2>>"$LOG_FILE"
+[ "$NEED_RESTART_DISPATCHER" = 1 ] && systemctl restart "$DISPATCHER_UNIT" 2>>"$LOG_FILE"
+[ "$NEED_RESTART_INGEST" = 1 ]     && systemctl restart "$INGEST_UNIT" 2>>"$LOG_FILE"
 
 # ---- verify ---------------------------------------------------------------
 # systemd reporting "active" only means the process did not exit yet; a

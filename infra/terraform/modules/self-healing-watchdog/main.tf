@@ -294,6 +294,20 @@ resource "google_cloudfunctions2_function" "alert_relay" {
   ]
 }
 
+# Eventarc delivers the Pub/Sub push as this service account, so it needs
+# run.invoker on the relay itself — eventarc.eventReceiver alone is not enough.
+# Without it the relay answers 401 to every delivery and the alert is dropped
+# after the retry window, silently: exactly the failure mode this module exists
+# to end. Found by publishing a synthetic incident before repointing any real
+# alert policy at the topic.
+resource "google_cloud_run_service_iam_member" "relay_invoker" {
+  project  = var.project_id
+  location = var.region
+  service  = google_cloudfunctions2_function.alert_relay.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.watchdog.email}"
+}
+
 resource "google_project_iam_member" "watchdog_eventarc" {
   project = var.project_id
   role    = "roles/eventarc.eventReceiver"
