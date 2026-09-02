@@ -114,9 +114,16 @@ async function writeState({ bucket, object, state }) {
   await authed(url, { method: 'POST', body: state });
 }
 
-async function sendTelegram({ token, chatId, text }) {
+async function sendTelegram({ token, chatId, text, silent = false }) {
   // Telegram caps a message at 4096 chars.
-  const body = { chat_id: chatId, text: text.slice(0, 4000), disable_web_page_preview: true };
+  // silent -> delivered, visible in the chat, but no notification sound. Used
+  // by the canary, which must prove the whole path without waking anyone.
+  const body = {
+    chat_id: chatId,
+    text: text.slice(0, 4000),
+    disable_web_page_preview: true,
+    disable_notification: Boolean(silent),
+  };
   return httpJson(`https://api.telegram.org/bot${token}/sendMessage`, { method: 'POST', body });
 }
 

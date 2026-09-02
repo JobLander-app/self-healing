@@ -26,6 +26,7 @@
 const functions = require('@google-cloud/functions-framework');
 const { loadConfig } = require('./config');
 const { decide, OK } = require('./decide');
+const { decideDelivery } = require('./relay-policy');
 const gcp = require('./gcp');
 
 const HEARTBEAT_TEXT = 'WATCHDOG_HEARTBEAT';
@@ -46,6 +47,7 @@ function formatPage(cfg, verdict, ages, actionsTaken) {
   lines.push('');
   lines.push(`watcher heartbeat:    ${ages.watcher === null ? 'none in lookback' : ages.watcher + 's old'}`);
   lines.push(`dispatcher heartbeat: ${ages.dispatcher === null ? 'none in lookback' : ages.dispatcher + 's old'}`);
+  lines.push(`alert-path canary:    ${ages.canary === null ? 'none in lookback' : Math.round(ages.canary / 3600) + 'h old'}`);
   if (actionsTaken.length) lines.push('', `Action taken: ${actionsTaken.join(', ')}`);
   for (const r of verdict.reasons) lines.push(`• ${r}`);
   return lines.join('\n');
@@ -55,9 +57,10 @@ async function runWatchdog() {
   const cfg = loadConfig();
   const nowMs = Date.now();
 
-  const [watcherMs, dispatcherMs, instanceStatus, rawState] = await Promise.all([
+  const [watcherMs, dispatcherMs, canaryMs, instanceStatus, rawState] = await Promise.all([
     gcp.latestEntryMs({ projectId: cfg.projectId, logId: cfg.watcherLogId, lookbackSec: cfg.lookbackSec, contains: 'WATCHER_HEARTBEAT' }),
     gcp.latestEntryMs({ projectId: cfg.projectId, logId: cfg.dispatcherLogId, lookbackSec: cfg.lookbackSec, contains: 'DISPATCHER_HEARTBEAT' }),
+    gcp.latestEntryMs({ projectId: cfg.projectId, logId: cfg.relayLogId, lookbackSec: cfg.lookbackSec, contains: 'RELAY_DELIVERED' }),
     gcp.getInstanceStatus({ projectId: cfg.projectId, zone: cfg.zone, instance: cfg.instance }),
     gcp.readState({ bucket: cfg.stateBucket, object: cfg.stateObject }),
   ]);
@@ -71,16 +74,22 @@ async function runWatchdog() {
     ...rawState,
   };
 
-  const ages = { watcher: ageSec(watcherMs, nowMs), dispatcher: ageSec(dispatcherMs, nowMs) };
+  const ages = {
+    watcher: ageSec(watcherMs, nowMs),
+    dispatcher: ageSec(dispatcherMs, nowMs),
+    canary: ageSec(canaryMs, nowMs),
+  };
 
   // "Ever seen" is sticky and is what licenses a reset (decide.js invariant a).
   if (ages.watcher !== null && ages.watcher <= cfg.watcherPageSec) state.everSeenWatcher = true;
   if (ages.dispatcher !== null && ages.dispatcher <= cfg.dispatcherPageSec) state.everSeenDispatcher = true;
+  if (ages.canary !== null && ages.canary <= cfg.canaryStaleSec) state.everSeenCanary = true;
 
   const verdict = decide({
     nowMs,
     watcherAgeSec: ages.watcher,
     dispatcherAgeSec: ages.dispatcher,
+    canaryAgeSec: ages.canary,
     instanceStatus,
     state,
     cfg,
@@ -128,7 +137,7 @@ async function runWatchdog() {
   await gcp.writeLogEntry({
     projectId: cfg.projectId,
     logId: cfg.watchdogLogId,
-    text: `${HEARTBEAT_TEXT} condition=${verdict.condition} watcher_age=${ages.watcher} dispatcher_age=${ages.dispatcher} instance=${instanceStatus} actions=${actionsTaken.join('|') || 'none'}`,
+    text: `${HEARTBEAT_TEXT} condition=${verdict.condition} watcher_age=${ages.watcher} dispatcher_age=${ages.dispatcher} canary_age=${ages.canary} instance=${instanceStatus} actions=${actionsTaken.join('|') || 'none'}`,
     severity: verdict.condition === OK ? 'INFO' : 'ERROR',
   });
 
@@ -155,31 +164,88 @@ functions.http('watchdog', async (req, res) => {
 // project's Telegram channel had been failing that way, so five alert policies
 // notified nobody. A Pub/Sub channel plus this relay is the fix, and it keeps
 // the alert path free of any public HTTP surface.
+//
+// Fixing delivery is only half the job. Switching five long-silent policies to
+// a channel that works made the phone unusable within a day; a channel nobody
+// reads is worth as little as one that never delivers. Volume control lives in
+// relay-policy.js — P0 always through, everything else once per policy per
+// hour with the repeats counted.
 functions.cloudEvent('alertRelay', async (cloudEvent) => {
   const cfg = loadConfig();
+  const nowMs = Date.now();
   const raw = cloudEvent?.data?.message?.data
     ? Buffer.from(cloudEvent.data.message.data, 'base64').toString('utf8')
     : '{}';
 
-  let text;
+  let payload = {};
+  let parseError = null;
   try {
-    const payload = JSON.parse(raw);
-    const i = payload.incident || {};
-    const open = String(i.state || '').toLowerCase() === 'open';
-    const lines = [
-      `${open ? '🚨' : '✅'} ${open ? 'ALERT' : 'CLOSED'} — ${i.policy_name || 'unknown policy'}`,
-      i.condition_name ? `Condition: ${i.condition_name}` : null,
-      i.resource_name ? `Resource: ${i.resource_name}` : null,
-      i.summary ? `\n${i.summary}` : null,
-      i.url ? `\n${i.url}` : null,
-    ].filter(Boolean);
-    text = lines.join('\n');
+    payload = JSON.parse(raw);
   } catch (err) {
-    // Never drop an alert because it did not parse — forward it raw.
-    text = `⚠️ Unparseable Cloud Monitoring payload:\n${raw.slice(0, 1500)}`;
+    parseError = err;
   }
 
-  await gcp.sendTelegram({ token: cfg.telegramToken, chatId: cfg.telegramChatId, text });
+  const incident = payload.incident || {};
+  const isCanary = Boolean(payload.canary);
+  const policyName = isCanary ? 'canary' : incident.policy_name || 'unknown policy';
+  const state = String(incident.state || '').toLowerCase() === 'open' ? 'open' : 'closed';
+
+  const store = await gcp.readState({ bucket: cfg.stateBucket, object: cfg.relayStateObject });
+  const verdict = decideDelivery({
+    policyName,
+    state,
+    isCanary,
+    nowMs,
+    store,
+    cooldownSec: cfg.relayCooldownSec,
+  });
+
+  let text;
+  if (isCanary) {
+    text = `🐤 alert-path canary — ${new Date(nowMs).toISOString()}\nThis message proves Monitoring → Pub/Sub → relay → Telegram still works. Sent silently, once a day.`;
+  } else if (parseError) {
+    // Never drop an alert because it did not parse — forward it raw.
+    text = `⚠️ Unparseable Cloud Monitoring payload:\n${raw.slice(0, 1500)}`;
+  } else {
+    const lines = [
+      `${state === 'open' ? '🚨' : '✅'} ${state === 'open' ? 'ALERT' : 'CLOSED'} — ${policyName}`,
+      incident.condition_name ? `Condition: ${incident.condition_name}` : null,
+      incident.resource_name ? `Resource: ${incident.resource_name}` : null,
+      incident.summary ? `\n${incident.summary}` : null,
+      verdict.suppressedCount
+        ? `\n(+${verdict.suppressedCount} more from this policy since the last message)`
+        : null,
+      incident.url ? `\n${incident.url}` : null,
+    ].filter(Boolean);
+    text = lines.join('\n');
+  }
+
+  // An unparseable payload bypasses the cooldown: we cannot tell what it is,
+  // so we must not decide it is unimportant.
+  const send = verdict.send || Boolean(parseError);
+
+  if (send) {
+    await gcp.sendTelegram({
+      token: cfg.telegramToken,
+      chatId: cfg.telegramChatId,
+      text,
+      silent: verdict.silent,
+    });
+  }
+
+  await gcp.writeState({ bucket: cfg.stateBucket, object: cfg.relayStateObject, state: verdict.store });
+
+  // Attribution. Until now nothing recorded WHICH policy produced a message,
+  // so "why is my phone buzzing" could not be answered from the logs at all.
+  // The canary's line is also the watchdog's proof that this path still works.
+  await gcp.writeLogEntry({
+    projectId: cfg.projectId,
+    logId: cfg.relayLogId,
+    text: isCanary && send
+      ? `RELAY_DELIVERED canary ok`
+      : `RELAY_INCIDENT policy="${policyName}" state=${state} sent=${send} silent=${verdict.silent} suppressed=${verdict.suppressedCount} reason="${verdict.reason}"`,
+    severity: send && !verdict.silent ? 'WARNING' : 'INFO',
+  });
 });
 
 module.exports = { runWatchdog, formatPage };

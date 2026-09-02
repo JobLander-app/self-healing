@@ -16,7 +16,12 @@
 //      fixer inside it is not. `Restart=always` has had an hour to work.)
 //   5. Dispatcher heartbeat older than
 //      DISPATCHER_PAGE_SEC             -> page.
-//   6. Otherwise                       -> ok (and a RECOVERED page if the
+//   6. The daily canary's proof of
+//      delivery is stale               -> page. Never a reset: the VM is fine,
+//                                         it is the ALERT PATH that is broken,
+//                                         and rebooting a healthy box does not
+//                                         fix a dead relay.
+//   7. Otherwise                       -> ok (and a RECOVERED page if the
 //                                         previous run was not ok).
 //
 // TWO INVARIANTS THAT MATTER MORE THAN THE THRESHOLDS
@@ -38,14 +43,19 @@ const OK = 'ok';
  * @param {number} input.nowMs
  * @param {number|null} input.watcherAgeSec    null = no entry found in lookback
  * @param {number|null} input.dispatcherAgeSec null = no entry found in lookback
+ * @param {number|null} [input.canaryAgeSec]     null = no canary delivery found
  * @param {string} input.instanceStatus        RUNNING | TERMINATED | ...
  * @param {object} input.state                 persisted watchdog state
  * @param {object} input.cfg
  */
-function decide({ nowMs, watcherAgeSec, dispatcherAgeSec, instanceStatus, state, cfg }) {
+function decide({ nowMs, watcherAgeSec, dispatcherAgeSec, canaryAgeSec = null, instanceStatus, state, cfg }) {
   const reasons = [];
   const seenWatcher = Boolean(state.everSeenWatcher);
   const seenDispatcher = Boolean(state.everSeenDispatcher);
+  // Same invariant as the reset guard: a signal never observed is a
+  // configuration question, not an incident. Do not page about a canary that
+  // has not been set up yet.
+  const seenCanary = Boolean(state.everSeenCanary);
 
   let condition = OK;
   let wantReset = false;
@@ -82,6 +92,16 @@ function decide({ nowMs, watcherAgeSec, dispatcherAgeSec, instanceStatus, state,
   } else if (dispatcherAgeSec > cfg.dispatcherPageSec) {
     condition = 'dispatcher-late';
     detail = `DISPATCHER_HEARTBEAT is ${Math.round(dispatcherAgeSec / 60)} min old (page threshold ${Math.round(cfg.dispatcherPageSec / 60)} min)`;
+  } else if (
+    seenCanary &&
+    (canaryAgeSec === null || canaryAgeSec > cfg.canaryStaleSec)
+  ) {
+    // The loop is healthy; the way it would TELL you it is not may be dead.
+    // Worth a page precisely because it is invisible by construction.
+    condition = 'alert-path-unproven';
+    detail = canaryAgeSec === null
+      ? 'the daily alert-path canary has not been delivered inside the lookback window'
+      : `the alert-path canary was last delivered ${Math.round(canaryAgeSec / 3600)}h ago (stale after ${Math.round(cfg.canaryStaleSec / 3600)}h)`;
   }
 
   // ---- reset budget --------------------------------------------------------

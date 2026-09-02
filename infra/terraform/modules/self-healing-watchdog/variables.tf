@@ -85,3 +85,38 @@ variable "labels" {
   type    = map(string)
   default = {}
 }
+
+variable "relay_log_id" {
+  type        = string
+  default     = "self-healing-relay"
+  description = "Where the relay records what it delivered and what it rate-limited. Until this existed, nothing recorded WHICH policy produced a message."
+}
+
+variable "relay_cooldown_seconds" {
+  type        = number
+  default     = 3600
+  description = <<-EOT
+    One message per policy per this window; P0 is exempt. Repeats are counted,
+    not dropped, and the next message that goes out says how many it stands for.
+
+    Volume control is not a nicety here: switching five long-silent policies
+    onto a channel that works (2026-09-02) made the phone unusable in a day. A
+    channel nobody reads is worth as little as one that never delivers.
+  EOT
+  validation {
+    condition     = var.relay_cooldown_seconds >= 60
+    error_message = "relay_cooldown_seconds must be >= 60."
+  }
+}
+
+variable "canary_schedule" {
+  type        = string
+  default     = "17 6 * * *"
+  description = "Daily canary through the whole alert path. Delivered silently."
+}
+
+variable "canary_stale_seconds" {
+  type        = number
+  default     = 108000
+  description = "How old the canary's proof of delivery may get before the watchdog pages (30h = one missed run plus slack)."
+}
