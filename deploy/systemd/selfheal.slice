@@ -20,9 +20,12 @@ Before=slices.target
 [Slice]
 MemoryAccounting=yes
 # 8 GB machine (e2-standard-2). Budget, worst case:
-#   selfheal.slice (dispatcher + change-ingest)   4 GB
-#   user-1001.slice (cron: watcher, monitor session) 2.5 GB
+#   selfheal.slice (dispatcher + change-ingest)      4 GB
+#   user-1001.slice (cron: watcher, monitor session) 1.75 GB
 #   system + observability (grafana, prometheus, caddy, sshd, networkd) ~1.2 GB
+#   -> 6.95 GB of 7.94 GB, ~1 GB of real headroom with every ceiling hit at
+#      once, and earlyoom fires at ~640 MB available, so the host is defended
+#      before that headroom is gone.
 #
 # SIZED FROM MEASUREMENT, not guesswork (2026-09-02, first day under caps):
 #   dispatcher memory.peak   1.41 GiB

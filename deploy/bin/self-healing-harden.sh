@@ -129,7 +129,11 @@ CONF
 # The dispatcher is a system unit and is capped by its own Slice=. The other
 # large consumer is the hourly monitor session (a `claude` CLI run) which cron
 # starts as user joblander — that lands in user-1001.slice, outside any cap.
-# 2.5 GB is far above a healthy monitor run and far below "takes the host".
+#
+# 1.75 GB, measured: the user slice peaked at 463 MB on its first full day
+# under caps. The first cut reserved 2.5 GB on no evidence at all, which on an
+# 8 GB host is 750 MB of headroom given away for nothing — and headroom is the
+# thing whose absence started this whole incident.
 harden_user_slice() {
   local uid dropdir
   uid="$(id -u "${AGENT_USER:-joblander}" 2>/dev/null)" || return 1
@@ -141,8 +145,8 @@ harden_user_slice() {
 # See docs/POSTMORTEM-2026-08-26-network-blackout.md.
 [Slice]
 MemoryAccounting=yes
-MemoryHigh=2G
-MemoryMax=2500M
+MemoryHigh=1536M
+MemoryMax=1792M
 CONF
   if cmp -s "$dropdir/10-selfheal-memory.conf.new" "$dropdir/10-selfheal-memory.conf"; then
     rm -f "$dropdir/10-selfheal-memory.conf.new"
@@ -151,7 +155,7 @@ CONF
   mv "$dropdir/10-selfheal-memory.conf.new" "$dropdir/10-selfheal-memory.conf" \
     || { log "WARN: could not install the user-slice cap"; return 1; }
   systemctl daemon-reload
-  log "user-$uid.slice capped (high 2G / max 2500M)"
+  log "user-$uid.slice capped (high 1536M / max 1792M)"
 }
 
 # ---- 4. slice + netwatch ----------------------------------------------------
