@@ -20,11 +20,18 @@ Before=slices.target
 [Slice]
 MemoryAccounting=yes
 # 8 GB machine (e2-standard-2). Budget, worst case:
-#   selfheal.slice (dispatcher + change-ingest)   3.5 GB
+#   selfheal.slice (dispatcher + change-ingest)   4 GB
 #   user-1001.slice (cron: watcher, monitor session) 2.5 GB
 #   system + observability (grafana, prometheus, caddy, sshd, networkd) ~1.2 GB
-# leaving ~0.7 GB of true headroom. MemoryHigh throttles well before any of
-# these ceilings is reached; the ceilings exist so no single component can
-# take the host — and its DHCP lease — down with it.
-MemoryHigh=3G
-MemoryMax=3500M
+#
+# SIZED FROM MEASUREMENT, not guesswork (2026-09-02, first day under caps):
+#   dispatcher memory.peak   1.41 GiB
+#   slice      memory.peak   2.11 GiB
+#   slice memory.events      high=12299  max=0  oom_kill=0
+# Nothing was killed, but the soft threshold was crossed 12k times — real
+# sessions live close to the line. The first cut also had the slice's
+# MemoryHigh (3G) equal to the dispatcher's MemoryMax (3G), so the dispatcher
+# could never reach its own ceiling without the slice throttling first; a
+# parent's limits must sit above any single child's. Raised accordingly.
+MemoryHigh=3500M
+MemoryMax=4G

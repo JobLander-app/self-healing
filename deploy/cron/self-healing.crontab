@@ -70,4 +70,9 @@ WATCH_THRESHOLD=15
 # hit its cgroup ceiling, wedged mid-run) with the heartbeat still ticking, and
 # nothing outside the box would know. The off-box watchdog alerts on the
 # absence of this line — see infra/terraform/modules/self-healing-watchdog.
-*/5 * * * * curl -sf --max-time 10 http://localhost:4100/health 2>/dev/null | grep -q '"status":"ok"' && gcloud logging write self-healing-dispatcher "DISPATCHER_HEARTBEAT ok" --severity=INFO >/dev/null 2>&1
+#
+# peak= is the dispatcher cgroup's memory.peak (world-readable, no sudo). The
+# first memory caps were sized by guesswork; this makes the next adjustment a
+# query instead of an argument. It resets on every restart of the unit, so a
+# series of these is a per-incarnation high-water mark, not a lifetime one.
+*/5 * * * * curl -sf --max-time 10 http://localhost:4100/health 2>/dev/null | grep -q '"status":"ok"' && gcloud logging write self-healing-dispatcher "DISPATCHER_HEARTBEAT ok peak=$(cat /sys/fs/cgroup/selfheal.slice/claude-code-vm-job-dispatcher.service/memory.peak 2>/dev/null || echo 0)" --severity=INFO >/dev/null 2>&1
