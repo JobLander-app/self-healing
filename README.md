@@ -50,6 +50,15 @@ Build deploys. A closed loop from "output died" to "fix in prod", with the owner
 watching in Telegram but not in the critical path.
 
 
+### Applying infrastructure
+
+`infra/terraform/self-healing/apply.sh`, never bare `terraform apply`. The root
+owns the loop's own recovery layer, and a checkout that predates a module is
+indistinguishable, to Terraform, from a decision to delete it — which is how
+the watchdog was destroyed on 2026-09-02. The wrapper refuses to run unless the
+checkout matches `origin/main` and `infra/` is committed, and it makes any
+destroy an explicit confirmation rather than a side effect.
+
 ### Why one layer lives outside the VM
 
 On 2026-08-26 the loop lost its DHCP address under memory pressure and ran blind

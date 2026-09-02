@@ -94,7 +94,7 @@ jobs:
           # Every root-run script under deploy/bin, not just the CD one: the
           # hardening and netwatch scripts can restart networking and reboot
           # the host, so a quoting bug in them is an outage too.
-          shellcheck deploy/bin/*.sh
+          shellcheck deploy/bin/*.sh infra/terraform/self-healing/apply.sh
 
   watchdog:
     name: watchdog (test)
