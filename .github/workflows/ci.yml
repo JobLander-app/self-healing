@@ -118,3 +118,56 @@ jobs:
         # never reset on a signal it has never seen, and never exceed the
         # reset budget.
         run: npm test
+
+  units:
+    name: systemd units (verify)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: systemd-analyze verify
+        # Catches directives systemd silently ignores. StartLimitIntervalSec was
+        # shipped under [Service] on 2026-09-02, where systemd logs "Unknown key
+        # name ... ignoring" and keeps the default — the guard read as present in
+        # the file and was not in effect.
+        run: |
+          set -uo pipefail
+
+          # A guard that cannot fail is not a guard. Prove the detection works
+          # before trusting a clean result: feed systemd-analyze the exact
+          # mistake this job exists to catch and require it to complain.
+          command -v systemd-analyze >/dev/null 2>&1 \
+            || { echo "::error::systemd-analyze is not installed — this job would pass by doing nothing"; exit 1; }
+          probe="$(mktemp -d)/probe.service"
+          printf '[Unit]\nDescription=probe\n[Service]\nExecStart=/bin/true\nStartLimitIntervalSec=0\n' >"$probe"
+          if ! systemd-analyze verify "$probe" 2>&1 | grep -qi 'Unknown key name'; then
+            echo "::error::self-test failed: systemd-analyze no longer reports a misplaced directive, so this job proves nothing"
+            exit 1
+          fi
+
+          set +e
+          out="$(systemd-analyze verify deploy/systemd/*.service deploy/systemd/*.timer deploy/systemd/*.slice 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+
+          if grep -Ei 'Unknown key name|Unknown lvalue|Unknown section' <<<"$out"; then
+            echo "::error::systemd would ignore the directive(s) above — wrong section or spelling"
+            exit 1
+          fi
+
+          # The one diagnostic this repo tolerates: the runner is not the VM, so
+          # the ExecStart binaries genuinely are absent. Everything else — and
+          # any failure with no output at all — is a real finding, not noise.
+          # `|| true`: when nothing unexpected remains, the filter chain finds
+          # no lines and exits non-zero, which under `bash -e` would fail the
+          # step on a CLEAN result. Guarding only the filter, never the verify.
+          unexpected="$(grep -v 'is not executable: No such file or directory' <<<"$out" | grep -v '^[[:space:]]*$' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "::error::unexpected systemd-analyze diagnostics:"
+            echo "$unexpected"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ] && [ -z "$out" ]; then
+            echo "::error::systemd-analyze exited $rc with no output"
+            exit 1
+          fi
