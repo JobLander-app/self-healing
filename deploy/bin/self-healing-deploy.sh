@@ -46,7 +46,16 @@ git_agent fetch --quiet origin main || { log "fetch failed"; exit 1; }
 
 LOCAL="$(git_agent rev-parse HEAD)"
 REMOTE="$(git_agent rev-parse origin/main)"
-[ "$LOCAL" = "$REMOTE" ] && exit 0
+
+# Set by the re-exec below when this script updated itself. It carries the HEAD
+# the run started from, so the second pass still knows what changed instead of
+# seeing LOCAL == REMOTE and exiting as a no-op.
+FORCE_FROM="${SELF_HEALING_CD_FORCE_FROM:-}"
+if [ -n "$FORCE_FROM" ]; then
+  LOCAL="$FORCE_FROM"
+elif [ "$LOCAL" = "$REMOTE" ]; then
+  exit 0
+fi
 
 # NEVER restart the dispatcher mid-investigation. A run holds a Linear ticket
 # claimed In Progress; killing it strands that claim until the stale-claim
@@ -65,6 +74,17 @@ changed() { grep -q "^$1" <<<"$CHANGED"; }
 # Ignored build output (dist/) survives reset --hard, so a failed build below
 # leaves the previously working artifacts in place rather than a half-tree.
 git_agent reset --quiet --hard origin/main || { log "reset failed"; notify "CD FAILED: git reset to ${REMOTE:0:8} failed"; exit 1; }
+
+# A commit that changes THIS script must be deployed by the new version of it,
+# not the old one. Bash executes a script by reading it as it goes, so the run
+# that pulls a CD change is still running the pre-pull logic — on 2026-09-02 that
+# silently skipped a brand-new host-hardening step and the next tick, finding no
+# diff, did nothing. The log said "deployed ok" and the host was unhardened.
+# exec keeps the flock on fd 9, so this is still single-flight.
+if [ -z "$FORCE_FROM" ] && changed deploy/bin/self-healing-deploy.sh; then
+  log "CD script itself changed — re-executing the new version for ${LOCAL:0:8} → ${REMOTE:0:8}"
+  SELF_HEALING_CD_FORCE_FROM="$LOCAL" exec "$SH_DIR/deploy/bin/self-healing-deploy.sh"
+fi
 
 build() { # build <dir> — npm ci + tsc, non-fatal at call site
   local d="$SH_DIR/$1"

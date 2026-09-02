@@ -1,0 +1,10 @@
+[Unit]
+Description=Self-healing host hardening — converge memory caps, DHCP lease survival, earlyoom
+Documentation=file:/home/joblander/self-healing/deploy/bin/self-healing-harden.sh
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/home/joblander/self-healing/deploy/bin/self-healing-harden.sh
+# apt may wait on the unattended-upgrades dpkg lock (600 s in the script).
+TimeoutStartSec=900
