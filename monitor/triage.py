@@ -71,6 +71,23 @@ SENTRY_PROJECT_ID = "4511020395069520"
 # the fixer will only ever close as stale is pure waste.
 SENTRY_FRESH_HOURS = int(os.environ.get("SENTRY_FRESH_HOURS", "12"))
 
+# Per-signature cooldown after a ticket is closed: suppress re-filing within
+# this window so the dispatcher's adjudication (stale/not-a-bug/fixed) isn't
+# immediately reversed by the next monitor run. Evidence: JOB-840 closed 07:26
+# → JOB-843 filed 10:02 same day; JOB-838 closed 08:31 → JOB-844 filed 10:02.
+# $7.56 burned across four tickets covering two signatures (2026-07-27).
+# P0 always overrides cooldown — a DOWN server is never suppressed.
+COOLDOWN_HOURS_CANCELED = int(os.environ.get("COOLDOWN_HOURS_CANCELED", "12"))
+COOLDOWN_HOURS_DONE = int(os.environ.get("COOLDOWN_HOURS_DONE", "6"))
+
+LINEAR_API_URL = "https://api.linear.app/graphql"
+
+# Linear priority → triage severity (monitor sets priority 1→P0, 2→P1, 3→P2).
+# Used in the cooldown escalation override: if current severity is strictly
+# worse than when the prior ticket was closed, the cooldown is overridden.
+_LINEAR_PRIORITY_TO_SEV = {1: "P0", 2: "P1", 3: "P2", 4: "P3", 0: "P3"}
+_SEV_RANK = {"P0": 3, "P1": 2, "P2": 1, "P3": 0}
+
 collection_errors = []
 
 
@@ -78,15 +95,25 @@ def log(msg):
     print(f"[triage] {msg}", file=sys.stderr)
 
 
-def run_cmd(cmd, timeout=180):
+def run_cmd(cmd, timeout=180, optional=False):
+    """Run a command, recording a failure instead of raising.
+
+    optional=True marks the recorded failure `informational`, which keeps it out
+    of the hard-fail count. Use it for lookups the run can proceed without: six
+    genuine collector failures trigger the hard-fail path that discards every
+    escalation, and an optional secret being unavailable must never be the sixth.
+    """
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if res.returncode != 0:
             raise RuntimeError(res.stderr.strip()[:300])
         return res.stdout
     except Exception as e:  # noqa: BLE001 — record and continue, never crash collection
-        collection_errors.append({"cmd": " ".join(cmd[:4]), "error": str(e)[:300]})
-        log(f"FAILED: {' '.join(cmd[:4])}: {e}")
+        entry = {"cmd": " ".join(cmd[:4]), "error": str(e)[:300]}
+        if optional:
+            entry["informational"] = True
+        collection_errors.append(entry)
+        log(f"FAILED{' (optional)' if optional else ''}: {' '.join(cmd[:4])}: {e}")
         return None
 
 
@@ -637,8 +664,168 @@ def diff_with_previous(groups, state_dir):
     return final, summary
 
 
-def build_escalations(final_groups):
-    """Шаг 6 monitor.md, encoded. Telegram ONLY for P0; text prepared verbatim."""
+def _iso_or_min(value):
+    """Parse a Linear ISO timestamp; an unparseable one sorts oldest.
+
+    Used to pick the newest closure among duplicate signatures — a comparison
+    that must never raise, because the whole gate is fail-open.
+    """
+    try:
+        return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:  # noqa: BLE001
+        return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+
+
+def collect_closed_signature_cooldowns():
+    """Query Linear for recently-closed [Monitor] tickets and extract their signatures.
+
+    Returns a dict keyed by signature:
+      {signature: {"state_type": "canceled"|"completed", "closed_at": ISO, "issue": "JOB-XXX"}}
+
+    Fails open: any error (no API key, network, bad response) → returns {} so
+    the monitor behaves exactly as it did before this gate existed.  The gate
+    may only ever *add* suppression; it never blocks a real filing when the
+    feed is down.
+    """
+    # optional=True: the gate fails open by design, so a missing key is not a
+    # collector failure. Counting it as one could make it the sixth error and
+    # trigger the hard-fail path, discarding every escalation of the run.
+    token_raw = run_cmd([
+        "gcloud", "secrets", "versions", "access", "latest",
+        "--secret=linear-api-key", f"--project={PROJECT}",
+    ], optional=True)
+    token = (token_raw or "").strip()
+    if not token:
+        log("cooldown: linear-api-key unavailable — skipping cooldown gate (fail open)")
+        return {}
+
+    # Look back far enough to cover both cooldown windows.
+    lookback_hours = max(COOLDOWN_HOURS_CANCELED, COOLDOWN_HOURS_DONE) + 1
+    since = (datetime.datetime.now(datetime.timezone.utc)
+             - datetime.timedelta(hours=lookback_hours)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    # We query by title prefix so we don't need to hard-code a label ID.
+    # The description body carries the canonical signature in the "Observed
+    # signal" section: **Signature:** `<service>:<region>:<slug>`
+    # completedAt / canceledAt, not updatedAt: editing a ticket after it was
+    # closed advances updatedAt, which would restart the cooldown and could
+    # suppress a live P1/P2 whose real closure window had already expired.
+    # change-ingest/src/ingest/linear.ts makes the same distinction.
+    query = """
+query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
+  issues(
+    filter: {
+      team: { name: { eq: "JobLander" } }
+      title: { startsWith: "[Monitor]" }
+      state: { type: { in: [canceled, completed] } }
+      updatedAt: { gt: $since }
+    }
+    first: 50
+    after: $after
+  ) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      identifier
+      priority
+      state { type }
+      updatedAt
+      completedAt
+      canceledAt
+      description
+    }
+  }
+}
+"""
+    # Drain every page. A single page is 50 issues; on a busy week the tickets
+    # beyond it would silently bypass the gate — which is exactly the refiling
+    # this gate exists to stop. MAX_PAGES bounds a runaway cursor.
+    MAX_PAGES = 20
+    nodes = []
+    after = None
+    try:
+        for _ in range(MAX_PAGES):
+            payload = json.dumps({
+                "query": query,
+                "variables": {"since": since, "after": after},
+            }).encode()
+            req = urllib.request.Request(
+                LINEAR_API_URL,
+                data=payload,
+                headers={"Content-Type": "application/json", "Authorization": token},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode())
+
+            if result.get("errors"):
+                log(f"cooldown: Linear GraphQL errors (fail open): {result['errors']}")
+                return {}
+
+            issues = (result.get("data") or {}).get("issues", {}) or {}
+            nodes.extend(issues.get("nodes", []) or [])
+            page = issues.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                break
+            after = page.get("endCursor")
+            if not after:
+                break
+        else:
+            log(f"cooldown: stopped after {MAX_PAGES} pages — more closed tickets exist")
+    except Exception as e:  # noqa: BLE001 — fail open, never block monitoring
+        log(f"cooldown: Linear API error (fail open): {e}")
+        return {}
+
+    cooldowns = {}
+    for node in nodes:
+        desc = node.get("description") or ""
+        # Extract the exact signature from the factory-ready ticket body:
+        # "**Signature:** `service:region:slug`"
+        m = re.search(r"\*\*Signature:\*\*\s*`([^`\n]+)`", desc)
+        if not m:
+            continue
+        sig = m.group(1).strip()
+        state_type = (node.get("state") or {}).get("type", "")
+        # The timestamp of the ACTUAL terminal transition.
+        closed_at = node.get("canceledAt") if state_type == "canceled" else node.get("completedAt")
+        if not closed_at:
+            # Older tickets closed before Linear recorded the field; updatedAt
+            # is the only thing left, and is at worst too recent (suppresses
+            # slightly longer), never too old (never suppresses a live signal
+            # for longer than it should).
+            closed_at = node.get("updatedAt", "")
+
+        # Several closed tickets can carry the same signature — that is the
+        # refiling pattern this gate is built for. Keep the NEWEST closure;
+        # otherwise the cooldown's age and prior severity depend on the order
+        # Linear happened to return rows in.
+        prev = cooldowns.get(sig)
+        if prev and _iso_or_min(prev.get("closed_at")) >= _iso_or_min(closed_at):
+            continue
+
+        cooldowns[sig] = {
+            "state_type": state_type,
+            "closed_at": closed_at,
+            "issue": node.get("identifier", ""),
+            # Severity the ticket was filed at — used in the escalation override:
+            # if current severity is strictly worse, the cooldown is bypassed.
+            "prior_severity": _LINEAR_PRIORITY_TO_SEV.get(
+                node.get("priority", 0), "P3"),
+        }
+    log(f"cooldown: {len(nodes)} recently-closed [Monitor] tickets, "
+        f"{len(cooldowns)} distinct signatures")
+    return cooldowns
+
+
+def build_escalations(final_groups, cooldowns=None):
+    """Шаг 6 monitor.md, encoded. Telegram ONLY for P0; text prepared verbatim.
+
+    cooldowns: dict returned by collect_closed_signature_cooldowns().  Signatures
+    present in the cooldown map and within the suppression window are downgraded to
+    action="cooldown_suppressed" so the monitor LLM does not refile them.  P0 is
+    always exempt — a DOWN server must never be silenced.
+    """
+    if cooldowns is None:
+        cooldowns = {}
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
     p0_alerts, escalations = [], []
     for g in final_groups:
         sev, status = g.get("severity"), g.get("diff_status")
@@ -649,6 +836,58 @@ def build_escalations(final_groups):
                                       "diff_status", "sample_message", "linear_issue",
                                       "sentry_url", "user_count")}
         item["suggested_title"] = f"[Monitor] {g['service']} {g['region']}: {g['signature'].split(':')[-1]}"
+
+        # --- Cooldown gate (JOB-858) ---
+        # P0 is always exempt: a DOWN server or a massive spike must never be
+        # silenced by a cooldown.  For all other severities, if this signature's
+        # prior Linear ticket was recently closed (Canceled within
+        # COOLDOWN_HOURS_CANCELED, Done within COOLDOWN_HOURS_DONE), suppress
+        # re-filing so the dispatcher's adjudication isn't reversed an hour later.
+        if sev != "P0":
+            cd = cooldowns.get(g.get("signature", ""))
+            if cd:
+                try:
+                    closed_at = datetime.datetime.fromisoformat(
+                        cd["closed_at"].replace("Z", "+00:00"))
+                    if closed_at.tzinfo is None:
+                        closed_at = closed_at.replace(tzinfo=datetime.timezone.utc)
+                    age_h = (now_dt - closed_at).total_seconds() / 3600
+                    state_type = cd.get("state_type", "")
+                    limit_h = (COOLDOWN_HOURS_CANCELED if state_type == "canceled"
+                               else COOLDOWN_HOURS_DONE)
+                    if age_h < limit_h:
+                        # Escalation override: if current severity is strictly
+                        # worse than when the ticket was closed (P2→P1, P1→P0,
+                        # etc.), the cooldown is bypassed — a genuine escalation
+                        # must never be silenced.
+                        prior_sev = cd.get("prior_severity", "P3")
+                        if _SEV_RANK.get(sev, 0) > _SEV_RANK.get(prior_sev, 0):
+                            log(f"cooldown: OVERRIDE for {g['signature']} — "
+                                f"severity escalated {prior_sev}→{sev} "
+                                f"(prior {cd['issue']} {state_type} {age_h:.1f}h ago)")
+                            item["cooldown_override"] = {
+                                "prior_issue": cd["issue"],
+                                "prior_severity": prior_sev,
+                                "current_severity": sev,
+                            }
+                            # Fall through to normal escalation path.
+                        else:
+                            log(f"cooldown: suppressing {g['signature']} — "
+                                f"{cd['issue']} {state_type} {age_h:.1f}h ago "
+                                f"(limit {limit_h}h, sev={sev})")
+                            item["action"] = "cooldown_suppressed"
+                            item["cooldown"] = {
+                                "prior_issue": cd["issue"],
+                                "state": state_type,
+                                "age_h": round(age_h, 1),
+                                "limit_h": limit_h,
+                            }
+                            escalations.append(item)
+                            continue
+                except (ValueError, TypeError):
+                    pass  # bad date → fail open, treat as no cooldown
+        # --- end cooldown gate ---
+
         if sev == "P0":
             if g["signature"].startswith("lk-server:") and g["signature"].endswith(":down"):
                 # Synthetic outage group (count=1 by construction) — say DOWN,
@@ -697,7 +936,11 @@ def main():
     check_vm_disk(groups)  # after assign_severity: sets its own severity
     groups = filter_known(groups, STATE_DIR)
     final_groups, summary = diff_with_previous(groups, STATE_DIR)
-    p0_alerts, escalations = build_escalations(final_groups)
+    # Cooldown gate (JOB-858): query Linear for recently-closed [Monitor] tickets
+    # and suppress re-filing within the adjudication window.  Fails open — if the
+    # Linear API is unreachable the monitor behaves exactly as before.
+    cooldowns = collect_closed_signature_cooldowns()
+    p0_alerts, escalations = build_escalations(final_groups, cooldowns)
 
     now = utcnow_iso()
     # Hard fail: collection is severely broken. Do NOT overwrite the baseline
@@ -740,14 +983,24 @@ def main():
         with open(archive_path, "w") as f:
             json.dump(report, f, indent=2)
 
+    # Build the cooldown_suppressed list for the summary: these are signatures
+    # the monitor adjudicated recently and must not be re-filed this run.
+    cooldown_suppressed = [] if hard_fail else [
+        {"signature": e["signature"], **e["cooldown"]}
+        for e in escalations if e.get("action") == "cooldown_suppressed"
+    ]
     summary_out = {
         "timestamp": now,
         "triage_failed": hard_fail,
         "p0_alerts": [] if hard_fail else p0_alerts,
         "escalations": [] if hard_fail else
-            [e for e in escalations if e["action"] != "report_only"],
+            [e for e in escalations
+             if e["action"] not in ("report_only", "cooldown_suppressed")],
         "report_only": [] if hard_fail else
             [e["signature"] for e in escalations if e["action"] == "report_only"],
+        # Signatures suppressed by the cooldown gate — logged for auditability,
+        # never silently discarded (JOB-858 acceptance criterion).
+        "cooldown_suppressed": cooldown_suppressed,
         "summary": summary,
         "collection_errors": collection_errors,
         "state_files": None if hard_fail else {"latest": latest_path, "archive": archive_path},
@@ -758,6 +1011,7 @@ def main():
 
     log(f"done: {summary['by_severity']}, {len(p0_alerts)} P0 alerts, "
         f"{len(summary_out['escalations'])} escalations, "
+        f"{len(cooldown_suppressed)} cooldown-suppressed, "
         f"{len(collection_errors)} collection errors, hard_fail={hard_fail}")
     print(json.dumps(summary_out, indent=2))
     # Exit 3 on hard fail — the agent must report triage failure, not improvise
