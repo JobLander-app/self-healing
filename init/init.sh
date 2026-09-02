@@ -325,6 +325,8 @@ if [ -d "$SH_DIR" ]; then
   install -m 644 "$SH_DIR/deploy/systemd/selfheal.slice" /etc/systemd/system/selfheal.slice
   install -m 644 "$SH_DIR/deploy/systemd/selfheal-netwatch.service" /etc/systemd/system/selfheal-netwatch.service
   install -m 644 "$SH_DIR/deploy/systemd/selfheal-netwatch.timer" /etc/systemd/system/selfheal-netwatch.timer
+  install -m 644 "$SH_DIR/deploy/systemd/selfheal-harden.service" /etc/systemd/system/selfheal-harden.service
+  install -m 644 "$SH_DIR/deploy/systemd/selfheal-harden.timer" /etc/systemd/system/selfheal-harden.timer
   systemctl daemon-reload
 
   # Host hardening: KeepConfiguration=dhcp, earlyoom, user-slice cap, timer enable.

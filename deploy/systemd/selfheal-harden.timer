@@ -1,0 +1,23 @@
+[Unit]
+Description=Converge self-healing host hardening hourly
+
+# WHY A TIMER AND NOT ONLY A DEPLOY STEP.
+# Hardening was first wired as a side effect of the CD script — run when
+# deploy/ changes. That failed on its very first deploy: the CD tick that
+# pulled the new script was still EXECUTING the old one, so the harden call
+# did not exist yet, and the next tick found no diff and did nothing. The box
+# sat unhardened while both the commit and the log said "deployed ok".
+#
+# Convergence does not have that failure mode. The script is idempotent and
+# silent when there is nothing to do, so running it hourly also repairs drift
+# from an image update regenerating netplan, a package upgrade resetting
+# earlyoom, or someone editing a unit by hand.
+
+[Timer]
+OnBootSec=4m
+OnUnitActiveSec=1h
+AccuracySec=1m
+Unit=selfheal-harden.service
+
+[Install]
+WantedBy=timers.target

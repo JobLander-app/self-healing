@@ -89,6 +89,7 @@ outage.
 | **Prevent** | `selfheal.slice` (MemoryHigh 3G / Max 3.5G); dispatcher capped at 2G/3G with `OOMPolicy=continue`; change-ingest at 384M/512M; `user-1001.slice` (cron, monitor session) capped at 2G/2.5G | `deploy/systemd/`, `deploy/bin/self-healing-harden.sh` |
 | **Prevent** | `earlyoom` — kills the largest offender while the host is merely low, instead of after 40 minutes of thrash; `--avoid` sshd/networkd/guest-agent, `--prefer` node/claude | `deploy/bin/self-healing-harden.sh` |
 | **Prevent** | `KeepConfiguration=dhcp` drop-in — a failed renewal can no longer remove the address | `deploy/bin/self-healing-harden.sh` |
+| **Converge** | `selfheal-harden.timer` — reapplies all of the above hourly, so drift (an image update regenerating netplan, a package upgrade, a hand edit) self-corrects | `deploy/systemd/selfheal-harden.timer` |
 | **Self-repair** | `selfheal-netwatch.timer` — probes the metadata server every 2 min; escalates `networkctl reconfigure` → `systemctl restart systemd-networkd` → reboot (max once per hour) | `deploy/bin/selfheal-netwatch.sh` |
 | **Detect (off-box)** | Cloud Scheduler → `self-healing-watchdog` function reads heartbeat age from Cloud Logging every 5 min | `watchdog/`, `infra/terraform/modules/self-healing-watchdog/` |
 | **Recover (off-box)** | The same function holds `compute.instanceAdmin.v1` **on this one instance** and resets it — budgeted: 30 min cooldown, max 3 per 6 h, and never on a heartbeat stream it has never observed | `watchdog/decide.js` |
@@ -113,6 +114,34 @@ this one from becoming the next incident:
    `dispatcher-dead`, refused to reset, and explained why.)
 2. **Every reset is budgeted.** Cooldown 30 min, at most 3 in 6 h. Past the
    budget it stops resetting and escalates that it has stopped, in those words.
+
+## What shipping the fix taught us (2026-09-02)
+
+The first deploy of this change set failed three times, in three different
+silent ways. All three are fixed; they are recorded because each is the same
+shape as the incident itself — a thing that reported success and did nothing.
+
+1. **The CD script deployed itself with its own old body.** Bash reads a script
+   as it executes, so the tick that pulled the new CD script was still running
+   the pre-pull logic: the hardening call did not exist yet. The next tick found
+   no diff and exited. The log said `deployed ok`; the host was unhardened. Fixed
+   by re-exec'ing the new script with the pre-pull HEAD passed forward, and by
+   moving hardening to an hourly convergence timer (`selfheal-harden.timer`)
+   instead of a deploy side effect.
+2. **The DHCP drop-in was written against the wrong file.** `networkctl status`
+   with no argument prints no `Network File:` line, so the script fell through
+   to "first `*.network` in `/run`" and hardened `10-netplan-id0.network` while
+   `ens4` actually uses `10-netplan-ens4.network`. It logged success and
+   protected nothing. Fixed: resolve the default-route interface and ask about
+   that interface; no guessing fallback — if the file cannot be identified the
+   step fails loudly.
+3. **`earlyoom` lost a race with `unattended-upgrades`** for the dpkg lock and
+   reported only "install failed". Fixed with `DPkg::Lock::Timeout=600` and a
+   retry on the next hourly tick.
+
+Two of the three were found only because the deployment was verified on the
+host rather than trusted from the log — which is the same lesson as the
+incident, one level up.
 
 ## Lessons
 
