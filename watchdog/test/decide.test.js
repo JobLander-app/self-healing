@@ -13,6 +13,7 @@ const cfg = {
   resetMaxPerWindow: 3,
   resetWindowSec: 21600,
   lookbackSec: 172800,
+  canaryStaleSec: 108000,
 };
 
 const NOW = Date.parse('2026-09-02T12:00:00Z');
@@ -21,7 +22,11 @@ const base = {
   watcherAgeSec: 60,
   dispatcherAgeSec: 120,
   instanceStatus: 'RUNNING',
-  state: { condition: OK, resets: [], everSeenWatcher: true, everSeenDispatcher: true, lastPageAt: 0 },
+  canaryAgeSec: 3600,
+  state: {
+    condition: OK, resets: [], everSeenWatcher: true, everSeenDispatcher: true,
+    everSeenCanary: true, lastPageAt: 0,
+  },
   cfg,
 };
 
@@ -120,4 +125,26 @@ test('a persisting condition does not page on every tick', () => {
     state: { ...base.state, condition: 'watcher-late', lastPageAt: NOW - 60_000 },
   });
   assert.equal(v.page, false, 'repeat pages are rate-limited to the cooldown');
+});
+
+test('a stale alert-path canary pages but never resets — the VM is not the broken part', () => {
+  const v = decide({ ...base, canaryAgeSec: 200000 });
+  assert.equal(v.condition, 'alert-path-unproven');
+  assert.equal(v.page, true);
+  assert.equal(v.reset, false, 'rebooting a healthy box does not repair a dead relay');
+});
+
+test('a canary that has never been seen does not page (not yet configured)', () => {
+  const v = decide({
+    ...base,
+    canaryAgeSec: null,
+    state: { ...base.state, everSeenCanary: false },
+  });
+  assert.equal(v.condition, OK);
+});
+
+test('the canary check never outranks a dead watcher', () => {
+  const v = decide({ ...base, watcherAgeSec: 1200, canaryAgeSec: 200000 });
+  assert.equal(v.condition, 'watcher-dead');
+  assert.equal(v.reset, true);
 });

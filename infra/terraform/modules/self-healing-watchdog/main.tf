@@ -159,6 +159,8 @@ resource "google_cloudfunctions2_function" "watchdog" {
       RESET_COOLDOWN_SEC   = tostring(var.reset_cooldown_seconds)
       RESET_MAX_PER_WINDOW = tostring(var.reset_max_per_window)
       RESET_WINDOW_SEC     = tostring(var.reset_window_seconds)
+      RELAY_LOG_ID         = var.relay_log_id
+      CANARY_STALE_SEC     = tostring(var.canary_stale_seconds)
     }
 
     secret_environment_variables {
@@ -232,6 +234,26 @@ resource "google_pubsub_topic_iam_member" "monitoring_publisher" {
   depends_on = [google_monitoring_notification_channel.telegram]
 }
 
+# The alert path is only proven while something keeps proving it. Once a day
+# this publishes a canary onto the same topic Cloud Monitoring uses; the relay
+# delivers it to Telegram with disable_notification (visible in the chat, no
+# sound) and logs RELAY_DELIVERED. The watchdog — a separate deployment — pages
+# if that proof goes stale. Without this, a broken relay is indistinguishable
+# from a quiet week, which is precisely how six days were lost on 2026-08-26.
+resource "google_cloud_scheduler_job" "alert_canary" {
+  project     = var.project_id
+  region      = var.region
+  name        = "self-healing-alert-canary"
+  description = "Daily proof that Monitoring -> Pub/Sub -> relay -> Telegram still delivers."
+  schedule    = var.canary_schedule
+  time_zone   = "Etc/UTC"
+
+  pubsub_target {
+    topic_name = google_pubsub_topic.alerts.id
+    data       = base64encode("{\"canary\":true,\"source\":\"cloud-scheduler\"}")
+  }
+}
+
 resource "google_cloudfunctions2_function" "alert_relay" {
   project     = var.project_id
   name        = local.relay_name
@@ -251,19 +273,24 @@ resource "google_cloudfunctions2_function" "alert_relay" {
   }
 
   service_config {
-    max_instance_count    = 3
+    # One instance: the relay's rate-limit state is a single GCS object and
+    # concurrent instances would race on read-modify-write, which shows up as
+    # exactly the thing the state exists to prevent — duplicate pages.
+    max_instance_count    = 1
     available_memory      = "256Mi"
     timeout_seconds       = 60
     service_account_email = google_service_account.watchdog.email
     ingress_settings      = "ALLOW_INTERNAL_ONLY"
 
     environment_variables = {
-      PROJECT_ID        = var.project_id
-      VM_ZONE           = var.vm_zone
-      VM_NAME           = var.vm_name
-      WATCHER_LOG_ID    = var.watcher_log_id
-      DISPATCHER_LOG_ID = var.dispatcher_log_id
-      STATE_BUCKET      = google_storage_bucket.state.name
+      PROJECT_ID         = var.project_id
+      VM_ZONE            = var.vm_zone
+      VM_NAME            = var.vm_name
+      WATCHER_LOG_ID     = var.watcher_log_id
+      DISPATCHER_LOG_ID  = var.dispatcher_log_id
+      STATE_BUCKET       = google_storage_bucket.state.name
+      RELAY_LOG_ID       = var.relay_log_id
+      RELAY_COOLDOWN_SEC = tostring(var.relay_cooldown_seconds)
     }
 
     secret_environment_variables {

@@ -72,6 +72,16 @@ function loadConfig(env = process.env) {
 
     // How far back to look for the newest heartbeat. Bounds the Logging query.
     lookbackSec: intFromEnv(env, 'LOOKBACK_SEC', { min: 3600, max: 604800, fallback: 172800 }),
+
+    // Relay volume control. One message per policy per hour by default; P0 is
+    // exempt. See watchdog/relay-policy.js for why this is not optional.
+    relayCooldownSec: intFromEnv(env, 'RELAY_COOLDOWN_SEC', { min: 60, max: 86400, fallback: 3600 }),
+    relayStateObject: strFromEnv(env, 'RELAY_STATE_OBJECT', { fallback: 'relay-state.json' }),
+    relayLogId: strFromEnv(env, 'RELAY_LOG_ID', { fallback: 'self-healing-relay' }),
+
+    // How stale the canary's proof of delivery may get before the watchdog
+    // pages. The canary runs daily; 30h tolerates one missed run plus slack.
+    canaryStaleSec: intFromEnv(env, 'CANARY_STALE_SEC', { min: 3600, max: 604800, fallback: 108000 }),
   };
 
   if (cfg.watcherResetSec < cfg.watcherPageSec) {
