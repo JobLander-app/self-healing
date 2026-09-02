@@ -28,15 +28,20 @@ EnvironmentFile=/home/joblander/self-healing/dispatcher/.env
 # (this node process, the `claude` CLI it spawns, and the stdio MCP servers)
 # all inherit this cgroup, so the cap covers the whole run.
 #
-# MemoryHigh throttles and reclaims first: a session that drifts over 2 GB is
+# MemoryHigh throttles and reclaims first: a session that drifts over 2.5 GB is
 # slowed, not killed, and usually finishes. MemoryMax is the hard wall — past
-# 3 GB the kernel OOM-kills inside THIS cgroup only. `Restart=always` then
+# 3 GB the kernel OOM-kills inside THIS cgroup only.
+#
+# 2.5 GB, not 2 GB, because measurement said so: on the first day under caps a
+# normal run peaked at 1.41 GiB and the slice recorded 12,299 MemoryHigh events
+# with zero kills. Throttling healthy sessions to prove a point is not the goal;
+# stopping one from taking the host is. `Restart=always` then
 # brings the dispatcher back in 10 s; the ticket it held is released by the
 # stale-claim reaper. Losing one run is the cheap outcome. Losing the host's
 # network for six days was the expensive one.
 Slice=selfheal.slice
 MemoryAccounting=yes
-MemoryHigh=2G
+MemoryHigh=2500M
 MemoryMax=3G
 # A cgroup OOM kill must not be treated as "the service should stay dead".
 OOMPolicy=continue
