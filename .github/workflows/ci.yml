@@ -158,7 +158,10 @@ jobs:
           # The one diagnostic this repo tolerates: the runner is not the VM, so
           # the ExecStart binaries genuinely are absent. Everything else — and
           # any failure with no output at all — is a real finding, not noise.
-          unexpected="$(grep -v 'is not executable: No such file or directory' <<<"$out" | grep -v '^[[:space:]]*$')"
+          # `|| true`: when nothing unexpected remains, the filter chain finds
+          # no lines and exits non-zero, which under `bash -e` would fail the
+          # step on a CLEAN result. Guarding only the filter, never the verify.
+          unexpected="$(grep -v 'is not executable: No such file or directory' <<<"$out" | grep -v '^[[:space:]]*$' || true)"
           if [ -n "$unexpected" ]; then
             echo "::error::unexpected systemd-analyze diagnostics:"
             echo "$unexpected"
