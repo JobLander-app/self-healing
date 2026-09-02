@@ -271,3 +271,132 @@ class TestExtractSignatureFromDescription(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Review findings on PR #22 (Codex, 2026-07-28). Each test fails without its fix.
+# ---------------------------------------------------------------------------
+
+def _node(ident, sig, state_type, *, completed=None, canceled=None, updated=None, priority=2):
+    return {
+        "identifier": ident,
+        "priority": priority,
+        "state": {"type": state_type},
+        "updatedAt": updated,
+        "completedAt": completed,
+        "canceledAt": canceled,
+        "description": f"## Observed signal\n**Signature:** `{sig}`\n",
+    }
+
+
+def _fake_linear(pages):
+    """Serve GraphQL pages in order; assert the cursor is threaded through."""
+    calls = {"n": 0, "cursors": []}
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+        def read(self):
+            return self._body
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _urlopen(req, timeout=None):  # noqa: ARG001
+        import json as _json
+        body = _json.loads(req.data.decode())
+        calls["cursors"].append(body["variables"].get("after"))
+        page = pages[min(calls["n"], len(pages) - 1)]
+        calls["n"] += 1
+        return _Resp(_json.dumps({"data": {"issues": page}}).encode())
+
+    return _urlopen, calls
+
+
+class TestCooldownCollection(unittest.TestCase):
+    """collect_closed_signature_cooldowns(): the four review findings."""
+
+    def setUp(self):
+        triage.collection_errors.clear()
+
+    def _collect(self, pages):
+        urlopen, calls = _fake_linear(pages)
+        with patch.object(triage, "run_cmd", return_value="lin_api_key\n"), \
+             patch("urllib.request.urlopen", urlopen):
+            return triage.collect_closed_signature_cooldowns(), calls
+
+    def test_cooldown_age_uses_the_terminal_timestamp_not_updatedat(self):
+        # Closed long ago, edited a minute ago. updatedAt would restart the
+        # cooldown and silence a signal whose window has actually expired.
+        pages = [{
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [_node("JOB-840", "svc:eu:sig", "canceled",
+                            canceled="2026-07-27T07:26:00.000Z",
+                            updated="2026-07-28T09:00:00.000Z")],
+        }]
+        cooldowns, _ = self._collect(pages)
+        self.assertEqual(cooldowns["svc:eu:sig"]["closed_at"], "2026-07-27T07:26:00.000Z")
+
+    def test_completed_tickets_use_completedat(self):
+        pages = [{
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [_node("JOB-838", "svc:eu:done", "completed",
+                            completed="2026-07-27T08:31:00.000Z",
+                            updated="2026-07-28T09:00:00.000Z")],
+        }]
+        cooldowns, _ = self._collect(pages)
+        self.assertEqual(cooldowns["svc:eu:done"]["closed_at"], "2026-07-27T08:31:00.000Z")
+
+    def test_missing_terminal_timestamp_falls_back_to_updatedat(self):
+        pages = [{
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [_node("JOB-1", "svc:eu:old", "canceled",
+                            canceled=None, updated="2026-07-27T07:26:00.000Z")],
+        }]
+        cooldowns, _ = self._collect(pages)
+        self.assertEqual(cooldowns["svc:eu:old"]["closed_at"], "2026-07-27T07:26:00.000Z")
+
+    def test_duplicate_signatures_keep_the_newest_closure(self):
+        # Deliberately returned oldest-last: without an explicit comparison the
+        # result depends on Linear's row order.
+        pages = [{
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [
+                _node("JOB-NEW", "svc:eu:dup", "canceled", canceled="2026-07-27T10:00:00.000Z"),
+                _node("JOB-OLD", "svc:eu:dup", "canceled", canceled="2026-07-20T10:00:00.000Z"),
+            ],
+        }]
+        cooldowns, _ = self._collect(pages)
+        self.assertEqual(cooldowns["svc:eu:dup"]["issue"], "JOB-NEW")
+        self.assertEqual(cooldowns["svc:eu:dup"]["closed_at"], "2026-07-27T10:00:00.000Z")
+
+    def test_all_pages_are_drained(self):
+        pages = [
+            {"pageInfo": {"hasNextPage": True, "endCursor": "cur1"},
+             "nodes": [_node("JOB-1", "svc:eu:a", "canceled", canceled="2026-07-27T10:00:00.000Z")]},
+            {"pageInfo": {"hasNextPage": False, "endCursor": None},
+             "nodes": [_node("JOB-2", "svc:eu:b", "completed", completed="2026-07-27T11:00:00.000Z")]},
+        ]
+        cooldowns, calls = self._collect(pages)
+        self.assertEqual(sorted(cooldowns), ["svc:eu:a", "svc:eu:b"],
+                         "a signature past the first page must not bypass the gate")
+        self.assertEqual(calls["cursors"], [None, "cur1"], "the cursor must be threaded through")
+
+    def test_pagination_is_bounded(self):
+        # A server that always claims another page must not loop forever.
+        pages = [{"pageInfo": {"hasNextPage": True, "endCursor": "same"},
+                  "nodes": [_node("JOB-1", "svc:eu:a", "canceled", canceled="2026-07-27T10:00:00.000Z")]}]
+        _, calls = self._collect(pages)
+        self.assertLessEqual(calls["n"], 20)
+
+    def test_missing_api_key_is_informational_not_a_collector_failure(self):
+        # Six real collector failures trigger the hard-fail path that discards
+        # every escalation. An optional secret must never be the sixth.
+        with patch.object(triage, "subprocess") as sp:
+            sp.run.return_value = type("R", (), {"returncode": 1, "stderr": "PERMISSION_DENIED", "stdout": ""})()
+            out = triage.collect_closed_signature_cooldowns()
+        self.assertEqual(out, {}, "the gate must fail open")
+        self.assertTrue(triage.collection_errors, "the failure should still be recorded")
+        self.assertTrue(all(e.get("informational") for e in triage.collection_errors),
+                        "an optional lookup must not count toward hard-fail")

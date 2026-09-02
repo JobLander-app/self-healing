@@ -95,15 +95,25 @@ def log(msg):
     print(f"[triage] {msg}", file=sys.stderr)
 
 
-def run_cmd(cmd, timeout=180):
+def run_cmd(cmd, timeout=180, optional=False):
+    """Run a command, recording a failure instead of raising.
+
+    optional=True marks the recorded failure `informational`, which keeps it out
+    of the hard-fail count. Use it for lookups the run can proceed without: six
+    genuine collector failures trigger the hard-fail path that discards every
+    escalation, and an optional secret being unavailable must never be the sixth.
+    """
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if res.returncode != 0:
             raise RuntimeError(res.stderr.strip()[:300])
         return res.stdout
     except Exception as e:  # noqa: BLE001 — record and continue, never crash collection
-        collection_errors.append({"cmd": " ".join(cmd[:4]), "error": str(e)[:300]})
-        log(f"FAILED: {' '.join(cmd[:4])}: {e}")
+        entry = {"cmd": " ".join(cmd[:4]), "error": str(e)[:300]}
+        if optional:
+            entry["informational"] = True
+        collection_errors.append(entry)
+        log(f"FAILED{' (optional)' if optional else ''}: {' '.join(cmd[:4])}: {e}")
         return None
 
 
@@ -654,6 +664,18 @@ def diff_with_previous(groups, state_dir):
     return final, summary
 
 
+def _iso_or_min(value):
+    """Parse a Linear ISO timestamp; an unparseable one sorts oldest.
+
+    Used to pick the newest closure among duplicate signatures — a comparison
+    that must never raise, because the whole gate is fail-open.
+    """
+    try:
+        return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:  # noqa: BLE001
+        return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+
+
 def collect_closed_signature_cooldowns():
     """Query Linear for recently-closed [Monitor] tickets and extract their signatures.
 
@@ -665,10 +687,13 @@ def collect_closed_signature_cooldowns():
     may only ever *add* suppression; it never blocks a real filing when the
     feed is down.
     """
+    # optional=True: the gate fails open by design, so a missing key is not a
+    # collector failure. Counting it as one could make it the sixth error and
+    # trigger the hard-fail path, discarding every escalation of the run.
     token_raw = run_cmd([
         "gcloud", "secrets", "versions", "access", "latest",
         "--secret=linear-api-key", f"--project={PROJECT}",
-    ])
+    ], optional=True)
     token = (token_raw or "").strip()
     if not token:
         log("cooldown: linear-api-key unavailable — skipping cooldown gate (fail open)")
@@ -682,8 +707,12 @@ def collect_closed_signature_cooldowns():
     # We query by title prefix so we don't need to hard-code a label ID.
     # The description body carries the canonical signature in the "Observed
     # signal" section: **Signature:** `<service>:<region>:<slug>`
+    # completedAt / canceledAt, not updatedAt: editing a ticket after it was
+    # closed advances updatedAt, which would restart the cooldown and could
+    # suppress a live P1/P2 whose real closure window had already expired.
+    # change-ingest/src/ingest/linear.ts makes the same distinction.
     query = """
-query CooldownCheck($since: DateTimeOrDuration!) {
+query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
   issues(
     filter: {
       team: { name: { eq: "JobLander" } }
@@ -692,35 +721,59 @@ query CooldownCheck($since: DateTimeOrDuration!) {
       updatedAt: { gt: $since }
     }
     first: 50
+    after: $after
   ) {
+    pageInfo { hasNextPage endCursor }
     nodes {
       identifier
       priority
       state { type }
       updatedAt
+      completedAt
+      canceledAt
       description
     }
   }
 }
 """
+    # Drain every page. A single page is 50 issues; on a busy week the tickets
+    # beyond it would silently bypass the gate — which is exactly the refiling
+    # this gate exists to stop. MAX_PAGES bounds a runaway cursor.
+    MAX_PAGES = 20
+    nodes = []
+    after = None
     try:
-        payload = json.dumps({"query": query, "variables": {"since": since}}).encode()
-        req = urllib.request.Request(
-            LINEAR_API_URL,
-            data=payload,
-            headers={"Content-Type": "application/json", "Authorization": token},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode())
+        for _ in range(MAX_PAGES):
+            payload = json.dumps({
+                "query": query,
+                "variables": {"since": since, "after": after},
+            }).encode()
+            req = urllib.request.Request(
+                LINEAR_API_URL,
+                data=payload,
+                headers={"Content-Type": "application/json", "Authorization": token},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode())
+
+            if result.get("errors"):
+                log(f"cooldown: Linear GraphQL errors (fail open): {result['errors']}")
+                return {}
+
+            issues = (result.get("data") or {}).get("issues", {}) or {}
+            nodes.extend(issues.get("nodes", []) or [])
+            page = issues.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                break
+            after = page.get("endCursor")
+            if not after:
+                break
+        else:
+            log(f"cooldown: stopped after {MAX_PAGES} pages — more closed tickets exist")
     except Exception as e:  # noqa: BLE001 — fail open, never block monitoring
         log(f"cooldown: Linear API error (fail open): {e}")
         return {}
 
-    if result.get("errors"):
-        log(f"cooldown: Linear GraphQL errors (fail open): {result['errors']}")
-        return {}
-
-    nodes = (result.get("data") or {}).get("issues", {}).get("nodes", [])
     cooldowns = {}
     for node in nodes:
         desc = node.get("description") or ""
@@ -730,9 +783,27 @@ query CooldownCheck($since: DateTimeOrDuration!) {
         if not m:
             continue
         sig = m.group(1).strip()
+        state_type = (node.get("state") or {}).get("type", "")
+        # The timestamp of the ACTUAL terminal transition.
+        closed_at = node.get("canceledAt") if state_type == "canceled" else node.get("completedAt")
+        if not closed_at:
+            # Older tickets closed before Linear recorded the field; updatedAt
+            # is the only thing left, and is at worst too recent (suppresses
+            # slightly longer), never too old (never suppresses a live signal
+            # for longer than it should).
+            closed_at = node.get("updatedAt", "")
+
+        # Several closed tickets can carry the same signature — that is the
+        # refiling pattern this gate is built for. Keep the NEWEST closure;
+        # otherwise the cooldown's age and prior severity depend on the order
+        # Linear happened to return rows in.
+        prev = cooldowns.get(sig)
+        if prev and _iso_or_min(prev.get("closed_at")) >= _iso_or_min(closed_at):
+            continue
+
         cooldowns[sig] = {
-            "state_type": (node.get("state") or {}).get("type", ""),
-            "closed_at": node.get("updatedAt", ""),
+            "state_type": state_type,
+            "closed_at": closed_at,
             "issue": node.get("identifier", ""),
             # Severity the ticket was filed at — used in the escalation override:
             # if current severity is strictly worse, the cooldown is bypassed.
@@ -740,7 +811,7 @@ query CooldownCheck($since: DateTimeOrDuration!) {
                 node.get("priority", 0), "P3"),
         }
     log(f"cooldown: {len(nodes)} recently-closed [Monitor] tickets, "
-        f"{len(cooldowns)} with extractable signatures")
+        f"{len(cooldowns)} distinct signatures")
     return cooldowns
 
 
