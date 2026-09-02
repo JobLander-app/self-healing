@@ -22,6 +22,14 @@ set -uo pipefail
 
 SH_DIR="${SH_DIR:-/home/joblander/self-healing}"
 AGENT_USER="${AGENT_USER:-joblander}"
+
+# Single-flight. selfheal-harden.timer and deploy/bin/self-healing-deploy.sh can
+# invoke this script at the same moment; both stage config through fixed .new
+# paths and both may reach for the apt lock. Two concurrent runs could have one
+# renaming a file the other is still writing, and systemd reloading a partial
+# config. Same primitive the CD script uses.
+exec 8>/var/lock/self-healing-harden.lock
+flock -n 8 || { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [harden] another run holds the lock — skipping"; exit 0; }
 log() { printf '%s [harden] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 RC=0
 
@@ -79,7 +87,8 @@ CONF
     rm -f "$dropdir/10-keep-dhcp-lease.conf.new"
     return 0
   fi
-  mv "$dropdir/10-keep-dhcp-lease.conf.new" "$dropdir/10-keep-dhcp-lease.conf"
+  mv "$dropdir/10-keep-dhcp-lease.conf.new" "$dropdir/10-keep-dhcp-lease.conf" \
+    || { log "WARN: could not install the KeepConfiguration drop-in"; return 1; }
   networkctl reload 2>/dev/null || systemctl reload systemd-networkd 2>/dev/null || true
   log "KeepConfiguration=dhcp installed for $iface at $dropdir/10-keep-dhcp-lease.conf"
 }
@@ -106,7 +115,8 @@ CONF
   # harden_dhcp_lease about this script running hourly.
   local changed=0
   cmp -s /etc/default/earlyoom.new /etc/default/earlyoom || changed=1
-  mv /etc/default/earlyoom.new /etc/default/earlyoom
+  mv /etc/default/earlyoom.new /etc/default/earlyoom \
+    || { log "WARN: could not install /etc/default/earlyoom"; return 1; }
   systemctl enable earlyoom >/dev/null 2>&1 || { log "WARN: earlyoom enable failed"; return 1; }
   if [ "$changed" = 1 ] || ! systemctl is-active --quiet earlyoom; then
     systemctl restart earlyoom >/dev/null 2>&1 || { log "WARN: earlyoom restart failed"; return 1; }
@@ -138,7 +148,8 @@ CONF
     rm -f "$dropdir/10-selfheal-memory.conf.new"
     return 0
   fi
-  mv "$dropdir/10-selfheal-memory.conf.new" "$dropdir/10-selfheal-memory.conf"
+  mv "$dropdir/10-selfheal-memory.conf.new" "$dropdir/10-selfheal-memory.conf" \
+    || { log "WARN: could not install the user-slice cap"; return 1; }
   systemctl daemon-reload
   log "user-$uid.slice capped (high 2G / max 2500M)"
 }
