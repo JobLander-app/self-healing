@@ -2,7 +2,15 @@
 # Mirrors the per-root convention of ai-voice-agent-python/infra/terraform:
 # shared state bucket, distinct prefix per root.
 #
-# Provision:   terraform init && terraform apply     (from this directory)
+# Provision:   ./apply.sh                              (from this directory)
+#
+# DO NOT run `terraform apply` directly. On 2026-09-02 it was run from a
+# checkout that predated the watchdog module; the module was absent from the
+# configuration, so Terraform destroyed it — service account, IAM, both
+# functions, the scheduler, the state bucket. The loop lost its off-box
+# recovery layer for twenty minutes. apply.sh refuses to run unless the
+# checkout matches origin/main, infra/ is committed, and any destroy is
+# explicitly confirmed.
 # NEVER import or reference the legacy `joblander-agents` VM here — this
 # root owns only the NEW parallel VM. Cutover is Phase 4, owner signal only.
 
