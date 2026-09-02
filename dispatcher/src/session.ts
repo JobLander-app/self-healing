@@ -21,10 +21,9 @@ import { isLimitError, pauseFromLimitError } from "./pause";
 import { sendTelegram } from "./notify";
 import * as fs from "fs";
 import * as path from "path";
-import { execFile } from "child_process";
-import { promisify } from "util";
-
-const execFileAsync = promisify(execFile);
+// child_process / util imports removed: the dispatcher no longer resolves
+// LINEAR_API_KEY itself — the vendored linear MCP child does it via gcloud
+// Secret Manager (JOB-916). If other callers need execFile in future, re-add.
 
 let busy = false;
 let currentTurnId: string | null = null;
@@ -45,29 +44,11 @@ const SENTRY_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "sentry", "index.js");
 // Bash+GraphQL.
 const LINEAR_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "linear", "index.js");
 
-// LINEAR_API_KEY for the vendored linear MCP child. The dispatcher process does
-// NOT carry it in env (the poller resolves it from Secret Manager at runtime),
-// so we resolve it ONCE here and cache it, then inject it into every MCP child's
-// env via buildMcpEnv(). Mirrors poller.ts's resolveLinearApiKey (not exported
-// there; importing it would create a session↔poller cycle). Injecting the key
-// into the firebase/sentry children too is harmless — they ignore it.
-let cachedLinearKey = "";
-async function resolveLinearApiKey(): Promise<string> {
-  if (cachedLinearKey) return cachedLinearKey;
-  if (process.env.LINEAR_API_KEY) {
-    cachedLinearKey = process.env.LINEAR_API_KEY;
-    return cachedLinearKey;
-  }
-  const { stdout } = await execFileAsync(
-    "gcloud",
-    ["secrets", "versions", "access", "latest", "--secret=linear-api-key", `--project=${config.gcpProject}`],
-    { timeout: 15_000 },
-  );
-  const key = stdout.trim();
-  if (!key) throw new Error("linear-api-key resolved empty from Secret Manager");
-  cachedLinearKey = key;
-  return key;
-}
+// NOTE: The dispatcher no longer resolves or injects LINEAR_API_KEY into the
+// linear MCP child's environment. The vendored mcp/linear/tools.js now fetches
+// its own key from Secret Manager via gcloud when no LINEAR_API_KEY* env var is
+// set — mirroring the sentry MCP's pattern. This eliminates the key from the
+// --mcp-config argv, where it was previously world-readable via `ps` (JOB-916).
 
 /** Pick named keys from process.env; silently skip undefined values. */
 function pickEnv(keys: readonly string[]): Record<string, string> {
@@ -121,36 +102,31 @@ function baseMcpEnv(): Record<string, string> {
 }
 
 /**
- * Per-server env builders. Each adds only the secrets that server actually
- * reads (confirmed by inspecting mcp/{firebase,sentry,linear}/tools.js).
+ * Per-server env builders. Each passes only the base allowlist — no
+ * credentials. Credentials are resolved by the MCP child processes themselves
+ * via gcloud Secret Manager (the same fallback the sentry and linear MCPs
+ * already implement), so they never appear in --mcp-config argv (JOB-916).
+ *
+ * firebase: uses ADC (admin.credential.applicationDefault()) when
+ *           GCP_PRIVATE_KEY_BASE_64 is absent — which is always the case on
+ *           the self-healing VM where the attached service account provides
+ *           credentials via the metadata server.
+ * sentry:   falls back to `gcloud secrets versions access` for SENTRY_TOKEN.
+ * linear:   falls back to `gcloud secrets versions access` for LINEAR_API_KEY
+ *           (mcp/linear/tools.js, added in this PR).
+ *
  * Exported for unit tests (JOB-916 regression).
  */
 export function buildFirebaseMcpEnv(): Record<string, string> {
-  const env = baseMcpEnv();
-  // Cert-based auth fallback (used when ADC is unavailable).
-  for (const k of ["GCP_PRIVATE_KEY_BASE_64", "GCP_CLIENT_EMAIL"] as const) {
-    const v = process.env[k];
-    if (typeof v === "string") env[k] = v;
-  }
-  return env;
+  return baseMcpEnv();
 }
 
 export function buildSentryMcpEnv(): Record<string, string> {
-  const env = baseMcpEnv();
-  // SENTRY_TOKEN: used directly; the server falls back to gcloud Secret
-  // Manager if absent, so it is optional here.
-  const t = process.env.SENTRY_TOKEN;
-  if (typeof t === "string") env.SENTRY_TOKEN = t;
-  return env;
+  return baseMcpEnv();
 }
 
-export function buildLinearMcpEnv(resolvedKey: string = cachedLinearKey): Record<string, string> {
-  const env = baseMcpEnv();
-  // resolvedKey is the value from resolveLinearApiKey() (Secret Manager or
-  // env), already populated before query() is called.
-  if (resolvedKey) env.LINEAR_API_KEY = resolvedKey;
-  else if (process.env.LINEAR_API_KEY) env.LINEAR_API_KEY = process.env.LINEAR_API_KEY;
-  return env;
+export function buildLinearMcpEnv(): Record<string, string> {
+  return baseMcpEnv();
 }
 
 export function isBusy(): boolean {
@@ -424,19 +400,6 @@ export async function runDispatchSession(reason: string): Promise<RunSummary> {
     `- FAIL OPEN on availability: if curl fails / the service is unreachable, that is NOT evidence of intent — proceed with the normal fix flow. FAIL CLOSED on judgment: if a returned change explains the anomaly, do NOT fix (outcome "intentional").\n`;
 
   const prompt = `${systemPrompt}${freshnessPolicy}${changeFeedPolicy}${dryRunBanner}\n\n---\n\n${RUN_INSTRUCTION}`;
-
-  // Resolve LINEAR_API_KEY once before spawning the MCP children so
-  // buildMcpEnv() can inject it into the linear MCP child. Fail-soft: if the key
-  // can't be resolved, the linear MCP still starts but its tool calls fail —
-  // the rest of the session (firebase/sentry/Bash) is unaffected.
-  try {
-    await resolveLinearApiKey();
-  } catch (err) {
-    console.warn(
-      "[session] LINEAR_API_KEY resolve failed — linear MCP tools will be unavailable this run:",
-      err instanceof Error ? err.message : err,
-    );
-  }
 
   let output = "";
   let costUsd = 0;

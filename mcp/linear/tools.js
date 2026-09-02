@@ -1,8 +1,15 @@
 import { z } from "zod";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { execFileSync } from "child_process";
 
 const LINEAR_API_URL = "https://api.linear.app/graphql";
 const CHARACTER_LIMIT = 25000;
+
+// Secret Manager fallback — used when LINEAR_API_KEY* env vars are absent so
+// the dispatcher need not pass the key via --mcp-config argv (JOB-916).
+const LINEAR_SECRET = "linear-api-key";
+const GCP_PROJECT = (process.env.GCP_PROJECT_ID || "meet-assistant-6d8ad").trim();
+const FETCH_TIMEOUT_MS = 15_000;
 
 // ── Per-request context (agent key selection) ────────────
 //
@@ -29,6 +36,28 @@ function loadKeys() {
     const key = (process.env[envVar] || "").trim();
     if (key) ALL_KEYS.push(key);
   }
+
+  // When no key is found in env, fall back to Secret Manager (JOB-916).
+  // This mirrors the sentry MCP's gcloud-fallback pattern and avoids the
+  // dispatcher having to pass LINEAR_API_KEY via --mcp-config argv (where it
+  // is readable by any user on the host via `ps` / /proc/<pid>/cmdline).
+  if (ALL_KEYS.length === 0) {
+    try {
+      const key = execFileSync(
+        "gcloud",
+        [
+          "secrets", "versions", "access", "latest",
+          `--secret=${LINEAR_SECRET}`,
+          `--project=${GCP_PROJECT}`,
+        ],
+        { encoding: "utf8", timeout: FETCH_TIMEOUT_MS },
+      ).trim();
+      if (key) ALL_KEYS.push(key);
+    } catch {
+      // fall through; getApiKey() will throw "No LINEAR_API_KEY..."
+    }
+  }
+
   // stderr, not stdout: stdout is the stdio JSON-RPC channel — any stray
   // stdout write corrupts the MCP framing (firebase/sentry servers follow the
   // same rule).
