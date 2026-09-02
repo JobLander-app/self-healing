@@ -14,3 +14,6 @@ dist-test/
 *.tfvars
 crash.log
 .claude/
+
+# Terraform-built function source archive (regenerated on every plan/apply).
+infra/terraform/modules/self-healing-watchdog/.build/

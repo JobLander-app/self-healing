@@ -76,7 +76,7 @@ resource "google_monitoring_alert_policy" "watcher_dead_man" {
     }
   }
 
-  notification_channels = [google_monitoring_notification_channel.email.id]
+  notification_channels = concat([google_monitoring_notification_channel.email.id], var.extra_notification_channel_ids)
 
   alert_strategy {
     auto_close = "86400s"
@@ -145,7 +145,7 @@ resource "google_monitoring_alert_policy" "no_meetings_saved" {
     }
   }
 
-  notification_channels = [google_monitoring_notification_channel.email.id]
+  notification_channels = concat([google_monitoring_notification_channel.email.id], var.extra_notification_channel_ids)
 
   alert_strategy {
     auto_close = "86400s"

@@ -319,6 +319,18 @@ if [ -d "$SH_DIR" ]; then
     fi
   fi
 
+  # Memory-capping slice + the netwatch timer that repairs a dead DHCP lease.
+  # Both exist because of the 2026-08-26 six-day blindness — see
+  # docs/POSTMORTEM-2026-08-26-network-blackout.md and deploy/systemd/selfheal.slice.
+  install -m 644 "$SH_DIR/deploy/systemd/selfheal.slice" /etc/systemd/system/selfheal.slice
+  install -m 644 "$SH_DIR/deploy/systemd/selfheal-netwatch.service" /etc/systemd/system/selfheal-netwatch.service
+  install -m 644 "$SH_DIR/deploy/systemd/selfheal-netwatch.timer" /etc/systemd/system/selfheal-netwatch.timer
+  systemctl daemon-reload
+
+  # Host hardening: KeepConfiguration=dhcp, earlyoom, user-slice cap, timer enable.
+  "$SH_DIR/deploy/bin/self-healing-harden.sh" \
+    || add_todo "host hardening reported failures — run $SH_DIR/deploy/bin/self-healing-harden.sh by hand and read its output"
+
   # whole-crontab install: deploy/cron/self-healing.crontab OWNS joblander's crontab
   crontab -u $AGENT_USER "$SH_DIR/deploy/cron/self-healing.crontab"
   log "crontab installed for $AGENT_USER"

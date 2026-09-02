@@ -93,16 +93,46 @@ rollback() {
 
 [ -n "$FAILED" ] && rollback "build failed:$FAILED"
 
+# What needs a restart. Tracked as flags rather than restarting inline, because
+# a unit-FILE change needs a restart just as much as a code change does:
+# `systemctl daemon-reload` re-reads the unit but leaves the running process in
+# the cgroup (and therefore under the memory limits) it started with. Installing
+# selfheal.slice without restarting would have left the dispatcher uncapped in
+# system.slice until some unrelated future restart — the containment would have
+# looked deployed and not been. Caught in review of PR #29.
+NEED_RESTART_DISPATCHER=0
+NEED_RESTART_INGEST=0
+changed dispatcher/    && NEED_RESTART_DISPATCHER=1
+changed change-ingest/ && NEED_RESTART_INGEST=1
+
 # deploy/ owns the units and the crontab wholesale — reinstall before restarting.
 if changed deploy/; then
-  install -m 644 "$SH_DIR/deploy/systemd/"*.service "$SH_DIR/deploy/systemd/"*.timer /etc/systemd/system/ 2>>"$LOG_FILE"
+  install -m 644 "$SH_DIR/deploy/systemd/"*.service "$SH_DIR/deploy/systemd/"*.timer \
+    "$SH_DIR/deploy/systemd/"*.slice /etc/systemd/system/ 2>>"$LOG_FILE"
   systemctl daemon-reload
   crontab -u "$AGENT_USER" "$SH_DIR/deploy/cron/self-healing.crontab" 2>>"$LOG_FILE" \
     && log "crontab reinstalled"
+  # Host hardening (memory caps, DHCP lease survival, earlyoom, netwatch timer).
+  # Idempotent and non-fatal: a hardening failure must not roll back a good
+  # code deploy, but it must be loud in the log and in Telegram.
+  if [ -x "$SH_DIR/deploy/bin/self-healing-harden.sh" ]; then
+    if "$SH_DIR/deploy/bin/self-healing-harden.sh" >>"$LOG_FILE" 2>&1; then
+      log "host hardening applied"
+    else
+      log "WARNING: host hardening reported failures — see $LOG_FILE"
+      notify "self-healing CD: host hardening reported failures on $(hostname) — see $LOG_FILE"
+    fi
+  fi
+  # A changed .service/.slice only takes effect on the next start of the unit.
+  if changed deploy/systemd/; then
+    NEED_RESTART_DISPATCHER=1
+    NEED_RESTART_INGEST=1
+    log "unit files changed — dispatcher and change-ingest will be restarted to pick up their slice/limits"
+  fi
 fi
 
-changed dispatcher/    && systemctl restart "$DISPATCHER_UNIT" 2>>"$LOG_FILE"
-changed change-ingest/ && systemctl restart "$INGEST_UNIT" 2>>"$LOG_FILE"
+[ "$NEED_RESTART_DISPATCHER" = 1 ] && systemctl restart "$DISPATCHER_UNIT" 2>>"$LOG_FILE"
+[ "$NEED_RESTART_INGEST" = 1 ]     && systemctl restart "$INGEST_UNIT" 2>>"$LOG_FILE"
 
 # ---- verify ---------------------------------------------------------------
 # systemd reporting "active" only means the process did not exit yet; a

@@ -1,0 +1,30 @@
+[Unit]
+Description=Self-healing loop workloads — memory-capped so the agent can never starve the host
+Before=slices.target
+
+# WHY THIS EXISTS (incident 2026-08-26, six-day blindness).
+# The dispatcher ran in system.slice with no memory limit. A single
+# investigation session grew until the host had no free memory; the kernel
+# spent 40 minutes thrashing page cache (48 GB read per 5 min, PD line rate)
+# and, mid-stall, systemd-networkd's DHCPv4 renewal on ens4 timed out and the
+# link went Failed. The global OOM killer then freed the memory — too late:
+# the lease expired an hour later, ens4 lost its address, and the VM ran
+# blind (no metadata server, no Cloud Logging, no SSH) until it was reset.
+#
+# The fix is not a bigger machine, it is a bounded one: everything the agent
+# runs lives in this slice, so runaway memory is charged to a cgroup that the
+# kernel kills locally instead of a host-wide OOM that takes networking with
+# it. The host keeps ~3.4 GB for sshd, systemd-networkd, the guest agent and
+# the observability stack no matter what the agent does.
+
+[Slice]
+MemoryAccounting=yes
+# 8 GB machine (e2-standard-2). Budget, worst case:
+#   selfheal.slice (dispatcher + change-ingest)   3.5 GB
+#   user-1001.slice (cron: watcher, monitor session) 2.5 GB
+#   system + observability (grafana, prometheus, caddy, sshd, networkd) ~1.2 GB
+# leaving ~0.7 GB of true headroom. MemoryHigh throttles well before any of
+# these ceilings is reached; the ceilings exist so no single component can
+# take the host — and its DHCP lease — down with it.
+MemoryHigh=3G
+MemoryMax=3500M

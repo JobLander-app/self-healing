@@ -17,5 +17,14 @@ EnvironmentFile=-/home/joblander/self-healing/change-ingest/.env
 # SQLite change store lives here (created + chowned by init.sh).
 Environment=CHANGES_DB=/var/lib/self-healing/changes.db
 
+# Memory containment — see deploy/systemd/selfheal.slice (incident 2026-08-26).
+# The ingest is a small poller; 512 MB is generous. Capping it keeps a runaway
+# SQLite/fetch loop from competing with the dispatcher for the slice budget.
+Slice=selfheal.slice
+MemoryAccounting=yes
+MemoryHigh=384M
+MemoryMax=512M
+OOMPolicy=continue
+
 [Install]
 WantedBy=multi-user.target

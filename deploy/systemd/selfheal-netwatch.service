@@ -1,0 +1,12 @@
+[Unit]
+Description=Self-healing netwatch — probe the metadata server and repair a dead DHCP lease
+# Deliberately NOT After=network-online.target: this unit's whole job is to run
+# when the network is broken.
+Documentation=file:/home/joblander/self-healing/deploy/bin/selfheal-netwatch.sh
+
+[Service]
+Type=oneshot
+# Root: networkctl reconfigure, systemctl restart systemd-networkd, reboot.
+User=root
+ExecStart=/home/joblander/self-healing/deploy/bin/selfheal-netwatch.sh
+TimeoutStartSec=120

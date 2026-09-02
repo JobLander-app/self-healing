@@ -42,7 +42,15 @@ WATCH_THRESHOLD=15
 # --- ROLE HANDED OVER (TEST-PLAN stage 3, 2026-07-16): this VM is the LIVE
 # pager; the legacy VM's watcher cron line is commented out. Stage 4 (2026-07-17):
 # trigger targets THIS VM's dispatcher (default localhost:4100) — full loop local.
-* * * * * cd /home/joblander/self-healing/watcher && /usr/bin/node dist/tick.js >> /home/joblander/output-watch.log 2>&1 && gcloud logging write self-healing-watcher "WATCHER_HEARTBEAT tick ok" --severity=INFO >/dev/null 2>&1
+* * * * * cd /home/joblander/self-healing/watcher && /usr/bin/node dist/tick.js >> /home/joblander/output-watch.log 2>&1 && touch /home/joblander/.watcher-last-ok && gcloud logging write self-healing-watcher "WATCHER_HEARTBEAT tick ok" --severity=INFO >/dev/null 2>&1
+
+# The `touch` above is a LOCAL heartbeat and lands BEFORE the Cloud Logging
+# write on purpose. On 2026-08-26 the tick kept succeeding every minute for six
+# days while `gcloud logging write` failed silently — the VM had lost its DHCP
+# address, so the only heartbeat the system had needed the very thing that was
+# broken. The file mtime tells a later investigator "the watcher was alive, the
+# network was not", which is the difference between a 5-minute fix and a
+# six-day outage. selfheal-netwatch.timer is what actually repairs it.
 
 # Hourly monitor session (error-side triage; runs from the workspace clone —
 # run-monitor-session.sh sources scripts/lib/agent-launcher.sh next to it).
@@ -56,3 +64,10 @@ WATCH_THRESHOLD=15
 # double-run them. Uncomment only on the owner's cutover signal.
 # 0 8 * * * /home/joblander/cws-recon/run.sh >> /home/joblander/cws-recon/cron.log 2>&1
 # 5 8 * * 1 bash /home/joblander/workspace/scripts/run-cws-metrics.sh >> /home/joblander/workspace/reports/cws-rankings/cron.log 2>&1
+
+# Dispatcher liveness → Cloud Logging, every 5 min. The watcher heartbeat only
+# proves the VM and cron are alive; the dispatcher could be dead (crash-looped,
+# hit its cgroup ceiling, wedged mid-run) with the heartbeat still ticking, and
+# nothing outside the box would know. The off-box watchdog alerts on the
+# absence of this line — see infra/terraform/modules/self-healing-watchdog.
+*/5 * * * * curl -sf --max-time 10 http://localhost:4100/health 2>/dev/null | grep -q '"status":"ok"' && gcloud logging write self-healing-dispatcher "DISPATCHER_HEARTBEAT ok" --severity=INFO >/dev/null 2>&1

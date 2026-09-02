@@ -91,4 +91,30 @@ jobs:
         # unquoted expansion in it is an outage, so it gets linted like code.
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck deploy/bin/self-healing-deploy.sh
+          # Every root-run script under deploy/bin, not just the CD one: the
+          # hardening and netwatch scripts can restart networking and reboot
+          # the host, so a quoting bug in them is an outage too.
+          shellcheck deploy/bin/*.sh
+
+  watchdog:
+    name: watchdog (test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: watchdog
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: watchdog/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Unit tests
+        # The watchdog can power-cycle a production VM. Its policy (when to
+        # page, when to reset, when to refuse) is pure and fully covered here,
+        # including the two guards that keep it from becoming the outage:
+        # never reset on a signal it has never seen, and never exceed the
+        # reset budget.
+        run: npm test
