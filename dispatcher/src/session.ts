@@ -69,23 +69,87 @@ async function resolveLinearApiKey(): Promise<string> {
   return key;
 }
 
-/**
- * Env handed to the child MCP processes. Inherit the full parent env (PATH,
- * HOME, GOOGLE_* / gcloud config are all required for ADC + `gcloud secrets`),
- * then ensure GCP_PROJECT_ID is set for both servers. GCP_PRIVATE_KEY_BASE_64 /
- * GCP_CLIENT_EMAIL (firebase cert fallback) and SENTRY_TOKEN pass through
- * automatically when present in the dispatcher's own environment.
- */
-function buildMcpEnv(): Record<string, string> {
+/** Pick named keys from process.env; silently skip undefined values. */
+function pickEnv(keys: readonly string[]): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
+  for (const k of keys) {
+    const v = process.env[k];
     if (typeof v === "string") env[k] = v;
   }
+  return env;
+}
+
+/**
+ * Minimal base env shared by all MCP child processes.
+ *
+ * This is an ALLOWLIST, not a copy of process.env.  The parent dispatcher
+ * carries secrets (CLAUDE_CODE_OAUTH_TOKEN, TG_BOT_TOKEN, TRIGGER_TOKEN, …)
+ * that the MCP children do not need.  Passing process.env wholesale serialises
+ * every secret into the --mcp-config argv, where it is visible to any user on
+ * the machine via `ps` or /proc/<pid>/cmdline (JOB-916).
+ *
+ * Included:
+ *   PATH / HOME      — required for `node`, `gcloud` binary lookup and ADC
+ *                      credential file (~/.config/gcloud/).
+ *   LANG / USER / …  — standard POSIX variables, harmless to include.
+ *   NODE_ENV         — may affect library behaviour.
+ *   GCP_PROJECT_ID   — all three MCP servers need the project ID.
+ *   GOOGLE_*         — Application Default Credentials overrides (optional).
+ *
+ * Explicitly excluded:
+ *   CLAUDE_CODE_OAUTH_TOKEN, TG_BOT_TOKEN, TRIGGER_TOKEN — dispatcher-only
+ *   secrets; MCP children must never receive them.
+ */
+function baseMcpEnv(): Record<string, string> {
+  const env = pickEnv([
+    "PATH",
+    "HOME",
+    "LANG",
+    "LOGNAME",
+    "USER",
+    "SHELL",
+    "NODE_ENV",
+    "GCP_PROJECT_ID",
+  ]);
+  // Always ensure GCP_PROJECT_ID is set (ADC project override).
   env.GCP_PROJECT_ID = env.GCP_PROJECT_ID || config.gcpProject;
-  // Linear MCP child auth. Resolved once (resolveLinearApiKey, awaited before
-  // the query() below) so cachedLinearKey is populated by the time this runs.
-  // Harmless for the firebase/sentry children.
-  if (cachedLinearKey) env.LINEAR_API_KEY = env.LINEAR_API_KEY || cachedLinearKey;
+  // Forward any GOOGLE_* vars present (e.g. GOOGLE_APPLICATION_CREDENTIALS).
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith("GOOGLE_") && typeof v === "string") env[k] = v;
+  }
+  return env;
+}
+
+/**
+ * Per-server env builders. Each adds only the secrets that server actually
+ * reads (confirmed by inspecting mcp/{firebase,sentry,linear}/tools.js).
+ * Exported for unit tests (JOB-916 regression).
+ */
+export function buildFirebaseMcpEnv(): Record<string, string> {
+  const env = baseMcpEnv();
+  // Cert-based auth fallback (used when ADC is unavailable).
+  for (const k of ["GCP_PRIVATE_KEY_BASE_64", "GCP_CLIENT_EMAIL"] as const) {
+    const v = process.env[k];
+    if (typeof v === "string") env[k] = v;
+  }
+  return env;
+}
+
+export function buildSentryMcpEnv(): Record<string, string> {
+  const env = baseMcpEnv();
+  // SENTRY_TOKEN: used directly; the server falls back to gcloud Secret
+  // Manager if absent, so it is optional here.
+  const t = process.env.SENTRY_TOKEN;
+  if (typeof t === "string") env.SENTRY_TOKEN = t;
+  return env;
+}
+
+export function buildLinearMcpEnv(resolvedKey: string = cachedLinearKey): Record<string, string> {
+  const env = baseMcpEnv();
+  // resolvedKey is the value from resolveLinearApiKey() (Secret Manager or
+  // env), already populated before query() is called.
+  if (resolvedKey) env.LINEAR_API_KEY = resolvedKey;
+  else if (process.env.LINEAR_API_KEY) env.LINEAR_API_KEY = process.env.LINEAR_API_KEY;
   return env;
 }
 
@@ -413,9 +477,9 @@ export async function runDispatchSession(reason: string): Promise<RunSummary> {
           "mcp__linear__*",
         ],
         mcpServers: {
-          firebase: { command: "node", args: [FIREBASE_MCP_ENTRY], env: buildMcpEnv() },
-          sentry: { command: "node", args: [SENTRY_MCP_ENTRY], env: buildMcpEnv() },
-          linear: { command: "node", args: [LINEAR_MCP_ENTRY], env: buildMcpEnv() },
+          firebase: { command: "node", args: [FIREBASE_MCP_ENTRY], env: buildFirebaseMcpEnv() },
+          sentry: { command: "node", args: [SENTRY_MCP_ENTRY], env: buildSentryMcpEnv() },
+          linear: { command: "node", args: [LINEAR_MCP_ENTRY], env: buildLinearMcpEnv() },
         },
         permissionMode: "bypassPermissions",
         abortController,
