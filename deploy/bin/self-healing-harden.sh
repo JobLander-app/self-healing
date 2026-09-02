@@ -126,7 +126,7 @@ harden_user_slice() {
   [ -n "$uid" ] || return 1
   dropdir="/etc/systemd/system/user-$uid.slice.d"
   mkdir -p "$dropdir"
-  cat >"$dropdir/10-selfheal-memory.conf" <<CONF
+  cat >"$dropdir/10-selfheal-memory.conf.new" <<CONF
 # Managed by deploy/bin/self-healing-harden.sh — do not edit on the VM.
 # See docs/POSTMORTEM-2026-08-26-network-blackout.md.
 [Slice]
@@ -134,6 +134,11 @@ MemoryAccounting=yes
 MemoryHigh=2G
 MemoryMax=2500M
 CONF
+  if cmp -s "$dropdir/10-selfheal-memory.conf.new" "$dropdir/10-selfheal-memory.conf"; then
+    rm -f "$dropdir/10-selfheal-memory.conf.new"
+    return 0
+  fi
+  mv "$dropdir/10-selfheal-memory.conf.new" "$dropdir/10-selfheal-memory.conf"
   systemctl daemon-reload
   log "user-$uid.slice capped (high 2G / max 2500M)"
 }
@@ -151,17 +156,18 @@ harden_units() {
   if [ -f /etc/systemd/system/selfheal-netwatch.timer ]; then
     systemctl enable --now selfheal-netwatch.timer >/dev/null 2>&1 \
       || { log "WARN: could not enable selfheal-netwatch.timer"; return 1; }
-    log "netwatch timer: $(systemctl is-active selfheal-netwatch.timer)"
   else
     log "WARN: selfheal-netwatch.timer not installed yet"
     return 1
   fi
 }
 
+# Converging hourly means silence is the normal outcome: each step logs only
+# when it actually changed something, so a line in this journal is a signal.
 harden_dhcp_lease || RC=1
 harden_earlyoom   || RC=1
 harden_user_slice || RC=1
 harden_units      || RC=1
 
-log "done (rc=$RC)"
+[ "$RC" = 0 ] || log "done with failures (rc=$RC)"
 exit $RC

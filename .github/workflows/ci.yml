@@ -118,3 +118,24 @@ jobs:
         # never reset on a signal it has never seen, and never exceed the
         # reset budget.
         run: npm test
+
+  units:
+    name: systemd units (verify)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: systemd-analyze verify
+        # Catches directives systemd silently ignores. StartLimitIntervalSec was
+        # shipped under [Service] on 2026-09-02, where systemd logs "Unknown key
+        # name ... ignoring" and keeps the default — the guard read as present in
+        # the file and was not in effect. Only "Unknown key name"/"Unknown lvalue"
+        # is treated as fatal here: verify also reports the unit's ExecStart
+        # binaries as missing, which is expected on a runner that is not the VM.
+        run: |
+          set -o pipefail
+          out="$(systemd-analyze verify deploy/systemd/*.service deploy/systemd/*.timer deploy/systemd/*.slice 2>&1 || true)"
+          echo "$out"
+          if grep -Ei "Unknown key name|Unknown lvalue|Unknown section" <<<"$out"; then
+            echo "::error::systemd would ignore the directive(s) above — fix the section or spelling"
+            exit 1
+          fi

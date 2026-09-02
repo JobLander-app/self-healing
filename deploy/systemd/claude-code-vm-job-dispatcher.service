@@ -2,6 +2,17 @@
 Description=Claude-Code-VM Job Dispatcher — autonomous self-poll fixer for JobLander 'monitor' tickets (self-healing loop)
 After=network.target
 
+# Never stop restarting: this daemon is the fixer, an unattended crash loop is
+# still better than an unattended silence. Rate-limit visibility comes from
+# NRestarts in the CD verify and the Grafana panel, not from systemd giving up.
+#
+# This MUST live in [Unit]. It was written under [Service] on 2026-09-02, where
+# systemd 249 logged "Unknown key name 'StartLimitIntervalSec' in section
+# 'Service', ignoring" once an hour and silently kept the default 5-starts-in-10s
+# limit — so the guard against systemd abandoning the fixer was declared and
+# not in effect. Found by reading the unit's journal rather than the unit file.
+StartLimitIntervalSec=0
+
 [Service]
 Type=simple
 User=joblander
@@ -29,10 +40,6 @@ MemoryHigh=2G
 MemoryMax=3G
 # A cgroup OOM kill must not be treated as "the service should stay dead".
 OOMPolicy=continue
-# Never stop restarting: this daemon is the fixer, an unattended crash loop is
-# still better than an unattended silence. Rate-limit visibility comes from
-# NRestarts in the CD verify and the Grafana panel, not from systemd giving up.
-StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target
