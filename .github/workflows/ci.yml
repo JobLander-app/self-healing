@@ -90,7 +90,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Lint (syntax check)
-        run: python3 -m py_compile monitor/triage.py
+        run: python3 -m py_compile monitor/triage.py monitor/run_monitor.py
       - name: Unit tests
         run: python3 -m unittest discover -s monitor -p "test_*.py" -v
 

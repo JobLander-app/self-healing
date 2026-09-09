@@ -453,9 +453,11 @@ For client-side errors, transient blips, already-fixed-in-`main`, expected
    cause.*
 
    The file lives in the monitor's state dir — `MONITOR_STATE_DIR` in the
-   environment, defaulting to `teams/logs/monitoring` relative to the workspace
-   clone, i.e. `/home/joblander/workspace/teams/logs/monitoring/known-errors.json`
-   on this VM. Read the variable; do **not** `find /` for the filename. Stale
+   environment, defaulting to `/home/joblander/.local/state/self-healing/monitor`,
+   i.e. `/home/joblander/.local/state/self-healing/monitor/known-errors.json` on
+   this VM. The monitor migrates the legacy workspace state once; the old copy
+   is historical and must never receive new suppressions. Read the variable;
+   do **not** `find /` for the filename. Stale
    copies of this file exist on disk, and editing the wrong one produces a
    suppression that never takes effect while looking like it did. Shape is
    `{"patterns": [...]}`, one object per entry:

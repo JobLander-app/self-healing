@@ -52,8 +52,9 @@ WATCH_THRESHOLD=15
 # network was not", which is the difference between a 5-minute fix and a
 # six-day outage. selfheal-netwatch.timer is what actually repairs it.
 
-# Hourly monitor session (error-side triage; runs from the workspace clone —
-# run-monitor-session.sh sources scripts/lib/agent-launcher.sh next to it).
+# Hourly monitor: self-contained collection + escalation in the same repo as
+# the executor. Its own runner skips inference on empty batches, migrates old
+# state once, and publishes a success heartbeat consumed by monitor_dead_man.
 # --- ROLE HANDED OVER (stage 3M, 2026-07-17): this VM runs the hourly monitor;
 # the legacy VM's hourly cron is commented out. State (teams/logs/monitoring)
 # was copied from the legacy VM before handover. Runs from THIS repo.

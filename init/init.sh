@@ -334,6 +334,11 @@ if [ -d "$SH_DIR" ]; then
     || add_todo "host hardening reported failures — run $SH_DIR/deploy/bin/self-healing-harden.sh by hand and read its output"
 
   # whole-crontab install: deploy/cron/self-healing.crontab OWNS joblander's crontab
+  # Separate monitor journal/provider state. Do not pre-create the final state
+  # directory: its first launch atomically migrates the old monitoring files.
+  install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0750 \
+    /var/log/self-healing-monitor /var/log/self-healing-monitor/turns \
+    "$AGENT_HOME/.local/state/self-healing"
   crontab -u $AGENT_USER "$SH_DIR/deploy/cron/self-healing.crontab"
   log "crontab installed for $AGENT_USER"
 
