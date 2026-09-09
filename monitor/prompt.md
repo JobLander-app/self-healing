@@ -60,7 +60,8 @@ For each known service:
 2. If no open issue exists, inspect recent open PRs read-only with
    `gh pr list --repo JobLander-app/<repo> --state open --json title,body,createdAt,url`.
    A PR younger than two hours explicitly covering this signature is a duplicate;
-   record its URL and skip filing. This is the only reason to use Bash. Do not
+   record `{ "signature": "<exact signature>", "url": "<PR URL>" }` in
+   `pr_duplicates` and skip filing. This is the only reason to use Bash. Do not
    run git commands, write scripts, invoke network clients, or start other CLIs.
 3. Otherwise create one issue with `suggested_title` and the project/labels above.
    Include these sections: `## Problem (WHY)`, `## Observed signal`,
@@ -74,6 +75,10 @@ For each known service:
 After each successful Linear write, immediately update `linear-actions.json` so
 an interrupted session retains progress. Preserve existing entries; never repeat
 a recorded successful create/comment without reading current Linear state first.
+Record every handled signature: `issue_by_signature` must contain its verified
+open issue identifier/UUID (including existing duplicates), or `pr_duplicates`
+must contain its exact signature and verified GitHub pull URL. A success marker
+without this coverage does not acknowledge the batch; missing outcomes retry.
 The file format is:
 
 ```json
@@ -81,7 +86,7 @@ The file format is:
   "linear_created": ["JOB-123"],
   "linear_commented": ["JOB-456"],
   "issue_by_signature": {"exact:signature": "JOB-123"},
-  "pr_duplicates": [],
+  "pr_duplicates": [{"signature": "another:signature", "url": "https://github.com/JobLander-app/backend/pull/42"}],
   "errors": []
 }
 ```

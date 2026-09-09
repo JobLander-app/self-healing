@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import signal
@@ -147,6 +148,24 @@ def prepare_escalations(config, summary):
     batch = {**summary, "escalations": list(pending.values())}
     write_json(config.state_dir / "escalation-batch.json", batch)
     return batch
+
+
+def acknowledge_escalations(config, batch, actions):
+    """A final marker alone is not coverage: acknowledge recorded outcomes only."""
+    required = {item["signature"] for item in batch["escalations"]}
+    covered = {signature for signature, issue in actions.get("issue_by_signature", {}).items()
+               if isinstance(issue, str) and re.fullmatch(r"JOB-[1-9]\d*|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", issue)}
+    for duplicate in actions.get("pr_duplicates", []):
+        if (isinstance(duplicate, dict) and isinstance(duplicate.get("signature"), str)
+                and isinstance(duplicate.get("url"), str)
+                and re.fullmatch(r"https://github\.com/JobLander-app/[^/]+/pull/[1-9]\d*", duplicate["url"])):
+            covered.add(duplicate["signature"])
+    path = config.state_dir / "linear-outbox.json"
+    pending = json.loads(path.read_text())
+    for signature in required & covered:
+        pending.pop(signature, None)
+    write_json(path, pending)
+    return sorted(required - covered)
 
 
 def telegram_credentials():
@@ -379,7 +398,6 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
         result["telegramSent"].extend(sent)
         result["errors"].extend(failures)
         actions = {"linear_created": [], "linear_commented": [], "issue_by_signature": {}}
-        escalation_completed = False
         if batch["escalations"]:
             result["llmSkipped"] = False
             provider_result = session_runner(config)
@@ -390,7 +408,6 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
             result["actions"] = actions
             if actions.get("errors"):
                 result["errors"].append("monitor action record contains unresolved errors")
-            escalation_completed = not provider_result.get("error") and not actions.get("errors")
         report_path = config.state_dir / "latest-report.json"
         report = json.loads(report_path.read_text())
         report["actions"] = {"telegram_sent": result["telegramSent"],
@@ -399,8 +416,10 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
             if group["signature"] in actions.get("issue_by_signature", {}):
                 group["linear_issue"] = actions["issue_by_signature"][group["signature"]]
         write_json(report_path, report)
-        if escalation_completed:
-            write_json(config.state_dir / "linear-outbox.json", {})
+        if batch["escalations"]:
+            result["pendingSignatures"] = acknowledge_escalations(config, batch, actions)
+            if result["pendingSignatures"]:
+                result["errors"].append("escalations lack recorded outcomes: " + ", ".join(result["pendingSignatures"]))
         if not result["errors"]:
             result["status"] = "success"
     except Exception as error:

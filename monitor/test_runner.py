@@ -181,6 +181,31 @@ class MonitorRunnerTests(unittest.TestCase):
         result = json.loads((self.config.state_dir / "last-session.json").read_text())
         self.assertFalse(result["heartbeatPublished"])
 
+    def test_success_with_empty_actions_retains_every_required_signature(self):
+        self.assertEqual(self.run_once(
+            collector=self.collector(escalations=[{"action": "linear_create_if_no_dup"}]),
+            session_runner=lambda config: {"error": None, "attempts": [], "actions": {
+                "linear_created": [], "linear_commented": [], "issue_by_signature": {}}}), 1)
+        self.assertIn("audio:failed", json.loads((self.config.state_dir / "linear-outbox.json").read_text()))
+
+    def test_partial_batch_acks_only_signatures_with_valid_recorded_outcomes(self):
+        signals = [
+            {"signature": "created", "action": "linear_create_if_no_dup"},
+            {"signature": "pr-duplicate", "action": "linear_create_if_no_dup"},
+            {"signature": "missing", "action": "linear_create_if_no_dup"},
+            {"signature": "invalid", "action": "linear_create_if_no_dup"},
+        ]
+        self.assertEqual(self.run_once(
+            collector=self.collector(escalations=signals),
+            session_runner=lambda config: {"error": "interrupted", "attempts": [], "actions": {
+                "linear_created": ["JOB-42"], "linear_commented": [], "issue_by_signature": {"created": "JOB-42", "invalid": "done"},
+                "pr_duplicates": [{"signature": "pr-duplicate", "url": "https://github.com/JobLander-app/backend/pull/42"},
+                                  {"signature": "invalid", "url": "https://github.com/JobLander-app/backend"}]}}), 1)
+        self.assertEqual(set(json.loads((self.config.state_dir / "linear-outbox.json").read_text())), {"missing", "invalid"})
+        result = json.loads((self.config.state_dir / "last-session.json").read_text())
+        self.assertEqual(result["pendingSignatures"], ["invalid", "missing"])
+        self.assertFalse(result["heartbeatPublished"])
+
     def test_missing_gcloud_does_not_erase_completed_session(self):
         result = {"status": "success", "triageAt": runner.timestamp(), "llmSkipped": True,
                   "finishedAt": runner.timestamp()}

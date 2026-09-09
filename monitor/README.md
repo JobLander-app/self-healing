@@ -15,7 +15,10 @@ Deploy activation also waits for that lock. Do not add a second cron.
    and remove only acknowledged deliveries. Failed deliveries retry next launch,
    even if the next collection fails. A crash after delivery can repeat a page;
    preserving delivery takes precedence over suppressing every duplicate.
-3. Persist escalations in `linear-outbox.json` until a session completes. This
+3. Persist escalations in `linear-outbox.json` until each signature has a recorded
+   Linear issue or structured GitHub PR duplicate outcome. A success marker with
+   empty or partial actions never clears the batch; acknowledge completed items
+   individually and retain missing outcomes. This
    retains a new P2 across a quota failure even when the next collection calls it
    recurring. Fresh cooldown decisions remove suppressed pending signals.
    If both current escalations and this backlog are empty, skip all model execution and OAuth resolution. Write
