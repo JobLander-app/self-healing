@@ -59,3 +59,47 @@ test("a trigger received while a run is active remains pending for the next scan
     assert.equal(calls, 2);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("one run consumes only one accumulated wakeup and the other survives restart", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "trigger-receipts-"));
+  const file = path.join(dir, "receipts.json");
+  let calls = 0;
+  const poll = async () => { calls++; return { ran: true, note: "completed" }; };
+  try {
+    const receipts = new TriggerReceipts(file, poll);
+    receipts.accept("first");
+    receipts.accept("second");
+    await receipts.drain();
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(stored.first.done, true);
+    assert.equal(stored.second.done, false);
+    const restart = new TriggerReceipts(file, poll);
+    assert.equal(restart.accept("second"), false);
+    await restart.drain();
+    await restart.drain();
+    assert.equal(calls, 2);
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).second.done, true);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("confirmed empty queue consumes accumulated wakeups but preserves new arrivals", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "trigger-receipts-"));
+  const file = path.join(dir, "receipts.json");
+  try {
+    let finish!: () => void;
+    const receipts = new TriggerReceipts(file, async () => {
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { ran: false, note: "precheck-skip" };
+    });
+    receipts.accept("first");
+    receipts.accept("second");
+    const drain = receipts.drain();
+    receipts.accept("third");
+    finish();
+    await drain;
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(stored.first.done, true);
+    assert.equal(stored.second.done, true);
+    assert.equal(stored.third.done, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

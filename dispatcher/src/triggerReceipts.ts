@@ -52,12 +52,14 @@ export class TriggerReceipts {
     try {
       const pending = Object.entries(this.read()).filter(([, receipt]) => !receipt.done).map(([id]) => id);
       if (!pending.length) return;
-      // A single poll drains the same queue for every accepted wakeup present
-      // at its start. Keys arriving mid-investigation wait for the next drain.
+      // A run handles at most one ticket, so it consumes only one wakeup. An
+      // empty-queue precheck can acknowledge the snapshot; newly arriving keys
+      // always wait for the next drain.
       const result = await this.poll();
       if (result.ran || result.note === "precheck-skip") {
         const data = this.read();
-        for (const id of pending) data[id] = { done: true, at: this.now() };
+        const acknowledged = result.note === "precheck-skip" ? pending : pending.slice(0, 1);
+        for (const id of acknowledged) data[id] = { done: true, at: this.now() };
         this.write(data);
       }
     } finally { this.running = false; }
