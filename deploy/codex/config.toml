@@ -1,0 +1,10 @@
+# Verified on the SHL VM with Codex CLI 0.153.4 (2026-09-09).
+model = "gpt-6-astra"
+model_reasoning_effort = "medium"
+forced_login_method = "chatgpt"
+cli_auth_credentials_store = "file"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+history.persistence = "save-all"
+# Dispatcher overrides sandbox only for its already-authorized autonomous run.
+# Auth cache is service-owned mode 600; preserve refreshes between runs.

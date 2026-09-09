@@ -47,6 +47,11 @@ export const config = {
   httpPort: parseInt(process.env.HTTP_PORT || "4100", 10),
 
   claudeModel: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
+  codexEnabled: process.env.CODEX_ENABLED === "true",
+  codexBin: process.env.CODEX_BIN || "codex",
+  codexModel: process.env.CODEX_MODEL || "",
+  providerRetryMs: positiveInt("PROVIDER_RETRY_MS", process.env.PROVIDER_RETRY_MS, 3_600_000),
+  providerEvidenceMaxMs: positiveInt("PROVIDER_EVIDENCE_MAX_MS", process.env.PROVIDER_EVIDENCE_MAX_MS, 86_400_000),
 
   // Turn budget for one investigation. Raised 60 → 120 on 2026-07-28.
   //
@@ -153,3 +158,5 @@ export const LINEAR_AGENT_CLAIMED_LABEL_ID = "79756c33-7f85-4da7-9789-0d5146399a
 export const LINEAR_API_KEY_SECRET = "linear-api-key";
 export const CLAUDE_OAUTH_SECRET = "claude-code-oauth-token";
 export const SENTRY_TOKEN_SECRET = "joblander-sentry-monitor-token";
+
+if (config.codexEnabled && !config.codexModel) throw new Error("CODEX_MODEL must be explicitly verified and set when CODEX_ENABLED=true");

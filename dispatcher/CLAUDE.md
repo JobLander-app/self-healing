@@ -295,12 +295,15 @@ the anomaly**. Any credible intentional explanation → you do **not** touch pro
 **Fail-safe rules (do not violate):**
 - **You fix ONLY on a confident "unexplained".** `intentional` and `ambiguous`
   never proceed to a prod change.
-- **Correlation fails OPEN on availability, CLOSED on judgment.** If the
-  change-ingest service is unreachable / errors / times out (curl fails), that is
-  NOT evidence of intent — proceed with the normal fix flow exactly as today (the
-  freshness gate remains your guard). The gate may only ever *add* a decline; it
-  must never block a real fix just because the feed is down. But when the feed DOES
-  answer and a change explains the anomaly, you MUST decline.
+- **Unavailable intent evidence is not permission to reverse a change.** If
+  change-ingest returns HTTP 503, missing/stale source coverage, errors or times
+  out, continue read-only investigation and repair feed/credential reachability
+  itself. Do not create/delete/restore resources, roll infrastructure back or
+  otherwise reverse a possible intentional change without fresh corroborating
+  intent evidence. Equivalent authoritative GitHub, GCP audit and Linear reads
+  can substitute for unavailable feed sources. Otherwise return `backlogged`
+  with the explicit coverage failure and investigation evidence. A successful
+  empty feed response only supports "unexplained" when source coverage is fresh.
 - **Never re-provision, restart, or "restore" a resource** whose deletion/removal
   appears in the change feed as an intentional audit event. Close `intentional`.
 

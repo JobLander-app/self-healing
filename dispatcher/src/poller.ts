@@ -15,6 +15,7 @@ import { promisify } from "util";
 import { config, LINEAR_AGENT_CLAIMED_LABEL } from "./config";
 import { isBusy, runDispatchSession } from "./session";
 import { readPause, clearPause, pauseRemainingMs } from "./pause";
+import { providerOrder, availableToAttempt } from "./providerState";
 
 const execFileAsync = promisify(execFile);
 
@@ -195,13 +196,16 @@ export async function pollOnce(reason: string): Promise<{ ran: boolean; note: st
   // Respect a subscription rate-limit pause. While paused, every tick would
   // just re-hit the wall, so skip until the reset time. Once elapsed, clear
   // the pause and proceed (the limit window has closed).
-  const remaining = pauseRemainingMs();
+  if (!providerOrder().some(p => availableToAttempt(p))) {
+    return { ran: false, note: "all providers cooling down" };
+  }
+  const remaining = config.codexEnabled ? 0 : pauseRemainingMs();
   if (remaining > 0) {
     const until = readPause()?.until;
     console.log(`[poller] Skipping tick (reason: ${reason}) — rate-limit pause, ~${Math.ceil(remaining / 60000)}m left (until ${until})`);
     return { ran: false, note: `paused ${Math.ceil(remaining / 60000)}m` };
   }
-  if (readPause()) clearPause(); // window elapsed → resume normal operation
+  if (readPause() && pauseRemainingMs() === 0) clearPause();
   // Cheap Linear pre-check before spawning the (expensive) agent. Manual
   // /trigger BYPASSES it: a trigger means the watcher just filed a ticket
   // (Linear indexing may lag) and it is also the operator fire-drill path.

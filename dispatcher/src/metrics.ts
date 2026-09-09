@@ -1,19 +1,10 @@
-/**
- * Prometheus metrics for the dispatcher (JOB-731 → free-core observability v1).
- *
- * Hand-rolled text exposition (Prometheus 0.0.4 text format). The metric set is
- * small and fixed and the dispatcher is not yet wired into CI, so a full
- * prom-client dependency buys nothing here — a few string builders are cleaner
- * and dependency-free. All names are namespaced `selfheal_dispatcher_`.
- *
- * Run counters (`runs_total{outcome}`, `cost_usd_total`) are MONOTONIC in-memory
- * counters incremented from trace.recordRun. They also rehydrate best-effort
- * from the on-disk JSONL ring on startup (trace.hydrateFromDisk reads the most
- * recent ~50 runs), so a daemon bounce doesn't zero them for recent history —
- * survives-restart is best-effort, not a guarantee. Everything else is a
- * point-in-time gauge read from the live status sources at scrape time.
+/** Prometheus counters replay the durable usage ledger; the recent-run ring
+ * only bounds /feed and never limits lifetime accounting. USD is an SDK
+ * estimate, not a subscription bill. Missing token/cost reports stay unknown.
  */
 import type { RunOutcome, RunSummary } from "./trace";
+import type { ProviderAttempt } from "./providerTypes";
+import { providerReadiness } from "./providerState";
 import type { HealthcheckSnapshot } from "./healthcheck";
 import type { PrecheckOutcome, PrecheckState } from "./poller";
 
@@ -30,12 +21,11 @@ const OUTCOMES: readonly RunOutcome[] = [
   "unknown",
 ];
 
-// The five dependencies the healthcheck probes (healthcheck.ts PROBES).
+// The tool dependencies the healthcheck probes (healthcheck.ts PROBES).
 const HEALTHCHECK_DEPS = [
   "firebase",
   "sentry",
   "gcp",
-  "claude-oauth-token",
   "linear",
 ] as const;
 
@@ -43,7 +33,7 @@ const HEALTHCHECK_DEPS = [
 const PRECHECK_RESULTS: readonly PrecheckOutcome[] = ["skip", "run", "error"];
 
 // ---------------------------------------------------------------------------
-// Monotonic counters (process lifetime; best-effort rehydrated on startup).
+// Monotonic counters replayed from the durable ledger on startup.
 // ---------------------------------------------------------------------------
 const runsByOutcome: Record<RunOutcome, number> = {
   fixed: 0,
@@ -57,6 +47,24 @@ const runsByOutcome: Record<RunOutcome, number> = {
   unknown: 0,
 };
 let costUsdTotal = 0;
+const modelTokens = new Map<string, { provider: string; model: string; input: number; cachedInput: number; cacheWrite: number; output: number }>();
+const attemptCounters = new Map<string, { provider: string; model: string; attempts: number; failures: number; input: number; cachedInput: number; cacheWrite: number; output: number; unknown: number; estimatedCost: number }>();
+export function incrementAttemptCounters(a: ProviderAttempt): void {
+  const key = `${a.provider}:${a.model}`;
+  let c = attemptCounters.get(key);
+  if (!c) { c = { provider: a.provider, model: a.model, attempts: 0, failures: 0, input: 0, cachedInput: 0, cacheWrite: 0, output: 0, unknown: 0, estimatedCost: 0 }; attemptCounters.set(key, c); }
+  c.attempts++;
+  if (a.status === "failed") c.failures++;
+  if (a.usage.input === null || a.usage.output === null) c.unknown++;
+  for (const row of a.models?.length ? a.models : [{ model: a.model, usage: a.usage }]) {
+    const modelKey = `${a.provider}:${row.model}`;
+    let tokens = modelTokens.get(modelKey);
+    if (!tokens) { tokens = { provider: a.provider, model: row.model, input: 0, cachedInput: 0, cacheWrite: 0, output: 0 }; modelTokens.set(modelKey, tokens); }
+    for (const k of ["input", "cachedInput", "cacheWrite", "output"] as const) tokens[k] += row.usage[k] ?? 0;
+  }
+  c.estimatedCost += a.estimatedCostUsd ?? 0;
+  costUsdTotal += a.estimatedCostUsd ?? 0;
+}
 
 /**
  * Increment the run counters for one completed (or rehydrated) run. Called from
@@ -64,21 +72,23 @@ let costUsdTotal = 0;
  * on-disk run_summary at startup. An unrecognised outcome buckets to `unknown`
  * so a bad/legacy value can never be dropped silently.
  */
-export function incrementRunCounters(input: { outcome: RunOutcome; costUsd: number }): void {
+export function incrementRunCounters(input: { outcome: RunOutcome; costUsd: number | null; attempts?: ProviderAttempt[] }): void {
   if (Object.prototype.hasOwnProperty.call(runsByOutcome, input.outcome)) {
     runsByOutcome[input.outcome] += 1;
   } else {
     runsByOutcome.unknown += 1;
   }
-  if (Number.isFinite(input.costUsd) && input.costUsd > 0) {
+  if (!input.attempts && input.costUsd !== null && Number.isFinite(input.costUsd) && input.costUsd > 0) {
     costUsdTotal += input.costUsd;
   }
 }
 
-/** Test-only reset so the module's global counters don't leak across cases. */
+/** Clear accumulators before a complete ledger replay (also used by tests). */
 export function __resetCountersForTest(): void {
   for (const o of OUTCOMES) runsByOutcome[o] = 0;
   costUsdTotal = 0;
+  attemptCounters.clear();
+  modelTokens.clear();
 }
 
 export interface MetricsInput {
@@ -89,8 +99,7 @@ export interface MetricsInput {
 }
 
 /**
- * Render the full Prometheus text exposition for the dispatcher. Pure: all
- * live state is passed in, so this is trivially unit-testable.
+ * Render Prometheus exposition with durable counters and live provider state.
  */
 export function renderMetrics(input: MetricsInput): string {
   const out: string[] = [];
@@ -109,11 +118,31 @@ export function renderMetrics(input: MetricsInput): string {
     out.push(`selfheal_dispatcher_runs_total{outcome="${o}"} ${runsByOutcome[o]}`);
   }
 
-  out.push("# HELP selfheal_dispatcher_cost_usd_total Cumulative agent cost in USD (monotonic).");
+  out.push("# HELP selfheal_dispatcher_cost_usd_total Cumulative estimated agent cost in USD, not billed cost; unknown estimates excluded.");
   out.push("# TYPE selfheal_dispatcher_cost_usd_total counter");
   // Format at render (accumulator stays full-precision & monotonic) to drop
   // float noise like 0.16999999999999998 → 0.17. 6dp = sub-cent resolution.
   out.push(`selfheal_dispatcher_cost_usd_total ${Number(costUsdTotal.toFixed(6))}`);
+
+  const readiness = providerReadiness();
+  out.push("# HELP selfheal_dispatcher_provider_ready Actual successful provider evidence still fresh, blocked or unknown is 0.", "# TYPE selfheal_dispatcher_provider_ready gauge");
+  for (const p of readiness.providers) out.push(`selfheal_dispatcher_provider_ready{provider="${p.provider}"} ${p.ready ? 1 : 0}`);
+  out.push("# HELP selfheal_dispatcher_ready Provider capability and fresh dependency probes are healthy.", "# TYPE selfheal_dispatcher_ready gauge");
+  const deps = input.lastHealthcheck;
+  const depsReady = !!deps && deps.healthy === deps.total && Date.now() - Date.parse(deps.at) < 7 * 3_600_000;
+  out.push(`selfheal_dispatcher_ready ${readiness.ready && depsReady ? 1 : 0}`);
+  out.push("# TYPE selfheal_dispatcher_provider_attempts_total counter", "# TYPE selfheal_dispatcher_provider_failures_total counter", "# TYPE selfheal_dispatcher_provider_tokens_total counter", "# TYPE selfheal_dispatcher_provider_usage_unknown_total counter", "# TYPE selfheal_dispatcher_provider_estimated_cost_usd_total counter");
+  for (const c of attemptCounters.values()) {
+    const labels = `provider=${JSON.stringify(c.provider)},model=${JSON.stringify(c.model)}`;
+    out.push(`selfheal_dispatcher_provider_attempts_total{${labels}} ${c.attempts}`);
+    out.push(`selfheal_dispatcher_provider_failures_total{${labels}} ${c.failures}`);
+    out.push(`selfheal_dispatcher_provider_usage_unknown_total{${labels}} ${c.unknown}`);
+    out.push(`selfheal_dispatcher_provider_estimated_cost_usd_total{${labels}} ${Number(c.estimatedCost.toFixed(6))}`);
+  }
+  for (const c of modelTokens.values()) {
+    const labels = `provider=${JSON.stringify(c.provider)},model=${JSON.stringify(c.model)}`;
+    for (const kind of ["input", "cachedInput", "cacheWrite", "output"] as const) out.push(`selfheal_dispatcher_provider_tokens_total{${labels},kind="${kind}"} ${c[kind]}`);
+  }
 
   out.push(
     "# HELP selfheal_dispatcher_last_run_duration_seconds Duration of the most recent dispatch run.",
@@ -121,7 +150,7 @@ export function renderMetrics(input: MetricsInput): string {
   out.push("# TYPE selfheal_dispatcher_last_run_duration_seconds gauge");
   out.push(`selfheal_dispatcher_last_run_duration_seconds ${input.lastRun?.durationSec ?? 0}`);
 
-  // Per-dependency healthcheck. Always emit all five deps; a dep absent from the
+  // Per-dependency healthcheck. Always emit all tool deps; a dep absent from the
   // last snapshot (or no snapshot yet) reads 0 = not-known-healthy.
   out.push(
     "# HELP selfheal_dispatcher_healthcheck_dep Per-dependency healthcheck result (1 healthy, 0 down/unknown).",

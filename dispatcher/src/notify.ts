@@ -29,6 +29,7 @@ export async function sendTelegram(message: string): Promise<boolean> {
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(15_000),
         body: JSON.stringify({
           chat_id: config.tgChatId,
           text: chunk,

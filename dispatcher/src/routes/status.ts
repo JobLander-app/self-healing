@@ -4,17 +4,30 @@ import { getRecentRuns, getLastRun } from "../trace";
 import { getLastPrecheck } from "../poller";
 import { getLastHealthcheck } from "../healthcheck";
 import { config } from "../config";
+import { providerReadiness } from "../providerState";
 
 const router = Router();
 const startedAt = new Date();
 
-// GET /health — liveness. Always 200 while the process is up; reports busy.
-router.get("/health", (_req: Request, res: Response) => {
+export function readiness() {
+  const provider = providerReadiness();
+  const deps = getLastHealthcheck();
+  const dependenciesReady = !!deps && deps.healthy === deps.total && Date.now() - Date.parse(deps.at) < 7 * 3_600_000;
+  return { ready: provider.ready && dependenciesReady, providers: provider.providers, dependenciesReady, lastDependencyCheck: deps?.at ?? null };
+}
+// Backwards-compatible liveness: cron watchdog relies on exact status:"ok".
+// Provider quota must NEVER drive a VM reset. Use /ready for capability alerts.
+router.get(["/health", "/live"], (_req: Request, res: Response) => {
   res.status(200).json({
     status: "ok",
     uptime: Math.round((Date.now() - startedAt.getTime()) / 1000),
     busy: isBusy(),
+    ...readiness(),
   });
+});
+router.get("/ready", (_req: Request, res: Response) => {
+  const state = readiness();
+  res.status(state.ready ? 200 : 503).json({ status: state.ready ? "ok" : "degraded", ...state });
 });
 
 // GET /status — busy flag + last run + recent cost.
@@ -22,6 +35,10 @@ router.get("/status", (_req: Request, res: Response) => {
   const recent = getRecentRuns(10);
   const recentCost = recent.reduce((sum, r) => sum + (r.costUsd || 0), 0);
   res.json({
+    readiness: readiness(),
+    providers: { primary: config.claudeModel, fallback: config.codexEnabled ? config.codexModel : null },
+    costIsEstimate: true,
+    recentUnknownCostRuns: recent.filter(r => r.costUsd === null).length,
     busy: isBusy(),
     currentTurnId: getCurrentTurnId(),
     lastRun: getLastRun(),
@@ -42,7 +59,8 @@ router.get("/status", (_req: Request, res: Response) => {
     maxTurns: config.claudeMaxTurns,
     maxRunMs: config.maxRunMs,
     recentRuns: recent.length,
-    recentCostUsd: Math.round(recentCost * 100) / 100,
+    recentCostUsd: recent.some(r => r.costUsd === null) ? null : Math.round(recentCost * 100) / 100,
+    recentKnownEstimatedCostUsd: Math.round(recentCost * 100) / 100,
     // JOB-731: pre-check observability. null until the first pre-checked tick.
     lastPrecheck: getLastPrecheck(),
     // JOB-731 follow-up: dependency healthcheck. null until the first run.

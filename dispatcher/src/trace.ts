@@ -12,7 +12,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import { config } from "./config";
-import { incrementRunCounters } from "./metrics";
+import { incrementRunCounters, incrementAttemptCounters, __resetCountersForTest } from "./metrics";
+import { unknownUsage, type Provider, type ProviderAttempt } from "./providerTypes";
 
 export type RunOutcome =
   | "fixed"
@@ -34,7 +35,9 @@ export interface RunSummary {
   issueId?: string;
   repo?: string;
   prUrl?: string;
-  costUsd: number;
+  costUsd: number | null;
+  costIsEstimate?: boolean;
+  attempts?: ProviderAttempt[];
   numTurns: number;
   dryRun: boolean;
   summary: string;
@@ -42,6 +45,41 @@ export interface RunSummary {
 
 const RING_SIZE = 50;
 const ring: RunSummary[] = [];
+// Separate from the rotating trace directory. Every completed attempt is
+// appended immediately, even when a later attempt/run crashes. Never truncate.
+const ledger = path.join(path.dirname(config.logDir), "usage-ledger.jsonl");
+const recorded = new Set<string>();
+function appendLedger(kind: "run" | "attempt" | "attempt_started", id: string, data: RunSummary | ProviderAttempt): boolean {
+  const key = `${kind}:${id}`;
+  if (recorded.has(key)) return false;
+  fs.mkdirSync(path.dirname(ledger), { recursive: true });
+  // If a crash left a partial final record, separate it from the next valid
+  // record. Recovery skips that one line without poisoning future appends.
+  if (fs.existsSync(ledger)) {
+    const read = fs.openSync(ledger, "r");
+    try {
+      const size = fs.fstatSync(read).size;
+      const tail = Buffer.alloc(1);
+      if (size > 0) { fs.readSync(read, tail, 0, 1, size - 1); if (tail[0] !== 10) fs.appendFileSync(ledger, "\n"); }
+    } finally { fs.closeSync(read); }
+  }
+  const fd = fs.openSync(ledger, "a", 0o600);
+  try { fs.writeSync(fd, JSON.stringify({ kind, id, data }) + "\n"); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  recorded.add(key);
+  return true;
+}
+export function recordAttemptStarted(turnId: string, provider: Provider, model: string): void {
+  const now = new Date().toISOString();
+  appendLedger("attempt_started", `${turnId}-${provider}`, {
+    id: `${turnId}-${provider}`, provider, model, startedAt: now, finishedAt: now,
+    status: "failed", failureKind: "timeout", error: "Daemon interrupted before a terminal attempt record; usage unknown",
+    usage: unknownUsage(), estimatedCostUsd: null, costSource: "unavailable", turns: 0,
+  });
+}
+export function recordAttempt(turnId: string, attempt: ProviderAttempt): void {
+  if (appendLedger("attempt", attempt.id, attempt)) incrementAttemptCounters(attempt);
+  traceEvent(turnId, "attempt_finished", { ...attempt });
+}
 
 function ensureLogDir(): boolean {
   try {
@@ -70,11 +108,12 @@ export function traceEvent(turnId: string, kind: string, data?: Record<string, u
 
 /** Record a completed run: append a final event and push to the ring. */
 export function recordRun(summary: RunSummary): void {
+  if (!appendLedger("run", summary.turnId, summary)) return;
   traceEvent(summary.turnId, "run_summary", { ...summary });
   ring.unshift(summary);
   if (ring.length > RING_SIZE) ring.length = RING_SIZE;
   // JOB-731: feed the monotonic Prometheus run counters (runs_total, cost_usd).
-  incrementRunCounters({ outcome: summary.outcome, costUsd: summary.costUsd });
+  incrementRunCounters(summary);
 }
 
 export function getRecentRuns(limit = 20): RunSummary[] {
@@ -88,10 +127,33 @@ export function getLastRun(): RunSummary | null {
 /**
  * Repopulate the in-memory ring from disk on startup, so /status and /feed
  * are meaningful immediately after a restart. Reads the most recent
- * RING_SIZE trace files and extracts their `run_summary` event if present.
+ * trace files once into the durable ledger; only the HTTP feed uses RING_SIZE.
  */
 export function hydrateFromDisk(): void {
   if (!ensureLogDir()) return;
+  ring.length = 0;
+  recorded.clear();
+  __resetCountersForTest();
+  const started = new Map<string, ProviderAttempt>();
+  try {
+    for (const line of fs.readFileSync(ledger, "utf8").split("\n")) {
+      try {
+        const ev = JSON.parse(line);
+        if (!ev.id || !ev.data || !["run", "attempt", "attempt_started"].includes(ev.kind)) continue;
+        const key = `${ev.kind}:${ev.id}`;
+        if (recorded.has(key)) continue;
+        recorded.add(key);
+        if (ev.kind === "attempt_started") started.set(ev.id, ev.data);
+        else if (ev.kind === "attempt") incrementAttemptCounters(ev.data);
+        else {
+          incrementRunCounters(ev.data);
+          ring.unshift(ev.data);
+          ring.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+          if (ring.length > RING_SIZE) ring.length = RING_SIZE;
+        }
+      } catch { /* tolerate a partial final write; preserve other records */ }
+    }
+  } catch (err: any) { if (err.code !== "ENOENT") throw err; }
   let files: string[];
   try {
     files = fs
@@ -99,7 +161,6 @@ export function hydrateFromDisk(): void {
       .filter((f) => f.endsWith(".jsonl"))
       .map((f) => ({ f, m: fs.statSync(path.join(config.logDir, f)).mtimeMs }))
       .sort((a, b) => b.m - a.m)
-      .slice(0, RING_SIZE)
       .map((x) => x.f);
   } catch (err) {
     console.error("[trace] hydrateFromDisk readdir failed:", err);
@@ -111,22 +172,27 @@ export function hydrateFromDisk(): void {
     try {
       const lines = fs.readFileSync(path.join(config.logDir, file), "utf-8").trim().split("\n");
       for (const line of lines) {
-        const ev = JSON.parse(line);
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.kind === "attempt_finished" && ev.data?.id && appendLedger("attempt", ev.data.id, ev.data)) incrementAttemptCounters(ev.data);
         if (ev.kind === "run_summary" && ev.data) {
+          if (!appendLedger("run", ev.data.turnId, ev.data)) continue;
           ring.unshift(ev.data);
+          ring.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
           if (ring.length > RING_SIZE) ring.length = RING_SIZE;
           // JOB-731: best-effort rehydrate the monotonic run counters so a
           // daemon bounce doesn't zero recent history. hydrateFromDisk is not
           // routed through recordRun, so increment here directly (no double
           // count). An unrecognised outcome buckets to `unknown`.
-          incrementRunCounters({
-            outcome: ev.data.outcome,
-            costUsd: typeof ev.data.costUsd === "number" ? ev.data.costUsd : 0,
-          });
+          incrementRunCounters(ev.data);
         }
       }
     } catch {
       // Skip malformed/partial trace files.
     }
+  }
+  ring.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  for (const attempt of started.values()) {
+    if (appendLedger("attempt", attempt.id, attempt)) incrementAttemptCounters(attempt);
   }
 }

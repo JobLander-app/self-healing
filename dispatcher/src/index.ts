@@ -1,4 +1,5 @@
 import { config } from "./config";
+import { startHealthAlertRetry } from "./healthAlerts";
 import { startApi } from "./api";
 import { pollOnce, startPollCron, stopPollCron, startResumeWatcher } from "./poller";
 import { pauseRemainingMs, readPause } from "./pause";
@@ -27,6 +28,7 @@ async function main() {
   // 1. Rebuild recent-run state from disk so /status and /feed are useful
   //    immediately after a restart (no DB to read from).
   hydrateFromDisk();
+  startHealthAlertRetry();
 
   // 2. Start HTTP API.
   await startApi();
