@@ -5,8 +5,8 @@
  * monitor/triage.py already proved under the minimal SA (roles/logging.viewer,
  * no new IAM). Maps each entry via gcpAuditExtract.
  *
- * FAIL OPEN: a gcloud failure / bad JSON yields [] — same `collection_errors`
- * soft-fail discipline as triage.py; the tick logs and retries next beat.
+ * A gcloud failure / bad JSON returns an explicit error, holds the cursor,
+ * and makes coverage unready while the next tick retries.
  */
 
 import { execFile } from "child_process";
@@ -110,7 +110,7 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
     const drained = changes.length < LIMIT;
     return { changes, nextCursor: Math.min(drained ? pullStart : maxTs, horizon), incomplete: !drained };
   } catch (err) {
-    console.error("[ingest:gcpAudit] pull failed (fail open):", err instanceof Error ? err.message : err);
+    console.error("[ingest:gcpAudit] pull failed (coverage unavailable):", err instanceof Error ? err.message : err);
     return { changes: [], nextCursor: since, error: err instanceof Error ? err.message : String(err) };
   }
 }

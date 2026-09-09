@@ -2,9 +2,9 @@
  * GitHub PR-merge poller (§3.3). For each tracked repo, GET closed PRs sorted
  * by updated desc, keep those merged after the cursor, map via githubExtract.
  *
- * FAIL OPEN, exactly like dispatcher/src/poller.ts: a network error, a non-2xx,
- * a rate-limit, or a malformed body yields [] for that repo — never a throw
- * into the cron loop. A missed tick self-heals next poll (idempotent id upsert).
+ * Source failures preserve partial rows and hold the cursor, while returning
+ * an explicit error so the health surface cannot claim complete coverage.
+ * A missed tick self-heals next poll (idempotent id upsert).
  */
 
 import { config, resolveGithubToken } from "../config";
@@ -45,7 +45,7 @@ async function fetchClosedPrsPage({
       signal: controller.signal,
     });
     if (res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0") {
-      console.error(`[ingest:github] ${owner}/${repo} rate-limited — skipping tick (fail open)`);
+      console.error(`[ingest:github] ${owner}/${repo} rate-limited — skipping tick (coverage unavailable)`);
       return "rate-limited";
     }
     if (!res.ok) throw new Error(`GitHub HTTP ${res.status} for ${owner}/${repo}`);
@@ -158,7 +158,7 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
   try {
     token = await resolveGithubToken();
   } catch (err) {
-    console.error("[ingest:github] token resolve failed (fail open):", err instanceof Error ? err.message : err);
+    console.error("[ingest:github] token resolve failed (coverage unavailable):", err instanceof Error ? err.message : err);
     return { changes: [], nextCursor: since, error: err instanceof Error ? err.message : String(err) };
   }
 
@@ -172,7 +172,7 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
       for (const pr of scan.merged) out.push(githubExtract({ pr }));
       if (scan.capped) allDrained = false;
     } catch (err) {
-      console.error(`[ingest:github] ${owner}/${repo} pull failed (fail open):`, err instanceof Error ? err.message : err);
+      console.error(`[ingest:github] ${owner}/${repo} pull failed (coverage unavailable):`, err instanceof Error ? err.message : err);
       // A failed repo's state is unknown → hold the cursor for safety.
       allDrained = false;
     }

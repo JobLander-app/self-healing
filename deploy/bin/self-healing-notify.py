@@ -35,7 +35,7 @@ def main():
     )
     with urllib.request.urlopen(request, timeout=15) as response:
         body = json.load(response)
-        if body.get('ok') is not True or not isinstance(body.get('result', {}).get('message_id'), int):
+        if body.get('ok') is not True or type(body.get('result', {}).get('message_id')) is not int:
             raise ValueError('Telegram did not confirm delivery')
 
 

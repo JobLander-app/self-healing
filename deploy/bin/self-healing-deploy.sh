@@ -208,10 +208,25 @@ fi
 for ((i=0; i<${#CONFIG_SOURCES[@]}; i++)); do
   src="$TX/stage/${CONFIG_SOURCES[i]}"
   if [ -f "$src" ] && grep -q '__CONSOLE_DOMAIN__' "$src"; then
-    domain="${DEPLOY_CONSOLE_DOMAIN:-$(awk -F= '/^domain[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2);print $2;exit}' "$SYSTEM_ROOT/etc/grafana/grafana.ini") }"
-    domain="${domain% }"
+    domain="${DEPLOY_CONSOLE_DOMAIN:-}"
+    if [ -z "$domain" ]; then
+      domain="$(python3 - "$SYSTEM_ROOT/etc/grafana/grafana.ini" <<'PYDOMAIN'
+import configparser,sys,urllib.parse
+config = configparser.ConfigParser(interpolation=None)
+config.read(sys.argv[1])
+explicit = config.get('server', 'domain', fallback='').strip()
+root_url = config.get('server', 'root_url', fallback='').strip()
+print(explicit or urllib.parse.urlsplit(root_url).hostname or '')
+PYDOMAIN
+)"
+    fi
     [[ "$domain" =~ ^[A-Za-z0-9.-]+$ ]]
-    sed -i "s/__CONSOLE_DOMAIN__/$domain/g" "$src"
+    python3 - "$src" "$domain" <<'PYRENDER'
+from pathlib import Path
+import sys
+file = Path(sys.argv[1])
+file.write_text(file.read_text().replace('__CONSOLE_DOMAIN__', sys.argv[2]))
+PYRENDER
   fi
 done
 # Converge the full desired config, including drift left by older CD versions
@@ -254,6 +269,7 @@ if [ -d "$TX/stage/monitor" ]; then
 fi
 # Durable rollback metadata precedes ALL live mutations. A SIGKILL/reboot
 # after this point resumes restoration on the next CD timer tick.
+ACTIVATING=1
 install -d -m 700 "$(dirname "$TRANSACTION_FILE")"
 (umask 077; declare -p TX LOCAL REMOTE BACKUP_PATHS ABSENT_PATHS RESTART_UNITS >"$TRANSACTION_FILE.tmp")
 python3 - "$TRANSACTION_FILE.tmp" <<'PYFSYNC'
@@ -267,7 +283,6 @@ fd=os.open(os.path.dirname(sys.argv[1]),os.O_RDONLY)
 try: os.fsync(fd)
 finally: os.close(fd)
 PYFSYNC
-ACTIVATING=1
 log "activating ${LOCAL:0:8} → ${REMOTE:0:8}"
 systemctl stop "$DISPATCHER_UNIT" "$INGEST_UNIT"
 git_agent reset --quiet --keep "$REMOTE"
@@ -290,11 +305,22 @@ if changed deploy/cron/self-healing.crontab; then
   crontab -u "$AGENT_USER" -l >"$TX/cron-verify"
   cmp -s "$SH_DIR/deploy/cron/self-healing.crontab" "$TX/cron-verify"
 fi
+# Migration is a deterministic copy under the already-held monitor flock.
+# Do it before dispatcher startup can create the new suppression directory and
+# accidentally suppress copy-once migration of the legacy monitor history.
+if [ -f "$SH_DIR/monitor/run_monitor.py" ]; then
+  as_agent env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SH_DIR/monitor" \
+    python3 -c 'from run_monitor import Config, migrate_state; migrate_state(Config.from_env())'
+  log "monitor state migration checked before dispatcher restart"
+fi
 systemctl daemon-reload
 restart_units
 
 verify_runtime
 [ "$(git_agent rev-parse HEAD)" = "$REMOTE" ]
+# Once verification is complete, no post-commit notification/signal may
+# reset only the source while retaining the verified new runtime artifacts.
+trap - ERR INT TERM
 rm -f "$TRANSACTION_FILE"
 ACTIVATING=0
 log "deployed ${REMOTE:0:8} ok (runtime artifacts + managed config verified)"

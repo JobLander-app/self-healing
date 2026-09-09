@@ -70,7 +70,7 @@ export const buildRealEffects = ({
     };
     // Query by immutable client-generated UUID before every create. A response
     // timeout after commit is reconciled on the next attempt, with no duplicate.
-    const existing = await gql<{ issues?: { nodes?: { identifier?: string }[] } }>("query($id:ID!){issues(filter:{id:{eq:$id}},first:1){nodes{identifier}}}", { id: incidentId });
+    const existing = await gql<{ issues?: { nodes?: { identifier?: string }[] } }>("query($id:ID!){issues(includeArchived:true,filter:{id:{eq:$id}},first:1){nodes{identifier}}}", { id: incidentId });
     if (!Array.isArray(existing.issues?.nodes)) throw new Error("Malformed Linear lookup response");
     if (existing.issues.nodes[0]?.identifier) return existing.issues.nodes[0].identifier as string;
     const { title, description } = buildLinearTicket({ status, httpCode, regions });

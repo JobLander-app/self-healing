@@ -59,6 +59,8 @@ class DeployTest(unittest.TestCase):
         self.git('reset', '-q', '--keep', self.old)
         self.mock('sudo', '#!/bin/sh\nshift 2\nexec "$@"\n')
         self.mock('chown', '#!/bin/sh\nexit 0\n')
+        actual_install = shutil.which('install')
+        self.mock('install', '#!/usr/bin/env python3\nimport os,sys\na=sys.argv[1:]\nr=[]\nwhile a:\n x=a.pop(0)\n if x in ("-o","-g"): a.pop(0)\n else: r.append(x)\nos.execv(' + repr(actual_install) + ',[' + repr(actual_install) + ']+r)\n')
         self.mock('npm', '''#!/bin/sh
 [ "${FAIL_BUILD:-}" != 1 ] || exit 1
 mkdir -p node_modules
@@ -157,6 +159,59 @@ esac
         self.git('remote', 'set-url', 'origin', '/nonexistent/offline.git')
         self.assert_rollback(self.deploy())
         self.assertFalse((self.root / 'registry/transaction.env').exists())
+
+    def test_monitor_migration_precedes_the_first_dispatcher_restart(self):
+        self.git('reset', '-q', '--keep', self.new)
+        self.write(self.repo / 'monitor/run_monitor.py', """import os,shutil
+from pathlib import Path
+class Config:
+ @classmethod
+ def from_env(cls): return Path(os.environ['MOCK_MONITOR_TARGET'])
+def migrate_state(target):
+ if not target.exists():
+  target.mkdir(parents=True)
+  shutil.copyfile(os.environ['MOCK_LEGACY_STATE'],target/'suppressions.json')
+""")
+        self.git('add', 'monitor/run_monitor.py')
+        self.git('commit', '-qm', 'standalone monitor')
+        self.new = self.git('rev-parse', 'HEAD').strip()
+        self.git('push', '-q', 'origin', 'main')
+        self.git('reset', '-q', '--keep', self.old)
+        legacy = self.root / 'legacy-suppressions.json'
+        self.write(legacy, '{"old-decision":"suppressed"}\n')
+        target = self.root / 'new-monitor-state'
+        self.mock('systemctl', """#!/bin/sh
+case "$*" in
+ restart*) [ -f "$MOCK_MONITOR_TARGET/suppressions.json" ] || exit 1 ;;
+esac
+exit 0
+""")
+        result = self.deploy(MOCK_MONITOR_TARGET=str(target), MOCK_LEGACY_STATE=str(legacy))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((target / 'suppressions.json').read_text(), legacy.read_text())
+        self.assertTrue((self.host / 'var/log/self-healing-monitor/turns').is_dir())
+
+    def install_console_template(self):
+        self.git('reset', '-q', '--keep', self.new)
+        self.write(self.repo / 'deploy/grafana/grafana.ini', '[server]\nroot_url = https://__CONSOLE_DOMAIN__\n')
+        self.git('add', 'deploy/grafana/grafana.ini')
+        self.git('commit', '-qm', 'console template')
+        self.new = self.git('rev-parse', 'HEAD').strip()
+        self.git('push', '-q', 'origin', 'main')
+        self.git('reset', '-q', '--keep', self.old)
+        self.write(self.host / 'etc/grafana/grafana.ini', '[server]\nroot_url = https://alerts.example.test/path\n')
+
+    def test_console_domain_is_recovered_from_production_root_url_shape(self):
+        self.install_console_template()
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.host / 'etc/grafana/grafana.ini').read_text(), '[server]\nroot_url = https://alerts.example.test\n')
+
+    def test_explicit_console_domain_override_precedes_installed_root_url(self):
+        self.install_console_template()
+        result = self.deploy(DEPLOY_CONSOLE_DOMAIN='override.example.test')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.host / 'etc/grafana/grafana.ini').read_text(), '[server]\nroot_url = https://override.example.test\n')
 
     def test_success_installs_built_artifacts_and_changed_config(self):
         result = self.deploy()

@@ -5,7 +5,7 @@
  * terminal state (Done/Canceled) and emit `issue_status` ChangeEvents carrying
  * title + description + closing comment.
  *
- * FAIL OPEN: any error → [] (never a throw into the cron loop).
+ * Errors return partial rows plus an error flag; coverage remains unready.
  */
 
 import { config, resolveLinearApiKey } from "../config";
@@ -106,7 +106,7 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
   try {
     key = await resolveLinearApiKey();
   } catch (err) {
-    console.error("[ingest:linear] key resolve failed (fail open):", err instanceof Error ? err.message : err);
+    console.error("[ingest:linear] key resolve failed (coverage unavailable):", err instanceof Error ? err.message : err);
     return { changes: [], nextCursor: since, error: err instanceof Error ? err.message : String(err) };
   }
 
@@ -153,7 +153,7 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
       }
     }
   } catch (err) {
-    console.error("[ingest:linear] pull failed (fail open):", err instanceof Error ? err.message : err);
+    console.error("[ingest:linear] pull failed (coverage unavailable):", err instanceof Error ? err.message : err);
     // Partial result: keep what we ingested (idempotent) but do NOT advance the
     // cursor past a window we could not fully read.
     return { changes, nextCursor: since, error: err instanceof Error ? err.message : String(err) };

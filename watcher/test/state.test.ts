@@ -22,6 +22,16 @@ describe('state file ("COUNT PAGED" — bash-compatible)', () => {
     expect(() => parseState({ content: "garbage" })).toThrow("Corrupt watcher state");
   });
 
+  it("rejects malformed delivery flags and duplicate IDs before sending anything", () => {
+    const incident = { id: "cfec85b7-8f53-430a-a7d1-a413b8b66857", status: "fail", httpCode: "200",
+      regions: "test", recovered: false, delivered: {}, attempts: {}, retryAt: {} };
+    const parse = (outbox: unknown[]) => parseState({ content: `3 1\n${JSON.stringify({ version: 2, outbox })}\n` });
+    expect(() => parse([{ ...incident, delivered: true }])).toThrow("Invalid watcher outbox");
+    expect(() => parse([{ ...incident, delivered: { page: "false" } }])).toThrow("Invalid watcher outbox");
+    expect(() => parse([incident, incident])).toThrow("Duplicate watcher incident IDs");
+    expect(() => parseState({ content: "3garbage 1\n" })).toThrow("Corrupt watcher state");
+  });
+
   it("serializes in the exact bash format (echo adds trailing newline)", () => {
     expect(serializeState({ state: { count: 3, paged: true } })).toBe("3 1\n");
     expect(serializeState({ state: { count: 0, paged: false } })).toBe("0 0\n");
