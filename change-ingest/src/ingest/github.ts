@@ -153,13 +153,13 @@ export async function collectMergedSince({
  * cursor advance to the poll start. Realistic 72h volume for these repos is far
  * below the cap, so the pin is a pathological-burst safeguard, always logged.
  */
-export async function pull({ since }: { since: number }): Promise<{ changes: ExtractedChange[]; nextCursor: number }> {
+export async function pull({ since }: { since: number }): Promise<{ changes: ExtractedChange[]; nextCursor: number; error?: string }> {
   let token: string;
   try {
     token = await resolveGithubToken();
   } catch (err) {
     console.error("[ingest:github] token resolve failed (fail open):", err instanceof Error ? err.message : err);
-    return { changes: [], nextCursor: since };
+    return { changes: [], nextCursor: since, error: err instanceof Error ? err.message : String(err) };
   }
 
   const pullStart = Date.now();
@@ -180,5 +180,5 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
 
   // Advance only when every repo fully drained; otherwise hold at `since` so no
   // unscanned older merge is skipped.
-  return { changes: out, nextCursor: allDrained ? pullStart : since };
+  return { changes: out, nextCursor: allDrained ? pullStart : since, ...(allDrained ? {} : { error: "GitHub scan failed or capped; coverage incomplete" }) };
 }

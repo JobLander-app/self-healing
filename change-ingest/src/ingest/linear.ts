@@ -101,13 +101,13 @@ async function fetchPage({
  * (everything > since is in). If the MAX_PAGES safety cap is hit (pathological),
  * hold the cursor at `since` and re-drain next tick — never advance past unread.
  */
-export async function pull({ since }: { since: number }): Promise<{ changes: ExtractedChange[]; nextCursor: number }> {
+export async function pull({ since }: { since: number }): Promise<{ changes: ExtractedChange[]; nextCursor: number; error?: string }> {
   let key: string;
   try {
     key = await resolveLinearApiKey();
   } catch (err) {
     console.error("[ingest:linear] key resolve failed (fail open):", err instanceof Error ? err.message : err);
-    return { changes: [], nextCursor: since };
+    return { changes: [], nextCursor: since, error: err instanceof Error ? err.message : String(err) };
   }
 
   const filter = {
@@ -140,7 +140,8 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
         };
         changes.push(linearExtract({ issue }));
       }
-      if (!hasNextPage || !endCursor) {
+      if (hasNextPage && !endCursor) throw new Error("Linear pagination missing endCursor");
+      if (!hasNextPage) {
         drained = true;
         break;
       }
@@ -155,7 +156,7 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
     console.error("[ingest:linear] pull failed (fail open):", err instanceof Error ? err.message : err);
     // Partial result: keep what we ingested (idempotent) but do NOT advance the
     // cursor past a window we could not fully read.
-    return { changes, nextCursor: since };
+    return { changes, nextCursor: since, error: err instanceof Error ? err.message : String(err) };
   }
 
   // Advance the cursor in the SAME field the filter uses (updatedAt), NOT the
@@ -164,5 +165,5 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
   // the cursor and re-fetch it forever (Codex P2, PR #13). A fully drained window
   // means everything with updatedAt > since up to the poll start is ingested, so
   // the poll start is the correct high-water mark; a capped run holds at `since`.
-  return { changes, nextCursor: drained ? pullStart : since };
+  return { changes, nextCursor: drained ? pullStart : since, ...(drained ? {} : { error: "Linear pagination capped; coverage incomplete" }) };
 }

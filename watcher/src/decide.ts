@@ -1,13 +1,13 @@
 import type { Decision, WatchState } from "./types.js";
 
-/** Same detection semantics as bash `is_bad`: fail | degraded | HTTP != 200. */
+/** Only a confirmed pass is healthy; unknown/malformed HTTP200 fails closed. */
 export const isBadSample = ({
   status,
   httpCode,
 }: {
   status: string;
   httpCode: string;
-}): boolean => status === "fail" || status === "degraded" || httpCode !== "200";
+}): boolean => status !== "pass" || httpCode !== "200";
 
 /**
  * Pure hysteresis / exactly-once / recovery core (ports the bash state logic

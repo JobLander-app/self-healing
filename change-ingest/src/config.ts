@@ -67,6 +67,9 @@ export const config = {
   linearCron: process.env.LINEAR_CRON || "*/5 * * * *",
   pruneCron: process.env.PRUNE_CRON || "0 3 * * *",
 
+  // More than two default 5-minute source intervals means stale coverage.
+  sourceStaleMs: Math.max(60_000, Number(process.env.SOURCE_STALE_MS) || 900_000),
+
   // Retention: daily prune of rows older than this (§5). 90d is generous for
   // hours-scale correlation and keeps the DB tiny.
   retentionDays: parseInt(process.env.RETENTION_DAYS || "90", 10),

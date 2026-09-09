@@ -13,6 +13,9 @@ describe("isBadSample", () => {
     // unreachable: curl printed nothing -> code "" -> bad
     expect(isBadSample({ status: "unreachable", httpCode: "" })).toBe(true);
     expect(isBadSample({ status: "pass", httpCode: "200" })).toBe(false);
+    for (const status of ["unreachable", "unknown", "null", "", "true"]) {
+      expect(isBadSample({ status, httpCode: "200" })).toBe(true);
+    }
   });
 });
 

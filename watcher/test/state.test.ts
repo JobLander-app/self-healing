@@ -16,10 +16,10 @@ describe('state file ("COUNT PAGED" — bash-compatible)', () => {
     expect(parseState({ content: "5 0" })).toEqual({ count: 5, paged: false });
   });
 
-  it("defaults to 0/unpaged for missing, empty, or garbage files", () => {
+  it("defaults only for missing state; corrupt state cannot erase delivery history", () => {
     expect(parseState({ content: null })).toEqual({ count: 0, paged: false });
-    expect(parseState({ content: "" })).toEqual({ count: 0, paged: false });
-    expect(parseState({ content: "garbage" })).toEqual({ count: 0, paged: false });
+    expect(() => parseState({ content: "" })).toThrow("Corrupt watcher state");
+    expect(() => parseState({ content: "garbage" })).toThrow("Corrupt watcher state");
   });
 
   it("serializes in the exact bash format (echo adds trailing newline)", () => {

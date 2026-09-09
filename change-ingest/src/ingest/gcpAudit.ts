@@ -70,7 +70,7 @@ function freshnessArg(since: number): string {
  * older event inside the intent lookback is ever skipped (Codex P2, PR #13). The
  * `timestamp>` clause + idempotent id upsert make overlap harmless.
  */
-export async function pull({ since }: { since: number }): Promise<{ changes: ExtractedChange[]; nextCursor: number }> {
+export async function pull({ since }: { since: number }): Promise<{ changes: ExtractedChange[]; nextCursor: number; error?: string; incomplete?: boolean }> {
   const pullStart = Date.now();
   const sinceIso = new Date(since).toISOString();
   const filter = buildFilter(sinceIso);
@@ -108,9 +108,9 @@ export async function pull({ since }: { since: number }): Promise<{ changes: Ext
     let maxTs = since;
     for (const c of changes) if (c.event.ts > maxTs) maxTs = c.event.ts;
     const drained = changes.length < LIMIT;
-    return { changes, nextCursor: Math.min(drained ? pullStart : maxTs, horizon) };
+    return { changes, nextCursor: Math.min(drained ? pullStart : maxTs, horizon), incomplete: !drained };
   } catch (err) {
     console.error("[ingest:gcpAudit] pull failed (fail open):", err instanceof Error ? err.message : err);
-    return { changes: [], nextCursor: since };
+    return { changes: [], nextCursor: since, error: err instanceof Error ? err.message : String(err) };
   }
 }
