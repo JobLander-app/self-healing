@@ -171,6 +171,16 @@ class MonitorRunnerTests(unittest.TestCase):
             "cooldown_suppressed": [{"signature": "audio:failed", "prior_issue": "JOB-42"}]})
         self.assertEqual(batch["escalations"], [])
 
+    def test_success_marker_cannot_ack_a_batch_with_recorded_routing_errors(self):
+        self.assertEqual(self.run_once(
+            collector=self.collector(escalations=[{"action": "linear_create_if_no_dup"}]),
+            session_runner=lambda config: {"error": None, "attempts": [], "actions": {
+                "linear_created": [], "linear_commented": [], "issue_by_signature": {},
+                "errors": ["Unknown routing service"]}}), 1)
+        self.assertIn("audio:failed", json.loads((self.config.state_dir / "linear-outbox.json").read_text()))
+        result = json.loads((self.config.state_dir / "last-session.json").read_text())
+        self.assertFalse(result["heartbeatPublished"])
+
     def test_missing_gcloud_does_not_erase_completed_session(self):
         result = {"status": "success", "triageAt": runner.timestamp(), "llmSkipped": True,
                   "finishedAt": runner.timestamp()}

@@ -379,6 +379,7 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
         result["telegramSent"].extend(sent)
         result["errors"].extend(failures)
         actions = {"linear_created": [], "linear_commented": [], "issue_by_signature": {}}
+        escalation_completed = False
         if batch["escalations"]:
             result["llmSkipped"] = False
             provider_result = session_runner(config)
@@ -387,6 +388,9 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
                 result["errors"].append(provider_result["error"])
             actions = provider_result.get("actions", actions)
             result["actions"] = actions
+            if actions.get("errors"):
+                result["errors"].append("monitor action record contains unresolved errors")
+            escalation_completed = not provider_result.get("error") and not actions.get("errors")
         report_path = config.state_dir / "latest-report.json"
         report = json.loads(report_path.read_text())
         report["actions"] = {"telegram_sent": result["telegramSent"],
@@ -395,7 +399,7 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
             if group["signature"] in actions.get("issue_by_signature", {}):
                 group["linear_issue"] = actions["issue_by_signature"][group["signature"]]
         write_json(report_path, report)
-        if batch["escalations"] and not provider_result.get("error"):
+        if escalation_completed:
             write_json(config.state_dir / "linear-outbox.json", {})
         if not result["errors"]:
             result["status"] = "success"
