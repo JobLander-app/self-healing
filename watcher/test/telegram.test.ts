@@ -216,8 +216,8 @@ describe("buildNotifyOwner — direct plain-text send (JOB-731)", () => {
 });
 
 describe("readConfig — tgEnvFile (JOB-731)", () => {
-  it("defaults to the workspace .env and honors WATCH_TG_ENV_FILE", () => {
-    expect(readConfig({ env: {} }).tgEnvFile).toBe("/home/joblander/workspace/.env");
+  it("defaults to standalone credential file and honors WATCH_TG_ENV_FILE", () => {
+    expect(readConfig({ env: {} }).tgEnvFile).toBe("/home/joblander/.config/self-healing/telegram.env");
     expect(
       readConfig({ env: { WATCH_TG_ENV_FILE: "/custom/.env" } }).tgEnvFile,
     ).toBe("/custom/.env");

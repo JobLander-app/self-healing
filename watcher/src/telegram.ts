@@ -136,8 +136,8 @@ export type NotifyScriptRunner = (input: {
   message: string;
 }) => Promise<void>;
 
-const bashNotifyScriptRunner: NotifyScriptRunner = async ({ script, message }) => {
-  await execFileAsync("bash", [script, message], { timeout: 20_000 });
+const notifyScriptRunner: NotifyScriptRunner = async ({ script, message }) => {
+  await execFileAsync(script, [message], { timeout: 35_000 });
 };
 
 /**
@@ -153,7 +153,7 @@ export const buildNotifyOwner = ({
   env,
   fetchImpl,
   readEnvFile = fsEnvFileReader,
-  runNotifyScript = bashNotifyScriptRunner,
+  runNotifyScript = notifyScriptRunner,
   log = ({ line }) => {
     console.log(line);
   },

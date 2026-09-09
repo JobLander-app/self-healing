@@ -31,6 +31,8 @@ class DeployTest(unittest.TestCase):
         for file in ['claude-code-vm-job-dispatcher.service', 'removed.service']:
             self.write(self.repo / 'deploy/systemd' / file, 'old-unit\n')
         self.write(self.repo / 'deploy/cron/self-healing.crontab', 'old-cron\n')
+        self.write(self.repo / 'deploy/grafana/dashboards/technical.json', '{"version":"tracked-old"}\n')
+        self.write(self.host / 'etc/grafana/dashboards/technical.json', '{"version":"stale-installed"}\n')
         self.write(self.repo / 'version', 'old\n')
         self.git('add', '.')
         self.git('commit', '-qm', 'old source')
@@ -130,6 +132,7 @@ esac
         self.assertEqual((self.host / 'etc/systemd/system/removed.service').read_text(), 'old-installed-unit\n')
         self.assertFalse((self.host / 'etc/systemd/system/new.service').exists())
         self.assertEqual(self.cron.read_text(), 'old-installed-cron\n')
+        self.assertEqual((self.host / 'etc/grafana/dashboards/technical.json').read_text(), '{"version":"stale-installed"}\n')
         self.assertFalse((self.repo / '.deploying').exists())
 
     def test_build_failure_leaves_working_runtime_untouched(self):
@@ -162,6 +165,7 @@ esac
         self.assertEqual((self.repo / 'watcher/dist/artifact').read_text(), 'new-build\n')
         self.assertEqual((self.repo / 'mcp/linear/node_modules/artifact').read_text(), 'new-build\n')
         self.assertEqual(self.cron.read_text(), 'new-cron\n')
+        self.assertEqual((self.host / 'etc/grafana/dashboards/technical.json').read_text(), '{"version":"tracked-old"}\n')
         self.assertFalse((self.host / 'etc/systemd/system/removed.service').exists())
         self.assertFalse((self.repo / '.deploying').exists())
 

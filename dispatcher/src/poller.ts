@@ -13,6 +13,7 @@ import * as cron from "node-cron";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { config } from "./config";
+import { isDeploymentInProgress } from "./deployment";
 import { buildQueueFilter, type SelectedCandidate } from "./queue";
 import { readCandidate } from "./queueClient";
 import { isBusy, runDispatchSession } from "./session";
@@ -112,6 +113,7 @@ async function precheckCandidates(): Promise<{ outcome: PrecheckOutcome; candida
  * Never throws.
  */
 export async function pollOnce(reason: string): Promise<{ ran: boolean; note: string }> {
+  if (isDeploymentInProgress()) return { ran: false, note: "deploying" };
   if (isBusy()) {
     console.log(`[poller] Skipping tick (reason: ${reason}) — already busy`);
     return { ran: false, note: "busy" };
@@ -151,6 +153,7 @@ export async function pollOnce(reason: string): Promise<{ ran: boolean; note: st
       return { ran: false, note: "busy" };
     }
   }
+  if (isDeploymentInProgress()) return { ran: false, note: "deploying" };
   try {
     await runDispatchSession(reason, candidate);
     return { ran: true, note: "completed" };

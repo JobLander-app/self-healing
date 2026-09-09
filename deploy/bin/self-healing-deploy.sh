@@ -78,6 +78,7 @@ RESTART_UNITS=()
 RUNTIME_DIRS=()
 CONFIG_SOURCES=()
 CONFIG_TARGETS=()
+CONFIG_CHANGED=""
 cleanup() {
   rm -f "$SH_DIR/.deploying"
   rm -rf "$TX"
@@ -199,7 +200,8 @@ if changed deploy/; then
       deploy/grafana/*) config_pair "$file" "/etc/grafana/${file#deploy/grafana/}" ;;
       deploy/caddy/*) config_pair "$file" "/etc/caddy/${file#deploy/caddy/}" ;;
     esac
-  done < <(git_agent diff --name-only "$LOCAL" "$REMOTE" -- deploy/systemd deploy/prometheus deploy/grafana deploy/caddy)
+  done < <({ git_agent ls-tree -r --name-only "$REMOTE" -- deploy/systemd deploy/prometheus deploy/grafana deploy/caddy;
+    git_agent diff --name-only --diff-filter=D "$LOCAL" "$REMOTE" -- deploy/systemd deploy/prometheus deploy/grafana deploy/caddy; } | sort -u)
 fi
 # Render environment-specific templates from the currently installed domain;
 # never overwrite a self-hoster's domain with a JobLander default.
@@ -212,9 +214,16 @@ for ((i=0; i<${#CONFIG_SOURCES[@]}; i++)); do
     sed -i "s/__CONSOLE_DOMAIN__/$domain/g" "$src"
   fi
 done
+# Converge the full desired config, including drift left by older CD versions
+# that reset source without copying dashboards/provisioning to the host.
+for ((i=0; i<${#CONFIG_SOURCES[@]}; i++)); do
+  src="$TX/stage/${CONFIG_SOURCES[i]}"; target="${CONFIG_TARGETS[i]}"
+  if ! cmp -s "$src" "$target"; then CONFIG_CHANGED+="${CONFIG_SOURCES[i]}"$'\n'; fi
+done
+config_changed() { grep -q "^$1" <<<"$CONFIG_CHANGED"; }
 # Validate managed config before activation when its owning binary is present.
-if changed deploy/prometheus/; then promtool check config "$TX/stage/deploy/prometheus/prometheus.yml" >>"$LOG_FILE" 2>&1; fi
-if changed deploy/caddy/; then caddy validate --config "$TX/stage/deploy/caddy/Caddyfile" >>"$LOG_FILE" 2>&1; fi
+if config_changed deploy/prometheus/; then promtool check config "$TX/stage/deploy/prometheus/prometheus.yml" >>"$LOG_FILE" 2>&1; fi
+if config_changed deploy/caddy/; then caddy validate --config "$TX/stage/deploy/caddy/Caddyfile" >>"$LOG_FILE" 2>&1; fi
 
 # The poller observes this guard before claiming work. Check busy AGAIN after
 # publishing it; staging may have taken minutes while the current release ran.
@@ -227,15 +236,21 @@ exec 6<"$MONITOR_LOCK"
 flock -n 6 || { log "deferring: monitor active"; exit 0; }
 RESTART_UNITS=("$DISPATCHER_UNIT" "$INGEST_UNIT")
 for unit in prometheus node_exporter; do
-  if changed "deploy/$unit/" || changed "deploy/systemd/$unit.service"; then RESTART_UNITS+=("$unit.service"); fi
+  if config_changed "deploy/$unit/" || config_changed "deploy/systemd/$unit.service"; then RESTART_UNITS+=("$unit.service"); fi
 done
-changed deploy/grafana/ && RESTART_UNITS+=(grafana-server.service)
-changed deploy/caddy/ && RESTART_UNITS+=(caddy.service)
+config_changed deploy/grafana/ && RESTART_UNITS+=(grafana-server.service)
+config_changed deploy/caddy/ && RESTART_UNITS+=(caddy.service)
 for path in "${RUNTIME_DIRS[@]}"; do backup "$SH_DIR/$path"; done
 for path in "${CONFIG_TARGETS[@]}"; do backup "$path"; done
 if changed deploy/cron/self-healing.crontab; then
   if crontab -u "$AGENT_USER" -l >"$TX/crontab"; then touch "$TX/cron-present"; fi
   touch "$TX/cron-snapshot"
+fi
+# Logs are persistent runtime state, not a monitored-state migration target.
+# The monitor creates/migrates its own ~/.local/state subtree on first launch.
+if [ -d "$TX/stage/monitor" ]; then
+  install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0750 \
+    "$SYSTEM_ROOT/var/log/self-healing-monitor" "$SYSTEM_ROOT/var/log/self-healing-monitor/turns"
 fi
 # Durable rollback metadata precedes ALL live mutations. A SIGKILL/reboot
 # after this point resumes restoration on the next CD timer tick.

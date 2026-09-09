@@ -4,9 +4,8 @@
 #
 # Legacy reference: deploy/cron/joblander-agents.crontab.snapshot (old VM, as-found).
 
-# The TS watcher's notify.sh lives in the workspace clone on the NEW VM layout
-# (default inside the watcher still points at the legacy /home/joblander/joblander/... path).
-WATCH_NOTIFY_SCRIPT=/home/joblander/workspace/scripts/notify.sh
+# Standalone pager helper uses the existing Telegram secret; no workspace checkout.
+WATCH_NOTIFY_SCRIPT=/home/joblander/self-healing/deploy/bin/self-healing-notify.py
 
 # Consecutive bad samples (= minutes) before the watcher pages. Default in
 # watcher/src/config.ts is 3; measured evidence says 3 is far too low.
