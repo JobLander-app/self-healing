@@ -28,10 +28,15 @@ export function codexArgs(entries: Record<string, string>, model: string): strin
 }
 /** No raw command arguments, tool results, reasoning or stderr are persisted. */
 export function codexTool(event: Record<string, any>): { tool: string } | null {
-  if (event.type !== "item.started") return null;
+  if (!["item.started", "item.completed"].includes(event.type)) return null;
   const item = event.item;
   if (item?.type === "mcp_tool_call") return { tool: `mcp__${String(item.server).slice(0, 60)}__${String(item.tool).slice(0, 100)}` };
   if (["command_execution", "file_change", "web_search"].includes(item?.type)) return { tool: item.type };
+  // A new CLI tool kind must not look like a side-effect-free attempt. Only
+  // known conversational metadata can be ignored for handover safety.
+  if (typeof item?.type === "string" && !["agent_message", "reasoning", "todo_list", "plan"].includes(item.type)) {
+    return { tool: `codex_${item.type.replace(/[^a-z0-9_]/gi, "").slice(0, 60)}` };
+  }
   return null;
 }
 export async function executeCodex(input: {
@@ -41,6 +46,7 @@ export async function executeCodex(input: {
   const attempt: ProviderAttempt = { id: input.id, provider: "codex", model: input.model, startedAt: new Date().toISOString(), finishedAt: "", status: "failed", usage: unknownUsage(), estimatedCostUsd: null, costSource: "unavailable", turns: 0 };
   let output = "", stderr = "", buffer = "", failure = "", completed = false, toolsUsed = false;
   const issueIds = new Set<string>();
+  const tracedItems = new Set<string>();
   const child = spawn(config.codexBin, codexArgs(input.entries, input.model), { env: codexEnv(), stdio: ["pipe", "pipe", "pipe"], detached: true });
   const kill = () => { if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* exited */ } } };
   const abort = () => { failure = "watchdog: Codex run aborted"; kill(); };
@@ -52,7 +58,11 @@ export async function executeCodex(input: {
     try { ev = JSON.parse(line); } catch { failure = "Codex emitted invalid JSON"; kill(); return; }
     if (ev.type === "thread.started") attempt.sessionId = ev.thread_id;
     const tool = codexTool(ev);
-    if (tool) { toolsUsed = true; input.onTool(tool); }
+    if (tool) {
+      toolsUsed = true;
+      const id = typeof ev.item?.id === "string" ? ev.item.id : undefined;
+      if (!id || !tracedItems.has(id)) { input.onTool(tool); if (id) tracedItems.add(id); }
+    }
     if (ev.item?.type === "mcp_tool_call" && ev.item.tool === "update_issue" && Array.isArray(ev.item.arguments?.labelIds) && ev.item.arguments.labelIds.includes(LINEAR_AGENT_CLAIMED_LABEL_ID)) {
       const id = ev.item.arguments?.id;
       if (typeof id === "string" && /^[A-Za-z0-9-]{1,80}$/.test(id)) issueIds.add(id);

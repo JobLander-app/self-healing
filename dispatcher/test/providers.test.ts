@@ -28,6 +28,13 @@ test("SDK result errors are recognized even without a thrown exception", async (
   assert.equal(claudeResultError({ type: "result", subtype: "success", is_error: true, result: "401 unauthorized" }), "401 unauthorized");
 });
 
+test("provider connectivity/model errors cool down while task failures do not", async () => {
+  const { classifyFailure } = await import("../src/providerState");
+  for (const message of ["stream disconnected before completion", "error sending request for url", "The model is not supported with this account", "HTTP 529 overloaded", "spawn /usr/bin/codex ENOENT"]) assert.equal(classifyFailure(message), "unavailable");
+  assert.equal(classifyFailure("Reached maximum number of turns (120)"), "task");
+  assert.equal(classifyFailure("unit tests failed"), "task");
+});
+
 test("usage normalization preserves cache semantics and unknown values", async () => {
   const { claudeUsage } = await import("../src/claude");
   const { codexUsage } = await import("../src/codex");
@@ -89,6 +96,13 @@ for (const event of [
   assert.equal(result.attempt.turns, 1);
   assert.equal(result.attempt.estimatedCostUsd, null);
   assert.deepEqual(uses, [{ tool: "mcp__linear__get_issue" }]);
+});
+
+test("unknown Codex action types are never treated as a side-effect-free handover", async () => {
+  const { codexTool } = await import("../src/codex");
+  assert.deepEqual(codexTool({ type: "item.started", item: { type: "custom_tool_call", input: "secret command" } }), { tool: "codex_custom_tool_call" });
+  assert.deepEqual(codexTool({ type: "item.completed", item: { type: "file_change" } }), { tool: "file_change" });
+  for (const type of ["agent_message", "reasoning", "todo_list", "plan"]) assert.equal(codexTool({ type: "item.started", item: { type } }), null);
 });
 
 test("child failure and wall-clock abort release the process", async () => {
@@ -171,6 +185,17 @@ test("MCP smoke rejects malformed and empty success envelopes", async () => {
   const { validSmokeResult } = await import("../src/healthcheck");
   for (const value of [undefined, {}, { content: [] }, { content: [{}] }, { content: [{ type: "text", text: "" }] }, { content: [{ type: "text", text: "ok" }], isError: "false" }]) assert.equal(validSmokeResult(value), false);
   assert.equal(validSmokeResult({ content: [{ type: "text", text: "[]" }] }), true);
+});
+
+test("MCP timeout terminates descendants and pipe errors fail without crashing", async () => {
+  const { probeMcp } = await import("../src/healthcheck");
+  const fixture = path.join(root, "hanging-mcp.js");
+  fs.writeFileSync(fixture, `require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});setInterval(()=>{},1000);`);
+  const start = Date.now();
+  await assert.rejects(probeMcp({ entry: fixture, smokeTool: "unused", smokeArgs: {}, budgetMs: 100 }), /timed out|exhausted/);
+  assert.ok(Date.now() - start < 1000);
+  fs.writeFileSync(fixture, "process.exit(1);");
+  await assert.rejects(probeMcp({ entry: fixture, smokeTool: "unused", smokeArgs: {}, budgetMs: 100 }));
 });
 
 test("interrupted attempts and a partial ledger tail recover without double counting", async () => {

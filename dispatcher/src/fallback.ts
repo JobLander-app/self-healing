@@ -14,7 +14,7 @@ export function handoverPrompt(prompt: string, previous: AttemptResult, purpose:
   return `${prompt}\n\n## PROVIDER HANDOVER (overrides PICK for this attempt)\n` +
     `The ${previous.attempt.provider} attempt ended with a provider availability error and has stopped. This is a NEW session, not a resumed conversation.\n` +
     (target ? `The previous attempt called update_issue for ${target}; this is an observed mutation target, not proof the claim succeeded. Work on this ticket ONLY. Re-read its current state, labels, comments, repository working tree, PR and CI status before any write. If it is terminal, verify the existing outcome and report it without repeating writes. The observed update included the agent-claimed label. Recheck the claim and comments for intervening ownership changes; only if they confirm this interrupted attempt owns it may you continue without waiting for the stale-claim window. Never create another PR or claim if the previous action already succeeded.\n` :
-      `The previous attempt invoked NO tools, so it made no claims or external writes. Follow the normal PICK/CLAIM steps.\n`) +
+      `The previous attempt invoked NO tools, so it made no claims or external writes. Follow the original task's selected-ticket and DRY_RUN instructions exactly.\n`) +
     `The constitution, DRY_RUN restrictions and all verification/review gates still apply. Do not treat this handover as evidence that any repair was completed.\n`;
 }
 export async function executeWithFallback(input: {

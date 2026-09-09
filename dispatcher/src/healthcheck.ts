@@ -115,7 +115,7 @@ function resultText(r: RpcResponse["result"]): string {
     .trim();
 }
 
-async function probeMcp(input: {
+export async function probeMcp(input: {
   entry: string;
   smokeTool: string;
   smokeArgs: Record<string, unknown>;
@@ -125,19 +125,27 @@ async function probeMcp(input: {
   const child = spawn("node", [input.entry], {
     env: buildMcpEnv(),
     stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
   });
+  const stopTree = () => {
+    if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* exited */ } }
+  };
 
   const pending = new Map<number, (r: RpcResponse) => void>();
   let buf = "";
   let spawnErr: Error | null = null;
-
-  child.on("error", (e) => {
+  const failed = (e: unknown) => {
     spawnErr = e instanceof Error ? e : new Error(String(e));
     for (const resolve of pending.values()) resolve({ error: { message: spawnErr.message } });
     pending.clear();
-  });
+  };
+  child.on("error", failed);
+  child.stdin.on("error", failed); // asynchronous EPIPE is not caught by write's try/catch
+  child.stderr.resume(); // discard diagnostics, but never block a verbose MCP child
+  child.on("exit", stopTree);
   child.stdout.on("data", (d: Buffer) => {
     buf += d.toString();
+    if (buf.length > 1_000_000) { failed(new Error("MCP response exceeded 1 MB")); stopTree(); return; }
     let idx: number;
     while ((idx = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, idx).trim();
@@ -207,7 +215,7 @@ async function probeMcp(input: {
 
     return { detail: `${toolCount} tools, ${input.smokeTool} smoke ok` };
   } finally {
-    child.kill("SIGKILL");
+    stopTree();
   }
 }
 

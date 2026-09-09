@@ -33,7 +33,7 @@ function state(): Record<Provider, ProviderState> {
 export function classifyFailure(message: string): FailureKind {
   if (isLimitError(message)) return "quota";
   if (/unauthenticated|unauthorized|authentication|auth token|oauth|token.{0,30}expired|invalid.{0,20}token|not logged in|please (?:run .{0,10})?login|\b401\b/i.test(message)) return "auth";
-  if (/overloaded|service unavailable|connection (?:refused|reset)|ECONN(?:RESET|REFUSED)|ETIMEDOUT|fetch failed|\b(?:502|503|504)\b|spawn .+ ENOENT/i.test(message)) return "unavailable";
+  if (/overloaded|service unavailable|connection (?:refused|reset|closed)|ECONN(?:RESET|REFUSED)|ETIMEDOUT|fetch failed|error sending request|stream disconnected|network error|\b(?:500|502|503|504|529)\b|spawn .+ ENOENT|model.{0,120}(?:not (?:available|supported|found)|does not exist)|(?:invalid|unsupported) model/i.test(message)) return "unavailable";
   return "task";
 }
 export function safeError(message: string): string {

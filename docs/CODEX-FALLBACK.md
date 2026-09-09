@@ -60,8 +60,12 @@ an incident, and aborts after 90 seconds.
 
 On 2026-09-09 at 18:55 UTC this check passed on the VM in 7.8 seconds: real
 Codex reported input 15,378, cached input 12,160, cache writes 0 and output 12.
-The Claude quota leg was simulated; no production incident was created. A successful test is deployment
-evidence; it does not fabricate a production repair or clear production state.
+The Claude quota leg was simulated; no production incident was created.
+Separate read-only Codex smokes called the vendored Firebase, Sentry and Linear
+tools successfully. Select the exact `mcp__linear__list_teams` tool; loose
+catalog suffix matching can confuse the local MCP with another connector.
+A successful test is deployment evidence; it does not fabricate a production
+repair or clear production state.
 
 ## Durable usage and provider state
 
