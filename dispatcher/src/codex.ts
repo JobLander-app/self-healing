@@ -18,7 +18,7 @@ export function codexEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Proces
   return env;
 }
 export function codexArgs(entries: Record<string, string>, model: string): string[] {
-  const args = ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--color", "never", "-m", model,
+  const args = ["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--color", "never", "-m", model,
     "-c", 'forced_login_method="chatgpt"', "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="medium"'];
   for (const [name, entry] of Object.entries(entries)) {
     args.push("-c", `mcp_servers.${name}.command="node"`, "-c", `mcp_servers.${name}.args=${JSON.stringify([entry])}`, "-c", `mcp_servers.${name}.required=true`);
@@ -44,7 +44,7 @@ export async function executeCodex(input: {
   signal: AbortSignal; onTool: (use: { tool: string }) => void;
 }): Promise<AttemptResult> {
   const attempt: ProviderAttempt = { id: input.id, provider: "codex", model: input.model, startedAt: new Date().toISOString(), finishedAt: "", status: "failed", usage: unknownUsage(), estimatedCostUsd: null, costSource: "unavailable", turns: 0 };
-  let output = "", stderr = "", buffer = "", failure = "", completed = false, toolsUsed = false;
+  let output = "", stderr = "", buffer = "", failure = "", completed = false, toolsUsed = false, transportFailed = false;
   const issueIds = new Set<string>();
   const tracedItems = new Set<string>();
   const child = spawn(config.codexBin, codexArgs(input.entries, input.model), { env: codexEnv(), stdio: ["pipe", "pipe", "pipe"], detached: true });
@@ -54,8 +54,10 @@ export async function executeCodex(input: {
   if (input.signal.aborted) abort();
   function consume(line: string) {
     if (!line.trim()) return;
+    if (line.length > 4_000_000) { transportFailed = true; failure = "Codex JSON event exceeded 4 MB"; kill(); return; }
     let ev: Record<string, any>;
-    try { ev = JSON.parse(line); } catch { failure = "Codex emitted invalid JSON"; kill(); return; }
+    try { ev = JSON.parse(line); } catch { transportFailed = true; failure = "Codex emitted invalid JSON"; kill(); return; }
+    if (!ev || typeof ev !== "object" || Array.isArray(ev) || typeof ev.type !== "string") { transportFailed = true; failure = "Codex emitted invalid event envelope"; kill(); return; }
     if (ev.type === "thread.started") attempt.sessionId = ev.thread_id;
     const tool = codexTool(ev);
     if (tool) {
@@ -84,7 +86,7 @@ export async function executeCodex(input: {
   child.stdout.on("data", (chunk: string) => {
     buffer += chunk;
     for (;;) { const pos = buffer.indexOf("\n"); if (pos < 0) break; const line = buffer.slice(0, pos); buffer = buffer.slice(pos + 1); consume(line); }
-    if (buffer.length > 4_000_000) { failure = "Codex JSON event exceeded 4 MB"; kill(); }
+    if (buffer.length > 4_000_000) { transportFailed = true; failure = "Codex JSON event exceeded 4 MB"; kill(); }
   });
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-4000); });
@@ -103,7 +105,7 @@ export async function executeCodex(input: {
   if (code === 0 && completed && !failure && !input.signal.aborted) attempt.status = "completed";
   else {
     attempt.error = safeError(failure || stderr || `Codex exited ${code} without turn.completed`);
-    attempt.failureKind = input.signal.aborted ? "timeout" : classifyFailure(attempt.error);
+    attempt.failureKind = input.signal.aborted ? "timeout" : transportFailed || (code === 0 && !completed) ? "unavailable" : classifyFailure(attempt.error);
   }
   return { attempt, output, issueIds: [...issueIds], toolsUsed };
 }

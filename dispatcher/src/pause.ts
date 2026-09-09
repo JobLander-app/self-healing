@@ -30,7 +30,11 @@ export interface PauseState {
 /** Does the session error look like a subscription usage-limit hit? */
 export function isLimitError(msg: string | null | undefined): boolean {
   if (!msg) return false;
-  return /hit your limit|usage limit|out of (?:extra )?usage|usage_limit_reached|insufficient_quota|rate.?limit|too many requests|\b429\b/i.test(msg);
+  return /hit your limit|usage limit|out of (?:extra )?usage|usage_limit_reached|insufficient_quota/i.test(msg);
+}
+
+export function isThrottleError(msg: string): boolean {
+  return /rate.?limit|too many requests|\b429\b/i.test(msg);
 }
 
 /**

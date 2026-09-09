@@ -4,6 +4,7 @@
  */
 import type { RunOutcome, RunSummary } from "./trace";
 import type { ProviderAttempt } from "./providerTypes";
+import { accountingStatus } from "./accountingState";
 import { providerReadiness } from "./providerState";
 import type { HealthcheckSnapshot } from "./healthcheck";
 import type { PrecheckOutcome, PrecheckState } from "./poller";
@@ -112,36 +113,52 @@ export function renderMetrics(input: MetricsInput): string {
   out.push("# TYPE selfheal_dispatcher_busy gauge");
   out.push(`selfheal_dispatcher_busy ${input.busy ? 1 : 0}`);
 
-  out.push("# HELP selfheal_dispatcher_runs_total Completed dispatch runs by outcome (monotonic).");
-  out.push("# TYPE selfheal_dispatcher_runs_total counter");
-  for (const o of OUTCOMES) {
-    out.push(`selfheal_dispatcher_runs_total{outcome="${o}"} ${runsByOutcome[o]}`);
+  const accounting = accountingStatus();
+  if (accounting.healthy) {
+    out.push("# HELP selfheal_dispatcher_runs_total Completed dispatch runs by outcome (monotonic).");
+    out.push("# TYPE selfheal_dispatcher_runs_total counter");
+    for (const o of OUTCOMES) {
+      out.push(`selfheal_dispatcher_runs_total{outcome="${o}"} ${runsByOutcome[o]}`);
+    }
+
+    out.push("# HELP selfheal_dispatcher_cost_usd_total Cumulative estimated agent cost in USD, not billed cost; unknown estimates excluded.");
+    out.push("# TYPE selfheal_dispatcher_cost_usd_total counter");
+    // Format at render (accumulator stays full-precision & monotonic) to drop
+    // float noise like 0.16999999999999998 → 0.17. 6dp = sub-cent resolution.
+    out.push(`selfheal_dispatcher_cost_usd_total ${Number(costUsdTotal.toFixed(6))}`);
+
   }
-
-  out.push("# HELP selfheal_dispatcher_cost_usd_total Cumulative estimated agent cost in USD, not billed cost; unknown estimates excluded.");
-  out.push("# TYPE selfheal_dispatcher_cost_usd_total counter");
-  // Format at render (accumulator stays full-precision & monotonic) to drop
-  // float noise like 0.16999999999999998 → 0.17. 6dp = sub-cent resolution.
-  out.push(`selfheal_dispatcher_cost_usd_total ${Number(costUsdTotal.toFixed(6))}`);
-
+  for (const [name, value] of Object.entries({ healthy: Number(accounting.healthy), warning: Number(accounting.warning), bytes: accounting.bytes, max_bytes: accounting.maxBytes, rejected_records: accounting.rejectedRecords })) {
+    out.push(`# HELP selfheal_dispatcher_accounting_${name} Durable accounting storage ${name}.`, `# TYPE selfheal_dispatcher_accounting_${name} gauge`, `selfheal_dispatcher_accounting_${name} ${value}`);
+  }
   const readiness = providerReadiness();
   out.push("# HELP selfheal_dispatcher_provider_ready Actual successful provider evidence still fresh, blocked or unknown is 0.", "# TYPE selfheal_dispatcher_provider_ready gauge");
   for (const p of readiness.providers) out.push(`selfheal_dispatcher_provider_ready{provider="${p.provider}"} ${p.ready ? 1 : 0}`);
-  out.push("# HELP selfheal_dispatcher_ready Provider capability and fresh dependency probes are healthy.", "# TYPE selfheal_dispatcher_ready gauge");
+  out.push("# HELP selfheal_dispatcher_ready Provider capability, fresh dependency probes and accounting storage are healthy.", "# TYPE selfheal_dispatcher_ready gauge");
   const deps = input.lastHealthcheck;
   const depsReady = !!deps && deps.healthy === deps.total && Date.now() - Date.parse(deps.at) < 7 * 3_600_000;
-  out.push(`selfheal_dispatcher_ready ${readiness.ready && depsReady ? 1 : 0}`);
-  out.push("# TYPE selfheal_dispatcher_provider_attempts_total counter", "# TYPE selfheal_dispatcher_provider_failures_total counter", "# TYPE selfheal_dispatcher_provider_tokens_total counter", "# TYPE selfheal_dispatcher_provider_usage_unknown_total counter", "# TYPE selfheal_dispatcher_provider_estimated_cost_usd_total counter");
-  for (const c of attemptCounters.values()) {
-    const labels = `provider=${JSON.stringify(c.provider)},model=${JSON.stringify(c.model)}`;
-    out.push(`selfheal_dispatcher_provider_attempts_total{${labels}} ${c.attempts}`);
-    out.push(`selfheal_dispatcher_provider_failures_total{${labels}} ${c.failures}`);
-    out.push(`selfheal_dispatcher_provider_usage_unknown_total{${labels}} ${c.unknown}`);
-    out.push(`selfheal_dispatcher_provider_estimated_cost_usd_total{${labels}} ${Number(c.estimatedCost.toFixed(6))}`);
-  }
-  for (const c of modelTokens.values()) {
-    const labels = `provider=${JSON.stringify(c.provider)},model=${JSON.stringify(c.model)}`;
-    for (const kind of ["input", "cachedInput", "cacheWrite", "output"] as const) out.push(`selfheal_dispatcher_provider_tokens_total{${labels},kind="${kind}"} ${c[kind]}`);
+  out.push(`selfheal_dispatcher_ready ${readiness.ready && depsReady && accounting.healthy ? 1 : 0}`);
+  // Unknown totals are absent while storage is unreadable, never fake zero.
+  if (accounting.healthy) {
+    const families = [
+      ["attempts", "attempts", "Provider attempts"],
+      ["failures", "failures", "Failed provider attempts"],
+      ["usage_unknown", "unknown", "Attempts without complete usage reports"],
+      ["estimated_cost_usd", "estimatedCost", "Known estimated cost in USD, not billed cost"],
+    ] as const;
+    for (const [name, key, help] of families) {
+      const metric = `selfheal_dispatcher_provider_${name}_total`;
+      out.push(`# HELP ${metric} ${help}.`, `# TYPE ${metric} counter`);
+      for (const c of attemptCounters.values()) {
+        const labels = `provider=${JSON.stringify(c.provider)},model=${JSON.stringify(c.model)}`;
+        out.push(`${metric}{${labels}} ${Number(c[key].toFixed(6))}`);
+      }
+    }
+    out.push("# HELP selfheal_dispatcher_provider_tokens_total Actual reported tokens; cached input and writes are subsets of input.", "# TYPE selfheal_dispatcher_provider_tokens_total counter");
+    for (const c of modelTokens.values()) {
+      const labels = `provider=${JSON.stringify(c.provider)},model=${JSON.stringify(c.model)}`;
+      for (const kind of ["input", "cachedInput", "cacheWrite", "output"] as const) out.push(`selfheal_dispatcher_provider_tokens_total{${labels},kind="${kind}"} ${c[kind]}`);
+    }
   }
 
   out.push(

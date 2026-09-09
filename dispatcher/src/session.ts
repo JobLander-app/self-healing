@@ -9,7 +9,8 @@
  * time, guarded by the module-level `busy` lock.
  */
 
-import { alertProviderReadiness } from "./healthAlerts";
+import { accountingStatus } from "./accountingState";
+import { alertAccounting, alertProviderReadiness } from "./healthAlerts";
 import { executeClaude } from "./claude";
 import { executeCodex } from "./codex";
 import { executeWithFallback } from "./fallback";
@@ -366,6 +367,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     throw new Error("runDispatchSession called while busy");
   }
 
+  if (!accountingStatus().healthy) throw new Error("Accounting unavailable; no provider attempt started");
   busy = true;
   const turnId = newTurnId();
   currentTurnId = turnId;
@@ -525,6 +527,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   // "in prod". no-work / no-ticket runs stay silent (see buildRunNotification).
   // Fail-soft: sendTelegram already swallows its own errors, and we belt-and-
   // suspenders around it so a TG failure can NEVER throw into the poll loop.
+  await alertAccounting().catch(err => console.error("[session] accounting alert failed:", err));
   await alertProviderReadiness().catch(err => console.error("[session] readiness alert failed:", err));
   const notification = buildRunNotification(summary);
   if (notification !== null) {

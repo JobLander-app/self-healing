@@ -89,7 +89,7 @@ if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
 fi
 command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
-if ! codex --version 2>/dev/null | grep -Fq "$CODEX_VERSION"; then
+if ! codex --version 2>/dev/null | grep -Fxq "codex-cli $CODEX_VERSION"; then
   npm install -g "@openai/codex@$CODEX_VERSION"
 fi
 

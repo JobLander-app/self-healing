@@ -91,9 +91,9 @@ CodeRabbit auto-reviews ONLY where auto incremental reviews are enabled (see Rev
 - **Done condition:** CodeRabbit posted a summary/walkthrough OR inline findings. A summary that says no actionable issues is a valid terminal state — proceed to step 5.
 - **NEVER** close out /yeet on "didn't see comments" — that means you polled the wrong endpoint or didn't wait long enough.
 
-### 4b. Codex review — opt-in ONLY
+### 4b. Codex review — required by applicable policy or requested review
 
-Skip this entirely unless `--codex` was passed or you judged the change complex/high-risk.
+Honor applicable repository review requirements unless the current user instruction explicitly supersedes them. If repository policy requires Codex review, obtain its current-head verdict before merging. Otherwise run it when `--codex` was passed or the change is complex/high-risk.
 
 - Check if a Codex review already exists (don't double-trigger):
   ```

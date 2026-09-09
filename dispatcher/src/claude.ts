@@ -18,12 +18,12 @@ export async function executeClaude(input: {
   id: string; prompt: string; abortController: AbortController;
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   onMessage: (m: unknown) => void;
-}): Promise<AttemptResult> {
+}, queryProvider: typeof query = query): Promise<AttemptResult> {
   const attempt: ProviderAttempt = { id: input.id, provider: "claude", model: config.claudeModel, startedAt: new Date().toISOString(), finishedAt: "", status: "failed", usage: unknownUsage(), estimatedCostUsd: null, costSource: "unavailable", turns: 0 };
   let output = "", error = "", gotResult = false, toolsUsed = false;
   const issueIds = new Set<string>();
   try {
-    for await (const msg of query({ prompt: input.prompt, options: {
+    for await (const msg of queryProvider({ prompt: input.prompt, options: {
       model: config.claudeModel, maxTurns: config.claudeMaxTurns,
       allowedTools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent", "mcp__firebase__*", "mcp__sentry__*", "mcp__linear__*"],
       mcpServers: input.mcpServers, permissionMode: "bypassPermissions", abortController: input.abortController,
@@ -57,7 +57,7 @@ export async function executeClaude(input: {
   if (gotResult && !error && !input.abortController.signal.aborted) attempt.status = "completed";
   else {
     attempt.error = safeError(input.abortController.signal.aborted ? "watchdog: Claude run aborted" : error || "Claude stream ended without result");
-    attempt.failureKind = input.abortController.signal.aborted ? "timeout" : classifyFailure(attempt.error);
+    attempt.failureKind = input.abortController.signal.aborted ? "timeout" : !gotResult && !error ? "unavailable" : classifyFailure(attempt.error);
   }
   return { attempt, output, issueIds: [...issueIds], toolsUsed };
 }

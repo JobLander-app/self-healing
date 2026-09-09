@@ -3,6 +3,9 @@
  * LOG_DIR: concurrent components must not share the same provider-state file.
  */
 import * as path from "node:path";
+import { accountingStatus } from "./accountingState";
+import { alertAccounting } from "./healthAlerts";
+import { readProviderPrompt } from "./promptInput";
 import { config } from "./config";
 import { executeClaude } from "./claude";
 import { executeCodex } from "./codex";
@@ -13,13 +16,10 @@ import { hydrateFromDisk, recordAttempt, recordAttemptStarted, traceEvent } from
 
 async function main() {
   if (!process.env.LOG_DIR) throw new Error("Monitor provider CLI requires its own LOG_DIR");
-  let prompt = "";
-  for await (const chunk of process.stdin) {
-    prompt += chunk;
-    if (prompt.length > 1_000_000) throw new Error("Prompt exceeds 1 MB");
-  }
-  if (!prompt.trim()) throw new Error("Prompt required on stdin");
+  const prompt = await readProviderPrompt(process.stdin);
   hydrateFromDisk();
+  await alertAccounting().catch(err => console.error("[provider-cli] accounting alert failed:", err));
+  if (!accountingStatus().healthy) throw new Error("Accounting unavailable; no provider attempt started");
   const root = path.resolve(__dirname, "../..");
   const entries = Object.fromEntries(["firebase", "sentry", "linear"].map(name => [name, path.join(root, "mcp", name, "index.js")]));
   const turnId = `monitor-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`;
@@ -46,4 +46,8 @@ async function main() {
     if (result.error) process.exitCode = 1;
   } finally { clearTimeout(timer); process.off("SIGTERM", stop); process.off("SIGINT", stop); }
 }
-main().catch(err => { console.error(err instanceof Error ? err.message : String(err)); process.exitCode = 1; });
+main().catch(err => {
+  const error = err instanceof Error ? err.message : String(err);
+  process.stdout.write(JSON.stringify({ turnId: null, output: "", error, attempts: [] }) + "\n");
+  process.exitCode = 1;
+});

@@ -20,7 +20,12 @@ excluded from dispatcher traces. Error messages redact known secret values.
 The checked-in init script installs `@openai/codex@0.153.4`, the version tested
 on `self-healing-1`, and the global `yeet` skill under
 `/home/joblander/.agents/skills/yeet`. New installations receive
-`deploy/codex/config.toml`; existing auth/config files are preserved.
+`deploy/codex/config.toml`; existing auth/config files are preserved. The runner
+uses `--ephemeral` so new raw Codex sessions are not saved. The template disables
+CLI prompt history (`history.persistence="none"`); apply that setting to an
+existing dedicated home as well. Retain the compact usage ledger described below.
+Any old smoke sessions/history can be archived under your existing retention
+policy; do not remove authentication or provider/accounting state.
 
 Set these values in the dispatcher environment secret after login verification:
 
@@ -81,7 +86,33 @@ Restart replays every ledger record once by ID; the 50-run `/feed` ring does not
 limit counters. Existing traces are imported once. Interrupted attempts are
 recorded with unknown usage on recovery. Partial final JSONL writes are skipped
 without losing subsequent records. Storage errors fail the new attempt rather
-than running an unaccounted investigation.
+than running an unaccounted investigation. Replay reads 64 KiB chunks with a 4 MB
+per-record bound instead of loading the complete ledger. Invalid records are
+excluded from the feed and exposed as `accounting.rejectedRecords` plus a
+maintenance alert; they do not poison valid records.
+
+`LEDGER_MAX_BYTES` defaults to 128 MiB per component, with an alert at half that
+size. The regression fixture measured approximately 466 bytes per attempt start,
+314 per completed attempt and 514 per run; real model breakdowns/errors are
+larger. A conservative planning allowance of 5 KiB per two-provider run at 144
+runs/day is about 0.7 MiB/day: warning after roughly three months, hard cap after
+six, with normal empty-queue skips extending both. Observe actual bytes before
+raising the bound. Existing trace cleanup must never include the ledger.
+
+The cap bounds disk growth and dedup replay memory without dropping historical
+IDs or resetting counters. A transactional compactor/checkpoint format is
+intentionally deferred; naive rotation would break lifetime totals and replay
+deduplication. Size warnings and failures use the independent durable Telegram
+outbox as well as HTTP/Prometheus. At the cap or on a storage read/write error,
+`/health` stays live, `/ready` is degraded, counter samples are omitted rather
+than reporting false zeros, and new provider attempts stop. Preserve/back up
+the ledger, repair ownership/mount/free space (or increase `LEDGER_MAX_BYTES`
+with matching capacity and restart to load the configuration). A later poll
+replays repaired storage automatically and restores the same totals before
+resuming. Never delete/truncate the valid ledger to clear an alert. If the whole
+filesystem is unwritable, outbox persistence can also fail; the liveness payload,
+metrics and process log still expose accounting failure and notification retry
+continues after storage repair.
 
 Each attempt records provider, configured model, provider session ID, timing,
 status, error class, raw numeric provider usage and normalized usage. Claude's
@@ -105,7 +136,8 @@ and VM watchdog. They also expose `ready`, provider state and dependency status.
 
 `/ready` returns 200 only when a provider has real successful-turn evidence
 within `PROVIDER_EVIDENCE_MAX_MS` (default 24h), no newer availability failure,
-and all real dependency probes succeeded within seven hours. Otherwise it
+all real dependency probes succeeded within seven hours, and durable accounting
+storage is healthy. Otherwise it
 returns 503. `/status` and Prometheus expose the same distinction. An expired
 cooldown makes a provider eligible for another attempt; it never marks it
 healthy. A token file's presence is not recovery evidence.
@@ -113,7 +145,10 @@ healthy. A token file's presence is not recovery evidence.
 Quota messages with dated UTC resets (including extra-usage exhaustion) retain
 their actual reset deadline plus a two-minute buffer. Unparseable quotas and
 auth/service errors use `PROVIDER_RETRY_MS` (default one hour). A legacy Claude
-`pause.json` is imported without blocking the newly enabled Codex provider.
+`pause.json` is imported without blocking the newly enabled Codex provider. Bare
+429/rate-limit throttling uses `PROVIDER_THROTTLE_RETRY_MS` (default one minute),
+while explicit reset metadata still wins. The resume watcher uses provider
+deadlines rather than obsolete global pause state.
 
 Capability failure/recovery is notified independently of Linear and does not
 create recurring quota repair tickets. Dependency tickets are deduplicated,

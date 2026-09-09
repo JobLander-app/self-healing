@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { config } from "./config";
-import { isLimitError, parseResetTime, readPause } from "./pause";
+import { isLimitError, isThrottleError, parseResetTime, readPause } from "./pause";
 import type { Provider, ProviderAttempt, FailureKind } from "./providerTypes";
 
 export interface ProviderState {
@@ -13,13 +13,25 @@ export interface ProviderState {
 }
 const stateFile = path.join(path.dirname(config.logDir), "providers.json");
 let states: Record<Provider, ProviderState> | undefined;
+export function parseProviderState(value: unknown): ProviderState | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as ProviderState;
+  if (!["unknown", "available", "blocked"].includes(raw.status)) return null;
+  return { status: raw.status,
+    ...(typeof raw.checkedAt === "string" && Number.isFinite(Date.parse(raw.checkedAt)) ? { checkedAt: raw.checkedAt } : {}),
+    ...(typeof raw.retryAt === "string" && Number.isFinite(Date.parse(raw.retryAt)) ? { retryAt: raw.retryAt } : {}),
+    ...(typeof raw.reason === "string" ? { reason: raw.reason.slice(0, 1000) } : {}),
+    ...(typeof raw.failureKind === "string" && ["quota", "throttle", "auth", "unavailable", "task", "timeout"].includes(raw.failureKind) ? { failureKind: raw.failureKind } : {}),
+  };
+}
 function state(): Record<Provider, ProviderState> {
   if (states) return states;
   states = { claude: { status: "unknown" }, codex: { status: "unknown" } };
   try {
     const saved = JSON.parse(fs.readFileSync(stateFile, "utf8"));
     for (const provider of ["claude", "codex"] as const) {
-      if (["unknown", "available", "blocked"].includes(saved[provider]?.status)) states[provider] = saved[provider];
+      const parsed = parseProviderState(saved?.[provider]);
+      if (parsed) states[provider] = parsed;
     }
   } catch { /* first install */ }
   // A pre-upgrade Claude quota pause remains evidence of failure. It must not
@@ -30,8 +42,13 @@ function state(): Record<Provider, ProviderState> {
   }
   return states;
 }
+export function nextProviderRetry(after = -Infinity): number | null {
+  const values = providerOrder().filter(p => state()[p].status === "blocked").map(p => Date.parse(state()[p].retryAt ?? "")).filter(value => Number.isFinite(value) && value > after);
+  return values.length ? Math.min(...values) : null;
+}
 export function classifyFailure(message: string): FailureKind {
   if (isLimitError(message)) return "quota";
+  if (isThrottleError(message)) return "throttle";
   if (/unauthenticated|unauthorized|authentication|auth token|oauth|token.{0,30}expired|invalid.{0,20}token|not logged in|please (?:run .{0,10})?login|\b401\b/i.test(message)) return "auth";
   if (/overloaded|service unavailable|connection (?:refused|reset|closed)|ECONN(?:RESET|REFUSED)|ETIMEDOUT|fetch failed|error sending request|stream disconnected|network error|\b(?:500|502|503|504|529)\b|spawn .+ ENOENT|model.{0,120}(?:not (?:available|supported|found)|does not exist)|(?:invalid|unsupported) model/i.test(message)) return "unavailable";
   return "task";
@@ -44,8 +61,10 @@ export function safeError(message: string): string {
   return safe.replace(/(?:sk-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9_.-]+)/g, "[REDACTED]").slice(0, 1000);
 }
 export function availableToAttempt(provider: Provider, now = Date.now()): boolean {
-  const s = state()[provider];
-  return s.status !== "blocked" || (Number.isFinite(Date.parse(s.retryAt ?? "")) && Date.parse(s.retryAt!) <= now);
+  return stateCanAttempt(state()[provider], now);
+}
+export function stateCanAttempt(s: ProviderState, now = Date.now()): boolean {
+  return s.status !== "blocked" || !Number.isFinite(Date.parse(s.retryAt ?? "")) || Date.parse(s.retryAt!) <= now;
 }
 export function providerOrder(): Provider[] {
   return config.codexEnabled ? ["claude", "codex"] : ["claude"];
@@ -54,12 +73,12 @@ export function updateProvider(attempt: ProviderAttempt): void {
   const all = state();
   if (attempt.status === "completed") {
     all[attempt.provider] = { status: "available", checkedAt: attempt.finishedAt };
-  } else if (attempt.failureKind && ["quota", "auth", "unavailable"].includes(attempt.failureKind)) {
+  } else if (attempt.failureKind && ["quota", "throttle", "auth", "unavailable"].includes(attempt.failureKind)) {
     const now = new Date(attempt.finishedAt);
     all[attempt.provider] = {
       status: "blocked", checkedAt: attempt.finishedAt, failureKind: attempt.failureKind,
       reason: attempt.error,
-      retryAt: (parseResetTime(attempt.error ?? "", now) ?? new Date(now.getTime() + config.providerRetryMs)).toISOString(),
+      retryAt: (parseResetTime(attempt.error ?? "", now) ?? new Date(now.getTime() + (attempt.failureKind === "throttle" ? config.providerThrottleRetryMs : config.providerRetryMs))).toISOString(),
     };
   }
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });

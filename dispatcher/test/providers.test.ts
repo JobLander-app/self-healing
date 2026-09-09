@@ -227,3 +227,79 @@ test("unavailable intent coverage does not authorize infrastructure reversal", (
   assert.match(constitution, /Unavailable intent evidence is not permission/);
   assert.doesNotMatch(source, /FAIL OPEN on availability:/);
 });
+
+test("pre-aborted fallback never runs a provider and reports watchdog abort", async () => {
+  const { executeWithFallback } = await import("../src/fallback");
+  const controller = new AbortController(); controller.abort();
+  const result = await executeWithFallback({ providers: ["claude", "codex"], prompt: "test", signal: controller.signal, canAttempt: () => true, execute: async () => { throw new Error("must not run"); }, record: () => {} });
+  assert.equal(result.results.length, 0); assert.match(result.error!, /watchdog.*aborted/);
+});
+
+test("UTF8 prompt decoding preserves characters split across input chunks", async () => {
+  const { Readable } = await import("node:stream");
+  const { readProviderPrompt } = await import("../src/promptInput");
+  const prompt = "Проверь self healing — 東京 🛠️";
+  const chunks = Array.from(Buffer.from(prompt), byte => Buffer.from([byte]));
+  assert.equal(await readProviderPrompt(Readable.from(chunks)), prompt);
+});
+
+test("malformed persisted alert and provider state is safely bounded and retryable", async () => {
+  const { parseAlertState } = await import("../src/healthAlerts");
+  const { parseProviderState, stateCanAttempt } = await import("../src/providerState");
+  for (const value of [null, false, 1, "text", []]) {
+    assert.equal(Object.keys(parseAlertState(value)).length, 0);
+    assert.equal(parseProviderState(value), null);
+  }
+  assert.equal(Object.keys(parseAlertState({ bad: null, malformed: { active: true }, valid: { active: true, pending: false, message: "down", deliveredAt: "invalid" } })).length, 1);
+  for (const retryAt of [undefined, "broken"]) {
+    const s = parseProviderState({ status: "blocked", retryAt, checkedAt: 42 })!;
+    assert.equal(s.status, "blocked"); assert.equal(stateCanAttempt(s), true); assert.equal(s.checkedAt, undefined);
+  }
+});
+
+test("generic throttling uses a short separate retry while explicit reset metadata wins", async () => {
+  const { classifyFailure, updateProvider, providerReadiness } = await import("../src/providerState");
+  const { unknownUsage } = await import("../src/providerTypes");
+  for (const message of ["HTTP 429", "Rate limit exceeded", "Too many requests"]) assert.equal(classifyFailure(message), "throttle");
+  assert.equal(classifyFailure("429 usage_limit_reached"), "quota");
+  const at = new Date().toISOString();
+  const a: import("../src/providerTypes").ProviderAttempt = { id: "throttle", provider: "claude", model: "m", startedAt: at, finishedAt: at, status: "failed", failureKind: "throttle", error: "429", usage: unknownUsage(), estimatedCostUsd: null, costSource: "unavailable", turns: 0 };
+  updateProvider(a);
+  assert.equal(Date.parse(providerReadiness().providers[0].retryAt!) - Date.parse(at), 60_000);
+  const deadline = new Date(Date.now() + 5 * 60_000).toISOString();
+  updateProvider({ ...a, error: `429 retry_at ${deadline}` });
+  assert.equal(Date.parse(providerReadiness().providers[0].retryAt!), Date.parse(deadline) + 120_000);
+});
+
+test("empty Claude stream is unavailable and eligible for safe fallback", async () => {
+  const { executeClaude } = await import("../src/claude");
+  const { fallbackAllowed } = await import("../src/fallback");
+  const result = await executeClaude({ id: "empty", prompt: "test", abortController: new AbortController(), mcpServers: {}, onMessage: () => {} }, (async function* () {}) as any);
+  assert.equal(result.attempt.failureKind, "unavailable"); assert.equal(fallbackAllowed(result), true);
+});
+
+test("Codex malformed and oversized transport data enters provider cooldown", async () => {
+  const { executeCodex, codexArgs } = await import("../src/codex");
+  const { updateProvider, availableToAttempt } = await import("../src/providerState");
+  assert.ok(codexArgs({}, "m").includes("--ephemeral"));
+  for (const payload of ["not JSON", "null", "x".repeat(4_000_100)]) {
+    const fixture = path.join(root, "malformed-payload");
+    fs.writeFileSync(fixture, payload);
+    fs.writeFileSync(process.env.CODEX_BIN!, `#!/usr/bin/env node\nprocess.stdout.write(require('fs').readFileSync(${JSON.stringify(fixture)}));`, { mode: 0o700 });
+    const result = await executeCodex({ id: "bad-json", prompt: "test", model: "m", entries: {}, signal: new AbortController().signal, onTool: () => {} });
+    assert.equal(result.attempt.failureKind, "unavailable");
+    updateProvider(result.attempt); assert.equal(availableToAttempt("codex"), false);
+  }
+});
+
+test("Prometheus metric families are contiguous even with multiple providers and models", async () => {
+  const { renderMetrics, incrementAttemptCounters } = await import("../src/metrics");
+  const at = new Date().toISOString();
+  for (const provider of ["claude", "codex"] as const) incrementAttemptCounters({ id: provider, provider, model: "family-test", startedAt: at, finishedAt: at, status: "completed", usage: { input: 3, cachedInput: 1, cacheWrite: 0, output: 2 }, estimatedCostUsd: null, costSource: "unavailable", turns: 1 });
+  const text = renderMetrics({ busy: false, lastRun: null, lastHealthcheck: null, lastPrecheck: null });
+  let last = ""; const seen = new Set<string>();
+  for (const line of text.trim().split("\n")) {
+    const name = line.startsWith("#") ? line.split(" ")[2] : line.split(/[ {]/)[0];
+    if (name !== last) { assert.equal(seen.has(name), false, `${name} reappears after another family`); seen.add(name); last = name; }
+  }
+});

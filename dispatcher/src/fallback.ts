@@ -5,7 +5,7 @@ export function fallbackAllowed(result: AttemptResult, purpose: "dispatch" | "mo
   // there is no safe way to identify/reclaim its work. Let normal stale-claim
   // recovery handle it; never guess and start a second ticket in this run.
   return result.attempt.status === "failed" &&
-    ["quota", "auth", "unavailable"].includes(result.attempt.failureKind ?? "") &&
+    ["quota", "throttle", "auth", "unavailable"].includes(result.attempt.failureKind ?? "") &&
     (!result.toolsUsed || (purpose === "dispatch" && result.issueIds.length === 1));
 }
 export function handoverPrompt(prompt: string, previous: AttemptResult, purpose: "dispatch" | "monitor" = "dispatch"): string {
@@ -27,7 +27,8 @@ export async function executeWithFallback(input: {
   const results: AttemptResult[] = [];
   let prompt = input.prompt;
   for (const provider of input.providers) {
-    if (input.signal.aborted || !input.canAttempt(provider)) continue;
+    if (input.signal.aborted) break;
+    if (!input.canAttempt(provider)) continue;
     const result = await input.execute(provider, prompt);
     results.push(result);
     input.record(result.attempt);
@@ -36,5 +37,5 @@ export async function executeWithFallback(input: {
     prompt = handoverPrompt(input.prompt, result, input.purpose);
   }
   const last = results.at(-1);
-  return { results, output: last?.output ?? "", error: last?.attempt.error ?? "No provider available; waiting for provider retry window" };
+  return { results, output: last?.output ?? "", error: input.signal.aborted ? "watchdog: run aborted before provider completion" : last?.attempt.error ?? "No provider available; waiting for provider retry window" };
 }

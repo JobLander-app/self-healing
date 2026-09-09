@@ -1,5 +1,5 @@
 export type Provider = "claude" | "codex";
-export type FailureKind = "quota" | "auth" | "unavailable" | "task" | "timeout";
+export type FailureKind = "quota" | "throttle" | "auth" | "unavailable" | "task" | "timeout";
 
 /** input includes cache reads/writes; cachedInput is a subset, not additive. */
 export interface TokenUsage {

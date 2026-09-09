@@ -48,12 +48,12 @@
       "title": "Dependency health",
       "gridPos": { "h": 4, "w": 4, "x": 4, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [ { "expr": "clamp_max(min(selfheal_dispatcher_healthcheck_healthy), 5)", "refId": "A", "instant": true } ],
+      "targets": [ { "expr": "clamp_max(min(selfheal_dispatcher_healthcheck_healthy), 4)", "refId": "A", "instant": true } ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "textMode": "value" },
       "fieldConfig": { "defaults": {
         "unit": "none",
-        "displayName": "of 5 healthy",
-        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 4, "color": "orange" }, { "value": 5, "color": "green" } ] }
+        "displayName": "of 4 healthy",
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 3, "color": "orange" }, { "value": 4, "color": "green" } ] }
       } }
     },
     {
@@ -155,7 +155,7 @@
       "targets": [ { "expr": "max(selfheal_dispatcher_cost_usd_total)", "refId": "A", "instant": true } ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "value" },
       "fieldConfig": { "defaults": {
-        "unit": "currencyUSD", "decimals": 2, "displayName": "spent to date",
+        "unit": "currencyUSD", "decimals": 2, "displayName": "estimated to date",
         "color": { "mode": "fixed", "fixedColor": "#2dd4bf" }
       } }
     },

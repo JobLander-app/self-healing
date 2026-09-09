@@ -4,6 +4,7 @@ import { getRecentRuns, getLastRun } from "../trace";
 import { getLastPrecheck } from "../poller";
 import { getLastHealthcheck } from "../healthcheck";
 import { config } from "../config";
+import { accountingStatus } from "../accountingState";
 import { providerReadiness } from "../providerState";
 
 const router = Router();
@@ -13,7 +14,8 @@ export function readiness() {
   const provider = providerReadiness();
   const deps = getLastHealthcheck();
   const dependenciesReady = !!deps && deps.healthy === deps.total && Date.now() - Date.parse(deps.at) < 7 * 3_600_000;
-  return { ready: provider.ready && dependenciesReady, providers: provider.providers, dependenciesReady, lastDependencyCheck: deps?.at ?? null };
+  const accounting = accountingStatus();
+  return { ready: provider.ready && dependenciesReady && accounting.healthy, accounting, providers: provider.providers, dependenciesReady, lastDependencyCheck: deps?.at ?? null };
 }
 // Backwards-compatible liveness: cron watchdog relies on exact status:"ok".
 // Provider quota must NEVER drive a VM reset. Use /ready for capability alerts.
