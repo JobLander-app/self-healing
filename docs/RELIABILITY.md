@@ -41,6 +41,10 @@ so it cannot silently represent an unavailable history as an empty history.
 
 Deployment builds a detached snapshot before activation. A `.deploying` guard,
 a second dispatcher busy check and watcher/monitor flocks quiesce writers.
+An active dispatcher requires a valid `busy:false` response. Loaded stopped,
+failed or automatic-restart-wait states permit a fixing release only with zero
+main/control PIDs and no remaining tasks. Unknown systemd state, missing units
+or an unreachable active dispatcher defer both deployment and recovery.
 Tracked local edits defer deployment. Source activation uses `git reset --keep`;
 state, secrets and logs are excluded from runtime backups. Rollback restores the
 exact previously running `dist`/`node_modules` artifacts (including watcher and

@@ -68,6 +68,13 @@ printf 'new-build\\n' > node_modules/artifact
 if [ "$1" = run ]; then mkdir -p dist; printf 'new-build\\n' > dist/artifact; fi
 ''')
         self.mock('systemctl', '''#!/bin/sh
+if [ "$1" = show ]; then
+  [ "${MOCK_SHOW_FAIL:-}" != 1 ] || exit 1
+  printf 'LoadState=%s\\nActiveState=%s\\nSubState=%s\\nMainPID=%s\\nControlPID=%s\\nTasksCurrent=%s\\n' \\
+    "${MOCK_LOAD_STATE:-loaded}" "${MOCK_ACTIVE_STATE:-active}" "${MOCK_SUB_STATE:-running}" \\
+    "${MOCK_MAIN_PID:-123}" "${MOCK_CONTROL_PID:-0}" "${MOCK_TASKS:-1}"
+  exit 0
+fi
 printf '%s\\n' "$*" >> "$MOCK_SYSTEMCTL"
 case "$*" in
   restart*) if [ "${KILL_ACTIVATION:-}" = 1 ] && [ "$(cat "$SH_DIR/version")" = new ]; then kill -KILL "$PPID"; fi ;;
@@ -76,7 +83,8 @@ exit 0
 ''')
         self.mock('curl', '''#!/bin/sh
 case "$*" in
-  *status*) printf '{"busy":%s}' "${MOCK_BUSY:-false}" ;;
+  *status*) [ "${MOCK_STATUS_UNREACHABLE:-}" != 1 ] || exit 7
+    printf '{"busy":%s}' "${MOCK_BUSY:-false}" ;;
   *4200*) printf '{"ok":false,"rowCount":4}' ;;
   *) if [ "${FAIL_VERIFY:-}" = 1 ] && [ "$(cat "$SH_DIR/version")" = new ]; then exit 1; fi
      printf '{"status":"ok"}' ;;
@@ -157,6 +165,14 @@ esac
         self.assertTrue((self.repo / '.deploying').exists())
         # Recovery is independent of network availability or current origin.
         self.git('remote', 'set-url', 'origin', '/nonexistent/offline.git')
+        # Neither an unreachable active dispatcher nor failed systemd reads
+        # authorize stopping a potentially busy process during recovery.
+        for env in [{'MOCK_STATUS_UNREACHABLE': '1'}, {'MOCK_SHOW_FAIL': '1'}]:
+            deferred = self.deploy(**env)
+            self.assertEqual(deferred.returncode, 0, deferred.stderr)
+            self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.new)
+            self.assertTrue((self.root / 'registry/transaction.env').exists())
+            self.assertTrue((self.repo / '.deploying').exists())
         self.assert_rollback(self.deploy())
         self.assertFalse((self.root / 'registry/transaction.env').exists())
 
@@ -180,12 +196,9 @@ def migrate_state(target):
         legacy = self.root / 'legacy-suppressions.json'
         self.write(legacy, '{"old-decision":"suppressed"}\n')
         target = self.root / 'new-monitor-state'
-        self.mock('systemctl', """#!/bin/sh
-case "$*" in
- restart*) [ -f "$MOCK_MONITOR_TARGET/suppressions.json" ] || exit 1 ;;
-esac
-exit 0
-""")
+        systemctl = self.bin / 'systemctl'
+        systemctl.write_text(systemctl.read_text().replace('restart*) if',
+            'restart*) [ -f "$MOCK_MONITOR_TARGET/suppressions.json" ] || exit 1; if'))
         result = self.deploy(MOCK_MONITOR_TARGET=str(target), MOCK_LEGACY_STATE=str(legacy))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((target / 'suppressions.json').read_text(), legacy.read_text())
@@ -234,6 +247,45 @@ exit 0
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.repo / 'watcher/source').read_text(), 'uncommitted owner work\n')
         self.assertFalse((self.root / 'systemctl.log').exists())
+
+    def assert_stopped_dispatcher_can_receive_fix(self, active, sub, tasks):
+        result = self.deploy(MOCK_ACTIVE_STATE=active, MOCK_SUB_STATE=sub,
+                             MOCK_MAIN_PID='0', MOCK_TASKS=tasks, MOCK_STATUS_UNREACHABLE='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.new)
+        self.assertEqual((self.repo / 'dispatcher/dist/artifact').read_text(), 'new-build\n')
+        self.assertIn('restart claude-code-vm-job-dispatcher.service',
+                      (self.root / 'systemctl.log').read_text())
+
+    def test_stopped_dispatcher_receives_fix_without_status_endpoint(self):
+        self.assert_stopped_dispatcher_can_receive_fix('inactive', 'dead', '[not set]')
+
+    def test_failed_dispatcher_receives_fix_without_status_endpoint(self):
+        self.assert_stopped_dispatcher_can_receive_fix('failed', 'failed', '0')
+
+    def test_crash_loop_restart_wait_receives_fix_without_status_endpoint(self):
+        self.assert_stopped_dispatcher_can_receive_fix('activating', 'auto-restart', '0')
+
+    def test_active_unreachable_dispatcher_defers_without_mutations(self):
+        result = self.deploy(MOCK_STATUS_UNREACHABLE='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.old)
+        self.assertFalse((self.root / 'systemctl.log').exists())
+
+    def test_unknown_unit_or_remaining_processes_do_not_prove_idle(self):
+        for env in [
+            {'MOCK_LOAD_STATE': 'not-found', 'MOCK_ACTIVE_STATE': 'inactive', 'MOCK_SUB_STATE': 'dead'},
+            {'MOCK_SHOW_FAIL': '1'},
+            {'MOCK_ACTIVE_STATE': 'deactivating', 'MOCK_SUB_STATE': 'stop'},
+            {'MOCK_ACTIVE_STATE': 'inactive', 'MOCK_SUB_STATE': 'dead', 'MOCK_MAIN_PID': '123'},
+            {'MOCK_ACTIVE_STATE': 'failed', 'MOCK_SUB_STATE': 'failed', 'MOCK_MAIN_PID': '0', 'MOCK_CONTROL_PID': '42'},
+            {'MOCK_ACTIVE_STATE': 'activating', 'MOCK_SUB_STATE': 'auto-restart', 'MOCK_MAIN_PID': '0', 'MOCK_TASKS': '2'},
+        ]:
+            with self.subTest(env=env):
+                result = self.deploy(**env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.old)
+                self.assertFalse((self.root / 'systemctl.log').exists())
 
     def tearDown(self):
         self.tmp.cleanup()

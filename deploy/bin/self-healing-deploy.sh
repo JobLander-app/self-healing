@@ -29,8 +29,31 @@ if [ "${SELF_HEALING_CD_LOCKED:-}" != 1 ]; then
 fi
 
 idle() {
-  local busy
-  busy="$(curl -fsS --max-time 5 "$STATUS_URL" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print("idle" if d.get("busy") is False else "busy")' 2>/dev/null)" || return 1
+  local busy snapshot key value load="" active="" sub="" main="" control="" tasks=""
+  # A failed read must only defer, including during transaction recovery. Do
+  # not inherit the activation ERR/rollback trap into these substitutions.
+  snapshot="$(trap - ERR; systemctl show "$DISPATCHER_UNIT" --property=LoadState,ActiveState,SubState,MainPID,ControlPID,TasksCurrent 2>/dev/null)" || return 1
+  while IFS='=' read -r key value; do
+    case "$key" in
+      LoadState) load="$value" ;; ActiveState) active="$value" ;;
+      SubState) sub="$value" ;; MainPID) main="$value" ;;
+      ControlPID) control="$value" ;; TasksCurrent) tasks="$value" ;;
+    esac
+  done <<<"$snapshot"
+  # Missing units and failed/partial systemd queries prove nothing. A loaded
+  # stopped unit (including the no-process wait between automatic restarts)
+  # must be able to receive the release that fixes its startup failure.
+  [ "$load" = loaded ] || return 1
+  case "$active/$sub" in
+    inactive/dead|failed/failed|activating/auto-restart)
+      if [ "$main" = 0 ] && [ "$control" = 0 ]; then
+        case "$tasks" in 0|'[not set]') return 0 ;; esac
+      fi
+      return 1 ;;
+    active/*|reloading/*|activating/*) ;; # A live process needs application evidence.
+    *) return 1 ;;
+  esac
+  busy="$(trap - ERR; curl -fsS --max-time 5 "$STATUS_URL" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print("idle" if d.get("busy") is False else "busy")' 2>/dev/null)" || return 1
   [ "$busy" = idle ]
 }
 # Recover an interrupted activation BEFORE checking whether HEAD == origin/main.
@@ -162,9 +185,7 @@ if [ "$RECOVER" = 1 ]; then
   flock -n 7 || { log "deferring recovery: watcher active"; exit 0; }
   exec 6<"$MONITOR_LOCK"
   flock -n 6 || { log "deferring recovery: monitor active"; exit 0; }
-  if systemctl is-active --quiet "$DISPATCHER_UNIT"; then
-    idle || { log "deferring recovery: dispatcher busy or status unavailable"; exit 0; }
-  fi
+  idle || { log "deferring recovery: dispatcher busy or status unavailable"; exit 0; }
   rollback "recovering interrupted activation"
 fi
 
