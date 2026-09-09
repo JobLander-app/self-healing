@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import argparse
 import fcntl
 import hashlib
 import json
@@ -420,7 +421,10 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
     return 0 if result["status"] == "success" else 1
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--migrate-only", action="store_true", help="migrate local state under the shared lock, without collection or inference")
+    args = parser.parse_args(argv)
     def interrupted(signum, frame):
         raise InterruptedError("monitor interrupted")
     signal.signal(signal.SIGTERM, interrupted)
@@ -429,8 +433,10 @@ def main():
     with monitor_lock(config.lock_file) as acquired:
         if not acquired:
             print("Monitor already running; skipped", flush=True)
-            return 0
+            return 1 if args.migrate_only else 0
         migrate_state(config)
+        if args.migrate_only:
+            return 0
         print("[SESSION_START] " + json.dumps({"type": "monitor", "timestamp": timestamp()}), flush=True)
         return run_once(config)
 

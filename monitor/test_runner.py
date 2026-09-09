@@ -87,6 +87,15 @@ class MonitorRunnerTests(unittest.TestCase):
         with runner.monitor_lock(self.config.lock_file) as next_run:
             self.assertTrue(next_run)
 
+    def test_migration_only_never_collects_and_refuses_a_busy_lock(self):
+        with patch.object(runner.Config, "from_env", return_value=self.config), \
+                patch.object(runner.signal, "signal"), \
+                patch.object(runner, "run_once", side_effect=AssertionError("migration must not run monitor")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(runner.main(["--migrate-only"]), 0)
+            with runner.monitor_lock(self.config.lock_file):
+                self.assertEqual(runner.main(["--migrate-only"]), 1)
+
     def test_p0_outbox_survives_delivery_failure_and_retries_without_a_model(self):
         alert = "URGENT P0: exact original evidence"
         def failing_pager(text):

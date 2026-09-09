@@ -24,6 +24,9 @@ Deploy activation also waits for that lock. Do not add a second cron.
    and prepared files in an isolated runtime directory. It uses the same verified
    provider configuration, MCP tools, fallback policy and usage journal as the
    executor. The monitor must never claim tickets or repair code.
+   The supported services and their six Linear projects are listed in
+   `prompt.md`. An unmapped service remains pending with an explicit routing
+   error; it cannot create a ticket in a guessed project.
 5. Commit successful and partial actions to `latest-report.json`; record completion/failure in
    `last-session.json`. Publish a Cloud Logging heartbeat only after successful
    collection and completion of required actions, including P0 delivery.
@@ -38,6 +41,9 @@ write new suppressions. Do not pre-create the final state directory. Later launc
 overwrite the new state from that historical copy. Rolling back code requires
 pointing the older launcher at the current `MONITOR_STATE_DIR` so newly recorded
 actions and suppressions are not lost.
+Bootstrap uses `python3 monitor/run_monitor.py --migrate-only` before starting
+the dispatcher. This command refuses a busy monitor lock and performs no
+collection, credential resolution, delivery or inference.
 
 Provider configuration comes from the self-healing dispatcher's rendered `.env`
 and process environment. Monitor overrides `LOG_DIR` to
