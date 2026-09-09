@@ -11,6 +11,7 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { config } from "./config";
+import { candidateInstruction, queuePolicy, type SelectedCandidate } from "./queue";
 import {
   traceEvent,
   recordRun,
@@ -151,8 +152,8 @@ function loadSystemPrompt(): string {
 const RUN_INSTRUCTION = `Это автономный poll-tick claude-code-vm-job-dispatcher.
 
 Выполни ровно ОДИН цикл по своей конституции (CLAUDE.md):
-1. Выбери ОДИН тикет ТОЛЬКО с label "monitor" (To Do, затем Backlog; сортировка Urgent→High→Medium→Low, затем старейший createdAt; пропусти уже In Progress и назначенные на человека). ТИКЕТЫ БЕЗ label "monitor" (фичи/improvement/эпики) — НЕ ТВОИ, не трогай их вообще: авто-merge санкционирован только для monitor-origin.
-2. Заклейми его: переведи в In Progress и назначь на себя ДО любой работы. Если заклеймить нельзя — выйди.
+1. Follow the MONITOR QUEUE CONTRACT and SELECTED CANDIDATE below. A monitor label OR [Monitor] title prefix authorizes pickup; never reject a prefix-only candidate. Use agent-claimed and updatedAt to distinguish an abandoned claim from a human-held ticket, never the assignee.
+2. Re-read the candidate and claim it once before investigation: set In Progress, assign yourself, and add agent-claimed while preserving existing labels. If the snapshot changed or the claim fails, exit no-work.
 3. FRESHNESS GATE (Step 3.5 в конституции): тикет — это ГИПОТЕЗА о баге на момент создания, а не факт на момент починки. ПЕРЕД тем как чинить — заново подтверди, что баг ещё живой В ТЕКУЩЕМ коде (воспроизведи сигнатуру в свежем окне; проверь не пофикшено ли уже поздним деплоем/коммитом). Не воспроизводится → "stale". Уже решено другим коммитом/деплоем → "fixed-elsewhere". Не чини то, что не смог воспроизвести.
 4. INTENT GATE (Step 3.6 в конституции): даже если баг воспроизводится — сначала спроси change feed (см. блок "CHANGE FEED" ниже), не объясняется ли аномалия НАМЕРЕННЫМ изменением прода (декоммишен / деплой / cutover). Изменение объясняет её → НЕ чини, outcome "intentional", Linear → Canceled с указанием объясняющего изменения. Никогда не восстанавливай/не переподнимай ресурс, чьё намеренное удаление есть в change feed. Только уверенно НЕОБЪЯСНЁННУЮ аномалию чинишь. Ты фейлишь CLOSED.
 5. Иначе доведи тикет до терминального состояния СВОИМ решением (исправить+смержить, доказать что это не баг, или — только для реального тупика/неоднозначного intent-match — вернуть в Backlog с детальным комментарием).
@@ -340,7 +341,7 @@ export function toolUsesFrom(msg: unknown): Array<{ tool: string; cmd?: string }
  * any failure is captured as an "error" outcome so the cron loop keeps
  * ticking.
  */
-export async function runDispatchSession(reason: string): Promise<RunSummary> {
+export async function runDispatchSession(reason: string, candidate?: SelectedCandidate): Promise<RunSummary> {
   if (busy) {
     throw new Error("runDispatchSession called while busy");
   }
@@ -399,7 +400,8 @@ export async function runDispatchSession(reason: string): Promise<RunSummary> {
     `- intentLookbackHrs = ${config.intentLookbackHrs}h — set since = now − ${config.intentLookbackHrs}h (epoch ms), until = now (epoch ms).\n` +
     `- FAIL OPEN on availability: if curl fails / the service is unreachable, that is NOT evidence of intent — proceed with the normal fix flow. FAIL CLOSED on judgment: if a returned change explains the anomaly, do NOT fix (outcome "intentional").\n`;
 
-  const prompt = `${systemPrompt}${freshnessPolicy}${changeFeedPolicy}${dryRunBanner}\n\n---\n\n${RUN_INSTRUCTION}`;
+  const queueInstructions = `\n\n## MONITOR QUEUE CONTRACT\n${queuePolicy(config.staleClaimMinutes)}\n\n## SELECTED CANDIDATE\n${candidateInstruction(candidate)}`;
+  const prompt = `${systemPrompt}${freshnessPolicy}${changeFeedPolicy}${dryRunBanner}\n\n---\n\n${RUN_INSTRUCTION}${queueInstructions}`;
 
   let output = "";
   let costUsd = 0;

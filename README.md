@@ -130,11 +130,18 @@ the hourly monitor on 2026-07-17.
 
 ## Cost control (poll pre-check)
 
-`dispatcher/src/poller.ts` runs a cheap Linear existence query before spawning the
-LLM agent on each tick. Zero `monitor` candidates → skip the agent entirely
-(`lastPrecheck: skip` on `/status`), saving ~144 empty LLM runs/day. **Fail-open**:
-any pre-check error → spawn the agent as before, so the loop is never blinded. A
-manual `/trigger` bypasses the pre-check.
+`dispatcher/src/poller.ts` reads the Linear queue before starting the agent.
+The shared `dispatcher/src/queue.ts` contract accepts a `monitor` label **or**
+`[Monitor]` title prefix, excludes parent/empty tickets, protects human-held
+`In Progress` tickets, and admits only stale `agent-claimed` reclaims.
+The daemon drains the pages, sorts priority then age, and passes one exact issue
+snapshot to the agent. The agent re-reads that issue before claiming once; it
+does not rediscover a different queue. `/status.lastPrecheck.candidate` identifies
+what was selected.
+
+Zero eligible candidates → skip inference. A manual `/trigger` retains discovery
+for newly filed tickets whose indexing may lag. Linear read failures remain
+**fail-open**, using the same queue contract inside the agent.
 
 ---
 

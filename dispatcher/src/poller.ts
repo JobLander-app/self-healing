@@ -12,7 +12,9 @@
 import * as cron from "node-cron";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { config, LINEAR_AGENT_CLAIMED_LABEL } from "./config";
+import { config } from "./config";
+import { buildQueueFilter, type SelectedCandidate } from "./queue";
+import { readCandidate } from "./queueClient";
 import { isBusy, runDispatchSession } from "./session";
 import { readPause, clearPause, pauseRemainingMs } from "./pause";
 
@@ -26,7 +28,7 @@ let task: cron.ScheduledTask | null = null;
 // WHY: every poll tick used to spawn a full Claude agent run (5–7 turns,
 // ~$0.05–0.11) even when there were ZERO candidate tickets — measured 5
 // consecutive no-work runs on the live VM, ~144 ticks/day of pure subscription
-// burn. One cheap GraphQL call decides whether an agent is worth spawning.
+// burn. A read-only Linear queue scan selects the exact issue before starting an agent.
 //
 // FAIL OPEN: if the key can't be resolved, the request errors/times out, or
 // the response is malformed, we spawn the agent exactly as before. The
@@ -38,6 +40,7 @@ export type PrecheckOutcome = "skip" | "run" | "error";
 export interface PrecheckState {
   at: string;
   result: PrecheckOutcome;
+  candidate?: string;
 }
 
 let lastPrecheck: PrecheckState | null = null;
@@ -83,102 +86,23 @@ async function resolveLinearApiKey(): Promise<string> {
  * filed with the correct prefix but without the label.
  */
 export function buildPrecheckFilter(staleClaimBefore: string): object {
-  return {
-    team: { or: [{ name: { eq: config.linearTeam } }, { key: { eq: config.linearTeam } }] },
-    and: [
-      {
-        // Accept by `monitor` label OR `[Monitor]` title prefix.
-        // Must stay in sync with Step 1 of dispatcher/CLAUDE.md.
-        or: [
-          { labels: { name: { eq: "monitor" } } },
-          { title: { startsWith: "[Monitor]" } },
-        ],
-      },
-      {
-        or: [
-          { state: { name: { in: ["To Do", "Backlog"] } } },
-          {
-            // Stale-claim reclaim: In Progress + agent-claimed + untouched long
-            // enough. The `agent-claimed` label is what makes this decidable —
-            // agent and Owner share one Linear account, so assignee alone cannot
-            // separate "my abandoned claim" from "the Owner is working on this".
-            // Without the label condition this branch greenlights tickets the
-            // agent will decline — JOB-860 cost five such sessions.
-            and: [
-              { state: { name: { eq: "In Progress" } } },
-              { updatedAt: { lt: staleClaimBefore } },
-              { labels: { name: { eq: LINEAR_AGENT_CLAIMED_LABEL } } },
-            ],
-          },
-        ],
-      },
-    ],
-  };
+  return buildQueueFilter(config.linearTeam, staleClaimBefore);
 }
 
 /**
- * Ask Linear whether ANY candidate ticket exists (team from config, label
- * `monitor` OR `[Monitor]` title prefix, state To Do / Backlog / In Progress —
- * the states the agent's pickup logic considers, incl. stale-claim reclaims).
- * `first: 1` — we only need existence, not the list. Never throws; errors map
- * to "error" (fail open).
+ * Select the exact candidate using the same contract sent to the agent. Drain
+ * all pages, then rank eligible tickets deterministically. Never throws; errors
+ * retain the existing fail-open discovery path.
  */
-async function precheckCandidates(): Promise<PrecheckOutcome> {
+async function precheckCandidates(): Promise<{ outcome: PrecheckOutcome; candidate?: SelectedCandidate }> {
   try {
     const key = await resolveLinearApiKey();
-    // config.linearTeam is configured as a team NAME ("JobLander") but could
-    // plausibly be set to the key ("JOB") — match either, so a config style
-    // change can't silently turn every pre-check into a false "skip".
-    // `In Progress` is included ONLY as a stale claim — untouched for longer
-    // than config.staleClaimMinutes — because that is the only In Progress case
-    // the agent will act on (constitution Step 1, stale-claim exception).
-    //
-    // Counting every In Progress ticket made the pre-check strictly coarser than
-    // the agent's own filter, and a pre-check that greenlights work the agent
-    // then declines is worse than no pre-check: it costs a full session to learn
-    // nothing. 2026-07-28: a monitor-labelled ticket sat In Progress after a run
-    // died on the turn cap mid-claim. The pre-check greenlit every tick, each
-    // spawning a session that answered `no-work` for ~$0.10 — 21 consecutive
-    // such runs, ~$14/day against a weekly spend of $38, and it would have run
-    // until someone noticed by hand.
-    const staleClaimBefore = new Date(
-      Date.now() - config.staleClaimMinutes * 60_000,
-    ).toISOString();
-    const filter = buildPrecheckFilter(staleClaimBefore);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
-    let res: Response;
-    try {
-      res = await fetch("https://api.linear.app/graphql", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: key },
-        body: JSON.stringify({
-          query:
-            "query PollerPrecheck($filter: IssueFilter!) { issues(filter: $filter, first: 1) { nodes { identifier } } }",
-          variables: { filter },
-        }),
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-    if (!res.ok) throw new Error(`Linear pre-check HTTP ${res.status}`);
-    const body = (await res.json()) as {
-      data?: { issues?: { nodes?: unknown[] } };
-      errors?: unknown[];
-    };
-    if (body.errors && body.errors.length > 0) {
-      throw new Error(`Linear pre-check GraphQL errors: ${JSON.stringify(body.errors).slice(0, 300)}`);
-    }
-    const nodes = body.data?.issues?.nodes;
-    if (!Array.isArray(nodes)) throw new Error("Linear pre-check: malformed response shape");
-    return nodes.length > 0 ? "run" : "skip";
+    const staleClaimBefore = new Date(Date.now() - config.staleClaimMinutes * 60_000).toISOString();
+    const candidate = await readCandidate({ key, team: config.linearTeam, staleClaimBefore });
+    return candidate ? { outcome: "run", candidate } : { outcome: "skip" };
   } catch (err) {
-    console.error(
-      "[poller] pre-check error (failing OPEN — agent will run):",
-      err instanceof Error ? err.message : err,
-    );
-    return "error";
+    console.error("[poller] pre-check error (failing OPEN — agent will run):", err instanceof Error ? err.message : err);
+    return { outcome: "error" };
   }
 }
 
@@ -207,15 +131,19 @@ export async function pollOnce(reason: string): Promise<{ ran: boolean; note: st
   // (Linear indexing may lag) and it is also the operator fire-drill path.
   // Cron/startup/limit-reset ticks all pre-check. "error" falls through to a
   // normal run (fail open — see the pre-check block above).
+  let candidate: SelectedCandidate | undefined;
   if (reason !== "trigger") {
-    const outcome = await precheckCandidates();
-    lastPrecheck = { at: new Date().toISOString(), result: outcome };
+    const selection = await precheckCandidates();
+    const { outcome } = selection;
+    candidate = selection.candidate;
+    lastPrecheck = { at: new Date().toISOString(), result: outcome, candidate: candidate?.identifier };
     if (outcome === "skip") {
       // Deliberately NOT recordRun — a skipped tick is not a run and must not
       // flood /feed. One concise log line is the whole footprint.
       console.log("[poller] pre-check: no monitor candidates — skipped");
       return { ran: false, note: "precheck-skip" };
     }
+    if (candidate) console.log(`[poller] selected ${candidate.identifier} (reclaim=${candidate.reclaim})`);
     // The pre-check awaited network I/O; a /trigger may have started a run in
     // the meantime. runDispatchSession throws if busy, so re-check here.
     if (isBusy()) {
@@ -224,7 +152,7 @@ export async function pollOnce(reason: string): Promise<{ ran: boolean; note: st
     }
   }
   try {
-    await runDispatchSession(reason);
+    await runDispatchSession(reason, candidate);
     return { ran: true, note: "completed" };
   } catch (err) {
     console.error("[poller] Dispatch session crashed:", err);
