@@ -16,6 +16,7 @@ import { executeWithFallback } from "./fallback";
 import { availableToAttempt, providerOrder, updateProvider } from "./providerState";
 import type { ProviderAttempt } from "./providerTypes";
 import { config } from "./config";
+import { candidateInstruction, queuePolicy, type SelectedCandidate } from "./queue";
 import {
   traceEvent,
   recordRun,
@@ -155,11 +156,12 @@ function loadSystemPrompt(): string {
   );
 }
 
-const RUN_INSTRUCTION = `Это автономный poll-tick claude-code-vm-job-dispatcher.
+function runInstruction(dryRun: boolean): string {
+  return `Это автономный poll-tick claude-code-vm-job-dispatcher.
 
 Выполни ровно ОДИН цикл по своей конституции (CLAUDE.md):
-1. Выбери ОДИН тикет ТОЛЬКО с label "monitor" (To Do, затем Backlog; сортировка Urgent→High→Medium→Low, затем старейший createdAt; пропусти уже In Progress и назначенные на человека). ТИКЕТЫ БЕЗ label "monitor" (фичи/improvement/эпики) — НЕ ТВОИ, не трогай их вообще: авто-merge санкционирован только для monitor-origin.
-2. Заклейми его: переведи в In Progress и назначь на себя ДО любой работы. Если заклеймить нельзя — выйди.
+1. Follow the MONITOR QUEUE CONTRACT and SELECTED CANDIDATE below. A monitor label OR [Monitor] title prefix authorizes pickup; never reject a prefix-only candidate. Use agent-claimed and updatedAt to distinguish an abandoned claim from a human-held ticket, never the assignee.
+2. ${dryRun ? "DRY_RUN: re-read the candidate and investigate read-only. Report the ticket you WOULD claim; do not change its state, assignee, labels, or comments." : "Re-read the candidate and claim it once before investigation: set In Progress, assign yourself, and add agent-claimed while preserving existing labels. If the snapshot changed or the claim fails, exit no-work."}
 3. FRESHNESS GATE (Step 3.5 в конституции): тикет — это ГИПОТЕЗА о баге на момент создания, а не факт на момент починки. ПЕРЕД тем как чинить — заново подтверди, что баг ещё живой В ТЕКУЩЕМ коде (воспроизведи сигнатуру в свежем окне; проверь не пофикшено ли уже поздним деплоем/коммитом). Не воспроизводится → "stale". Уже решено другим коммитом/деплоем → "fixed-elsewhere". Не чини то, что не смог воспроизвести.
 4. INTENT GATE (Step 3.6 в конституции): даже если баг воспроизводится — сначала спроси change feed (см. блок "CHANGE FEED" ниже), не объясняется ли аномалия НАМЕРЕННЫМ изменением прода (декоммишен / деплой / cutover). Изменение объясняет её → НЕ чини, outcome "intentional", Linear → Canceled с указанием объясняющего изменения. Никогда не восстанавливай/не переподнимай ресурс, чьё намеренное удаление есть в change feed. Только уверенно НЕОБЪЯСНЁННУЮ аномалию чинишь. Ты фейлишь CLOSED.
 5. Иначе доведи тикет до терминального состояния СВОИМ решением (исправить+смержить, доказать что это не баг, или — только для реального тупика/неоднозначного intent-match — вернуть в Backlog с детальным комментарием).
@@ -176,6 +178,18 @@ outcome:
 - "intentional" — аномалия объясняется намеренным изменением из change feed (Step 3.6), Linear → Canceled с указанием изменения, БЕЗ фикса
 - "backlogged" — честный тупик ИЛИ неоднозначный intent-match для человека, вернул в Backlog с деталями (единственный не-терминальный выход)
 - "no-work" — нечего брать в этот тик`;
+}
+
+export function buildDispatchPrompt(input: {
+  systemPrompt: string; freshnessPolicy: string; changeFeedPolicy: string;
+  dryRunBanner: string; staleClaimMinutes: number; dryRun: boolean; candidate?: SelectedCandidate;
+}): string {
+  const queueInstructions = `\n\n## MONITOR QUEUE CONTRACT\n${queuePolicy(input.staleClaimMinutes, input.dryRun)}\n\n## SELECTED CANDIDATE\n${candidateInstruction(input.candidate, input.dryRun)}`;
+  const override = input.dryRun
+    ? "\n\nFINAL DRY_RUN OVERRIDE: do not claim, assign, add labels, comment, push, merge, or write known-errors.json. Investigate locally and report what you WOULD do. This overrides every mutation instruction above."
+    : "";
+  return `${input.systemPrompt}${input.freshnessPolicy}${input.changeFeedPolicy}\n\n---\n\n${runInstruction(input.dryRun)}${queueInstructions}${input.dryRunBanner}${override}`;
+}
 
 interface DispatchResult {
   outcome: RunOutcome;
@@ -347,7 +361,7 @@ export function toolUsesFrom(msg: unknown): Array<{ tool: string; cmd?: string }
  * any failure is captured as an "error" outcome so the cron loop keeps
  * ticking.
  */
-export async function runDispatchSession(reason: string): Promise<RunSummary> {
+export async function runDispatchSession(reason: string, candidate?: SelectedCandidate): Promise<RunSummary> {
   if (busy) {
     throw new Error("runDispatchSession called while busy");
   }
@@ -406,7 +420,8 @@ export async function runDispatchSession(reason: string): Promise<RunSummary> {
     `- intentLookbackHrs = ${config.intentLookbackHrs}h — set since = now − ${config.intentLookbackHrs}h (epoch ms), until = now (epoch ms).\n` +
     `- If the feed returns HTTP 503, missing/stale source coverage, or cannot be reached, continue read-only investigation and repair feed/credential reachability itself. Do not create/delete/restore resources, roll infrastructure back, or reverse potential intentional changes without fresh corroborating intent evidence. Fresh authoritative GitHub, GCP audit and Linear evidence may substitute for the unavailable feed; otherwise backlogged with the explicit coverage failure. If a returned change explains the anomaly, do NOT fix (outcome "intentional").\n`;
 
-  const prompt = `${systemPrompt}${freshnessPolicy}${changeFeedPolicy}${dryRunBanner}\n\n---\n\n${RUN_INSTRUCTION}`;
+  const prompt = buildDispatchPrompt({ systemPrompt, freshnessPolicy, changeFeedPolicy, dryRunBanner,
+    staleClaimMinutes: config.staleClaimMinutes, dryRun: config.dryRun, candidate });
 
   let output = "";
   let costUsd: number | null = null;

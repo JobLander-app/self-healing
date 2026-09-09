@@ -75,18 +75,21 @@ A ticket is a **valid `monitor`-origin candidate** if it satisfies **either**:
 
 Any ticket that satisfies neither condition is out of scope — do not touch it.
 
-**Build your candidate pool from three passes:**
-1. `mcp__linear__list_issues` (team `JobLander`, `labels: ["monitor"]`) for
-   states `To Do` and `Backlog` — the normal label-filtered path.
-2. `mcp__linear__search_issues` with query `"[Monitor]"` (team `JobLander`) —
-   catches title-prefix tickets without the label. Keep only results in `To Do`
-   or `Backlog` state; drop any identifier already found in pass 1 (deduplicate).
-3. `mcp__linear__list_issues` (team `JobLander`, `state: "In Progress"`,
-   `labels: ["monitor"]`) — stale-claim reclaim only. From this set keep
-   **only** tickets that have the `agent-claimed` label AND `updatedAt` older
-   than ~`staleClaimMinutes` ago; discard the rest (a human may be holding In
-   Progress tickets without `agent-claimed`). Drop identifiers already in passes
-   1–2 (deduplicate).
+**The daemon normally selects the exact candidate before starting your session.**
+Read the injected `MONITOR QUEUE CONTRACT` and `SELECTED CANDIDATE`. Re-fetch that
+issue and verify its `updatedAt` still matches the snapshot before claiming it.
+If it changed or no longer qualifies, return `no-work`; never switch tickets in
+this run. Prefix-only tickets are fully eligible, including stale prefix-only
+claims carrying `agent-claimed`.
+
+**Only when no candidate snapshot is available** (manual trigger or Linear
+pre-check failure), discover one issue with the same contract:
+1. Collect `monitor`-labelled issues in `To Do` and `Backlog`.
+2. Search `[Monitor]` title-prefix issues in those states, including issues without
+   the label. Deduplicate by id.
+3. Collect `In Progress` issues from both paths and keep only those with
+   `agent-claimed` and `updatedAt` older than the injected `staleClaimMinutes`.
+   Never infer ownership from the assignee. Deduplicate by id.
 
 Merge and sort the combined pool (below). Every Linear action named below —
 `update_issue` (claim, transition, assign), `create_comment` (comment) — is the
@@ -118,7 +121,7 @@ not handle the key.
   consecutive ticks then declined it as "the human owner's", and only the sixth
   reclaimed and fixed it — 1h45m late, on identical data each time. The label
   makes this a lookup instead of a guess.
-- Parent epics.
+- Parent tickets with children (including epics).
 - Issues with no usable description.
 
 **Sort** the survivors: priority **Urgent → High → Medium → Low**, then
@@ -132,7 +135,7 @@ exit cleanly. Do not invent work.
 **Before any investigation or code:**
 1. `update_issue` → state **`In Progress`**.
 2. Assign the issue to **yourself** (the agent's Linear user).
-3. **Add the `agent-claimed` label.** `labelIds` takes **UUIDs, not names** —
+3. **Add the `agent-claimed` label in the same update as state and assignee.** `labelIds` takes **UUIDs, not names** —
    passing the string `"agent-claimed"` is rejected and your claim silently ends
    up unmarked, which is the exact failure this label exists to prevent. Use:
 
@@ -161,7 +164,7 @@ stale label does is lie about who holds the ticket — and on a `backlogged`
 ticket that lie is aimed squarely at your future self, which will read it as
 "someone is on this" when nobody is.
 
-This claim is the *only* concurrency guard against overlapping ticks. If the
+The daemon permits only one session at a time. This claim is the durable ownership marker. If the
 claim fails (e.g. someone claimed it in the same instant, or Linear write
 errors), **do not proceed** — emit `[DISPATCH_RESULT]` with
 `outcome:"no-work"` and exit. (In `DRY_RUN`, print that you WOULD claim it and
