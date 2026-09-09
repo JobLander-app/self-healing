@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { candidateInstruction, isQueueCandidate, queuePolicy, selectCandidate, type QueueIssue } from "../src/queue";
 import { readCandidate } from "../src/queueClient";
+import { buildDispatchPrompt } from "../src/session";
 
 const CUTOFF = "2026-09-09T12:00:00Z";
 function issue(overrides: Partial<QueueIssue> = {}): QueueIssue {
@@ -92,4 +93,18 @@ test("a confirmed queue containing only protected tickets produces no candidate"
   assert.equal(await readCandidate({ key: "test", team: "JobLander", staleClaimBefore: CUTOFF,
     fetchImpl: async () => response([issue({ state: { name: "In Progress" } })]),
   }), null);
+});
+
+
+test("the full dry-run prompt ends with the read-only override and suppresses queue claim commands", () => {
+  const input = { systemPrompt: "Constitution", freshnessPolicy: "Freshness", changeFeedPolicy: "Changes",
+    staleClaimMinutes: 30, candidate: selectCandidate([issue()], CUTOFF)!, dryRunBanner: "READ ONLY BANNER" };
+  const dry = buildDispatchPrompt({ ...input, dryRun: true });
+  assert.doesNotMatch(dry, /Claim once: set In Progress|Re-read the candidate and claim it once|yours to reclaim/);
+  assert.match(dry, /WOULD claim/);
+  assert.ok(dry.indexOf("READ ONLY BANNER") > dry.indexOf("SELECTED CANDIDATE"));
+  assert.ok(dry.endsWith("This overrides every mutation instruction above."));
+  const live = buildDispatchPrompt({ ...input, dryRun: false, dryRunBanner: "" });
+  assert.match(live, /Claim once: set In Progress/);
+  assert.doesNotMatch(live, /FINAL DRY_RUN OVERRIDE/);
 });
