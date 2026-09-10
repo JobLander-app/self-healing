@@ -2,8 +2,23 @@
 export interface WatchState {
   /** Consecutive bad samples in the current (potential) incident. */
   count: number;
-  /** Whether this incident has already paged (exactly-once dedup). */
+  /** Whether this incident has crossed the paging threshold (delivery lives in outbox). */
   paged: boolean;
+  /** Durable per-incident outbox. Completed actions are never repeated. */
+  outbox?: WatchIncident[];
+}
+
+export type DeliveryAction = "page" | "ticket" | "announcement" | "trigger" | "recovery";
+export interface WatchIncident {
+  id: string;
+  status: string;
+  httpCode: string;
+  regions: string;
+  recovered: boolean;
+  delivered: Partial<Record<DeliveryAction, boolean>>;
+  attempts: Partial<Record<DeliveryAction, number>>;
+  retryAt: Partial<Record<DeliveryAction, number>>;
+  ticketIdentifier?: string;
 }
 
 /**
