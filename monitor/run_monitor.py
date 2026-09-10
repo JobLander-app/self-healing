@@ -262,6 +262,8 @@ def session_error(output):
     if marker >= 0:
         try:
             outcome, _ = json.JSONDecoder().raw_decode(output[marker + len("[SESSION_END]"):].strip())
+            if outcome.get("type") != "monitor":
+                return "monitor escalation returned missing or invalid session type"
             if outcome.get("status") == "success":
                 return None
             reason = outcome.get("reason")
@@ -317,11 +319,14 @@ def run_session(config):
         finally:
             stop_session(process)
     result = parse_provider_result(log_file)
-    if failure:
-        result["error"] = failure
+    errors = [error for error in (result.get("error"), failure) if error]
     marker_error = session_error(result["output"])
-    if process.returncode or marker_error:
-        result["error"] = result.get("error") or marker_error or "monitor provider exited unsuccessfully"
+    # Keep explicit agent diagnostics alongside adapter/launcher failures. An
+    # absent marker adds no useful detail to an already-known transport failure.
+    if marker_error and (marker_error != "monitor escalation did not report success" or not errors):
+        errors.append(marker_error)
+    result["error"] = "; ".join(dict.fromkeys(errors)) or (
+        "monitor provider exited unsuccessfully" if process.returncode else None)
     actions_path = runtime / "linear-actions.json"
     try:
         shutil.copy2(actions_path, log_file.with_suffix(".actions.json"))
