@@ -464,6 +464,20 @@ async function handleFailure(failure: DepResult): Promise<void> {
   } catch (err) { console.error("[healthcheck] notification failed:", err); }
 }
 
+/** Notification storage/transport failures must not stop independent alerts.
+ * healthAlert retains pending delivery for the existing retry scheduler. */
+export async function notifyHealthcheckRecovery(results: DepResult[], actions = {
+  recovery: healthAlert,
+  readiness: alertProviderReadiness,
+}): Promise<void> {
+  for (const healthy of results.filter(r => r.healthy)) {
+    try { await actions.recovery(`dependency:${healthy.dep}`, false, `✅ Dependency ${healthy.dep} recovered: real probe succeeded.`); }
+    catch (err) { console.error(`[healthcheck] ${healthy.dep} recovery notification failed:`, err); }
+  }
+  try { await actions.readiness(); }
+  catch (err) { console.error("[healthcheck] provider readiness notification failed:", err); }
+}
+
 // ---------------------------------------------------------------------------
 // Entry points.
 // ---------------------------------------------------------------------------
@@ -491,8 +505,7 @@ export async function runHealthcheck(): Promise<HealthcheckSnapshot> {
   );
 
   for (const failure of failures) await handleFailure(failure);
-  for (const healthy of results.filter(r => r.healthy)) await healthAlert(`dependency:${healthy.dep}`, false, `✅ Dependency ${healthy.dep} recovered: real probe succeeded.`);
-  await alertProviderReadiness();
+  await notifyHealthcheckRecovery(results);
 
   return snapshot;
 }

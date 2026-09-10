@@ -43,7 +43,10 @@ export function isThrottleError(msg: string): boolean {
  */
 export function parseResetTime(msg: string, now: Date): Date | null {
   const iso = msg.match(/(?:resets?|retry(?:_at| at))[:\s]+(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/i);
-  if (iso && Number.isFinite(Date.parse(iso[1]))) return new Date(Date.parse(iso[1]) + 120_000);
+  if (iso && Number.isFinite(Date.parse(iso[1]))) {
+    const reset = new Date(Date.parse(iso[1]) + 120_000);
+    return reset.getTime() > now.getTime() ? reset : null;
+  }
   const m = msg.match(/resets?\s+(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})(?:,?\s+(\d{4}))?,?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(UTC\))?/i);
   if (!m) return null;
   let hour = Number(m[4]);

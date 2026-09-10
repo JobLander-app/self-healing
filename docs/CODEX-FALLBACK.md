@@ -60,8 +60,12 @@ sudo -u joblander -H env CODEX_HOME=/home/joblander/.codex-shl \
 ```
 
 This injects a Claude quota response and invokes real Codex with a no-tools
-probe. It uses temporary observability state, never starts the daemon or claims
-an incident, and aborts after 90 seconds.
+probe. The smoke-specific runner uses a temporary HOME/cwd, the read-only
+sandbox and disabled shell/app/delegation tools. It drops cloud credentials and
+ignores user config/rules while keeping the explicit subscription auth home
+for in-place token refresh. These restrictions apply only to the smoke; real
+repair turns keep their authorized tools. It uses temporary observability state,
+never starts the daemon or claims an incident, and aborts after 90 seconds.
 
 On 2026-09-09 at 18:55 UTC this check passed on the VM in 7.8 seconds: real
 Codex reported input 15,378, cached input 12,160, cache writes 0 and output 12.
