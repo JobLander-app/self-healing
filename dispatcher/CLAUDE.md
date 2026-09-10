@@ -75,23 +75,27 @@ A ticket is a **valid `monitor`-origin candidate** if it satisfies **either**:
 
 Any ticket that satisfies neither condition is out of scope — do not touch it.
 
-**The daemon normally selects the exact candidate before starting your session.**
+**HARD SCOPE: fix current bugs, never clean up old backlog.** A ticket's
+`createdAt` must be a valid timestamp between the current UTC time minus exactly
+7 days and the current time, inclusive. Older, future-dated, or malformed dates
+are forbidden. Priority, `updatedAt`, active state, `agent-claimed`, manual
+triggers and provider fallback do not override this limit. Leave out-of-scope
+tickets untouched: do not claim, investigate, comment, close, or edit them.
+This immutable scope gate is separate from the live-bug freshness gate below.
+
+**The daemon must select the exact eligible candidate before starting your session.**
 Read the injected `MONITOR QUEUE CONTRACT` and `SELECTED CANDIDATE`. Re-fetch that
-issue and verify its `updatedAt` still matches the snapshot before claiming it.
-If it changed or no longer qualifies, return `no-work`; never switch tickets in
-this run. Prefix-only tickets are fully eligible, including stale prefix-only
-claims carrying `agent-claimed`.
+issue and verify its `createdAt` and `updatedAt` still match the snapshot and its
+age still satisfies the seven-day limit before claiming. If it changed or no
+longer qualifies, return `no-work`; never switch tickets in this run.
+Prefix-only tickets qualify within this same age limit, including stale
+prefix-only claims carrying `agent-claimed`.
 
-**Only when no candidate snapshot is available** (manual trigger or Linear
-pre-check failure), discover one issue with the same contract:
-1. Collect `monitor`-labelled issues in `To Do` and `Backlog`.
-2. Search `[Monitor]` title-prefix issues in those states, including issues without
-   the label. Deduplicate by id.
-3. Collect `In Progress` issues from both paths and keep only those with
-   `agent-claimed` and `updatedAt` older than the injected `staleClaimMinutes`.
-   Never infer ownership from the assignee. Deduplicate by id.
+**No candidate snapshot means STOP.** Manual triggers, startup and retries use
+this same deterministic precheck. A failed Linear read must never authorize
+agent discovery or inference. Do not search for another ticket yourself.
 
-Merge and sort the combined pool (below). Every Linear action named below —
+Every Linear action named below —
 `update_issue` (claim, transition, assign), `create_comment` (comment) — is the
 corresponding **vendored `mcp__linear__*` tool** (`mcp__linear__update_issue`,
 `mcp__linear__create_comment`, …), NOT a raw GraphQL call. The linear MCP
@@ -124,7 +128,7 @@ not handle the key.
 - Parent tickets with children (including epics).
 - Issues with no usable description.
 
-**Sort** the survivors: priority **Urgent → High → Medium → Low**, then
+**Sort** only survivors within the seven-day window: priority **Urgent → High → Medium → Low**, then
 **oldest `createdAt` first**. Pick the **single** top ticket.
 
 If nothing qualifies: emit `[DISPATCH_RESULT] {"outcome":"no-work",...}` and
@@ -132,7 +136,7 @@ exit cleanly. Do not invent work.
 
 ## Step 2 — CLAIM it (concurrency guard, do this FIRST)
 
-**Before any investigation or code:**
+**Before any investigation or code, recheck the exact candidate and its seven-day age limit:**
 1. `update_issue` → state **`In Progress`**.
 2. Assign the issue to **yourself** (the agent's Linear user).
 3. **Add the `agent-claimed` label in the same update as state and assignee.** `labelIds` takes **UUIDs, not names** —
@@ -205,7 +209,7 @@ have stopped occurring, or point at code that was refactored away. **Never fix a
 bug you cannot reproduce live in the current code.** Run this gate before any fix
 work in Step 4.
 
-**Rigor scales with age** (thresholds injected at run time under "FRESHNESS
+For tickets admitted by the hard seven-day scope gate, **rigor scales with age** (thresholds injected at run time under "FRESHNESS
 THRESHOLDS" — `staleAgeHrs`, `freshnessWindowHrs`):
 - **Ticket younger than `staleAgeHrs`:** light check — confirm the signature has
   appeared at least once since the ticket's own *last seen*.

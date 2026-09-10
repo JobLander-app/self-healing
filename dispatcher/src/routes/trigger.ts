@@ -13,11 +13,11 @@
  * Empty triggerToken ⇒ all triggers rejected (fail closed).
  */
 
+import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { TriggerReceipts } from "../triggerReceipts";
 import { Router, Request, Response } from "express";
 import { config } from "../config";
-import { isBusy } from "../session";
 import { pollOnce } from "../poller";
 
 const router = Router();
@@ -40,33 +40,22 @@ router.post("/", (req: Request, res: Response) => {
     return;
   }
 
-  const key = req.header("Idempotency-Key");
-  if (key !== undefined) {
-    if (!/^[A-Za-z0-9:_-]{1,160}$/.test(key)) {
-      res.status(400).json({ error: "invalid idempotency key" });
-      return;
-    }
-    try {
-      const created = receipts.accept(key);
-      res.status(created ? 202 : 200).json({ accepted: true, deduped: !created, note: "durable wakeup queued" });
-      setImmediate(drain);
-    } catch (error) {
-      console.error("[trigger] unable to persist wakeup:", error);
-      res.status(503).json({ error: "unable to persist wakeup; retry with same key" });
-    }
+  const suppliedKey = req.header("Idempotency-Key");
+  if (suppliedKey !== undefined && !/^[A-Za-z0-9:_-]{1,160}$/.test(suppliedKey)) {
+    res.status(400).json({ error: "invalid idempotency key" });
     return;
   }
-
-  if (isBusy()) {
-    res.status(200).json({ accepted: true, deduped: true, note: "dispatch already running" });
-    return;
+  // Manual wakeups also survive failed queue reads, busy sessions and restarts.
+  // Callers wanting HTTP-retry deduplication must supply their own stable key.
+  const key = suppliedKey ?? `manual:${randomUUID()}`;
+  try {
+    const created = receipts.accept(key);
+    res.status(created ? 202 : 200).json({ accepted: true, deduped: !created, note: "durable wakeup queued" });
+    setImmediate(drain);
+  } catch (error) {
+    console.error("[trigger] unable to persist wakeup:", error);
+    res.status(503).json({ error: "unable to persist wakeup; retry with same key" });
   }
-
-  // Fire and forget — don't hold the HTTP request open for a multi-minute
-  // agent session.
-  pollOnce("trigger").catch((err) => console.error("[trigger] poll error:", err));
-
-  res.status(202).json({ accepted: true, note: "dispatch tick started" });
 });
 
 export { router as triggerRouter };

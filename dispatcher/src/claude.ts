@@ -15,13 +15,14 @@ export function claudeResultError(m: Record<string, any>): string | null {
   return [m.result, ...(Array.isArray(m.errors) ? m.errors : [])].filter(x => typeof x === "string").join("\n") || `Claude result: ${m.subtype ?? "error"}`;
 }
 export async function executeClaude(input: {
-  id: string; prompt: string; abortController: AbortController;
+  id: string; prompt: string; beforeStart?: () => void; abortController: AbortController;
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   onMessage: (m: unknown) => void;
 }, queryProvider: typeof query = query): Promise<AttemptResult> {
   const attempt: ProviderAttempt = { id: input.id, provider: "claude", model: config.claudeModel, startedAt: new Date().toISOString(), finishedAt: "", status: "failed", usage: unknownUsage(), estimatedCostUsd: null, costSource: "unavailable", turns: 0 };
   let output = "", error = "", gotResult = false, toolsUsed = false;
   const issueIds = new Set<string>();
+  input.beforeStart?.();
   try {
     for await (const msg of queryProvider({ prompt: input.prompt, options: {
       model: config.claudeModel, maxTurns: config.claudeMaxTurns,
