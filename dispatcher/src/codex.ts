@@ -43,7 +43,7 @@ export function codexTool(event: Record<string, any>): { tool: string } | null {
   return null;
 }
 interface CodexInput {
-  id: string; prompt: string; model: string; entries: Record<string, string>;
+  id: string; prompt: string; beforeStart?: () => void; model: string; entries: Record<string, string>;
   signal: AbortSignal; onTool: (use: { tool: string }) => void;
 }
 export function executeCodex(input: CodexInput): Promise<AttemptResult> {
@@ -73,6 +73,7 @@ async function executeCodexTransport(input: CodexInput, launch: { args: string[]
   let output = "", stderr = "", buffer = "", failure = "", completed = false, toolsUsed = false, transportFailed = false;
   const issueIds = new Set<string>();
   const tracedItems = new Set<string>();
+  input.beforeStart?.();
   const child = spawn(config.codexBin, launch.args, { env: launch.env, cwd: launch.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
   const kill = () => { if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* exited */ } } };
   const abort = () => { failure = "watchdog: Codex run aborted"; kill(); };

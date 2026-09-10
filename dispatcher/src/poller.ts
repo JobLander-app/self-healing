@@ -14,13 +14,13 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { config } from "./config";
 import { isDeploymentInProgress } from "./deployment";
-import { buildQueueFilter, type SelectedCandidate } from "./queue";
+import { buildQueueFilter, CandidateEligibilityError, type SelectedCandidate } from "./queue";
 import { readCandidate } from "./queueClient";
 import { isBusy, runDispatchSession } from "./session";
 import { accountingStatus } from "./accountingState";
 import { hydrateFromDisk } from "./trace";
 import { alertAccounting } from "./healthAlerts";
-import { providerOrder, availableToAttempt, nextProviderRetry } from "./providerState";
+import { providerOrder, availableToAttempt, nextProviderRetry, safeError } from "./providerState";
 
 const execFileAsync = promisify(execFile);
 
@@ -34,10 +34,8 @@ let task: cron.ScheduledTask | null = null;
 // consecutive no-work runs on the live VM, ~144 ticks/day of pure subscription
 // burn. A read-only Linear queue scan selects the exact issue before starting an agent.
 //
-// FAIL OPEN: if the key can't be resolved, the request errors/times out, or
-// the response is malformed, we spawn the agent exactly as before. The
-// pre-check may only ever SAVE money — it must never make the loop blind to
-// real work. A confirmed-empty result ("skip") is the only path that skips.
+// FAIL CLOSED: no exact eligible ticket means no inference, including manual
+// triggers. Failed reads remain observable and durable wakeups retry later.
 // ---------------------------------------------------------------------------
 
 export type PrecheckOutcome = "skip" | "run" | "error";
@@ -45,6 +43,7 @@ export interface PrecheckState {
   at: string;
   result: PrecheckOutcome;
   candidate?: string;
+  error?: string;
 }
 
 let lastPrecheck: PrecheckState | null = null;
@@ -95,18 +94,19 @@ export function buildPrecheckFilter(staleClaimBefore: string): object {
 
 /**
  * Select the exact candidate using the same contract sent to the agent. Drain
- * all pages, then rank eligible tickets deterministically. Never throws; errors
- * retain the existing fail-open discovery path.
+ * all pages, then rank eligible recent tickets deterministically. Read failures
+ * block inference and remain visible through status and precheck metrics.
  */
-async function precheckCandidates(): Promise<{ outcome: PrecheckOutcome; candidate?: SelectedCandidate }> {
+async function precheckCandidates(): Promise<{ outcome: PrecheckOutcome; candidate?: SelectedCandidate; error?: string }> {
   try {
     const key = await resolveLinearApiKey();
     const staleClaimBefore = new Date(Date.now() - config.staleClaimMinutes * 60_000).toISOString();
     const candidate = await readCandidate({ key, team: config.linearTeam, staleClaimBefore });
     return candidate ? { outcome: "run", candidate } : { outcome: "skip" };
   } catch (err) {
-    console.error("[poller] pre-check error (failing OPEN — agent will run):", err instanceof Error ? err.message : err);
-    return { outcome: "error" };
+    const error = safeError(err instanceof Error ? err.message : String(err));
+    console.error("[poller] pre-check error (failing CLOSED — no inference):", error);
+    return { outcome: "error", error };
   }
 }
 
@@ -128,36 +128,31 @@ export async function pollOnce(reason: string): Promise<{ ran: boolean; note: st
   if (!providerOrder().some(p => availableToAttempt(p))) {
     return { ran: false, note: "all providers cooling down" };
   }
-  // Cheap Linear pre-check before spawning the (expensive) agent. Manual
-  // /trigger BYPASSES it: a trigger means the watcher just filed a ticket
-  // (Linear indexing may lag) and it is also the operator fire-drill path.
-  // Cron/startup/provider-retry ticks all pre-check. "error" falls through to a
-  // normal run (fail open — see the pre-check block above).
-  let candidate: SelectedCandidate | undefined;
-  if (reason !== "trigger") {
-    const selection = await precheckCandidates();
-    const { outcome } = selection;
-    candidate = selection.candidate;
-    lastPrecheck = { at: new Date().toISOString(), result: outcome, candidate: candidate?.identifier };
-    if (outcome === "skip") {
-      // Deliberately NOT recordRun — a skipped tick is not a run and must not
-      // flood /feed. One concise log line is the whole footprint.
-      console.log("[poller] pre-check: no monitor candidates — skipped");
-      return { ran: false, note: "precheck-skip" };
-    }
-    if (candidate) console.log(`[poller] selected ${candidate.identifier} (reclaim=${candidate.reclaim})`);
-    // The pre-check awaited network I/O; a /trigger may have started a run in
-    // the meantime. runDispatchSession throws if busy, so re-check here.
-    if (isBusy()) {
-      console.log(`[poller] Skipping tick (reason: ${reason}) — became busy during pre-check`);
-      return { ran: false, note: "busy" };
-    }
+  // Every wakeup uses the same exact-candidate, seven-day, fail-closed gate.
+  const selection = await precheckCandidates();
+  const { outcome, candidate, error } = selection;
+  lastPrecheck = { at: new Date().toISOString(), result: outcome, candidate: candidate?.identifier, error };
+  if (outcome === "error") return { ran: false, note: "precheck-error" };
+  if (outcome === "skip") {
+    console.log("[poller] pre-check: no eligible monitor tickets created within 7 days — skipped");
+    return { ran: false, note: "precheck-skip" };
   }
+  if (candidate) console.log(`[poller] selected ${candidate.identifier} (createdAt=${candidate.createdAt}, reclaim=${candidate.reclaim})`);
+  // Recheck concurrency/deployment after the awaited queue read.
+  if (isBusy()) return { ran: false, note: "busy" };
   if (isDeploymentInProgress()) return { ran: false, note: "deploying" };
   try {
-    await runDispatchSession(reason, candidate);
-    return { ran: true, note: "completed" };
+    const summary = await runDispatchSession(reason, candidate);
+    // A failed attempt must not acknowledge a durable wakeup as completed.
+    return summary.outcome === "error"
+      ? { ran: false, note: "session-error" }
+      : { ran: true, note: "completed" };
   } catch (err) {
+    if (err instanceof CandidateEligibilityError) {
+      lastPrecheck = { at: new Date().toISOString(), result: "error", candidate: candidate?.identifier, error: err.message };
+      console.error("[poller] candidate refused at provider boundary:", err.message);
+      return { ran: false, note: "precheck-error" };
+    }
     console.error("[poller] Dispatch session crashed:", err);
     return { ran: false, note: err instanceof Error ? err.message : String(err) };
   }

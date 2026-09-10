@@ -20,6 +20,7 @@ export function handoverPrompt(prompt: string, previous: AttemptResult, purpose:
 export async function executeWithFallback(input: {
   providers: Provider[]; prompt: string; signal: AbortSignal;
   purpose?: "dispatch" | "monitor";
+  allowedIssueIds?: readonly string[];
   canAttempt: (p: Provider) => boolean;
   execute: (p: Provider, prompt: string) => Promise<AttemptResult>;
   record: (attempt: ProviderAttempt) => void;
@@ -32,6 +33,9 @@ export async function executeWithFallback(input: {
     const result = await input.execute(provider, prompt);
     results.push(result);
     input.record(result.attempt);
+    if (input.allowedIssueIds && result.issueIds.some(id => !input.allowedIssueIds!.includes(id))) {
+      return { results, output: result.output, error: "Provider claimed outside the exact selected candidate; refusing continuation" };
+    }
     if (result.attempt.status === "completed") return { results, output: result.output, error: null };
     if (!fallbackAllowed(result, input.purpose)) break;
     prompt = handoverPrompt(input.prompt, result, input.purpose);

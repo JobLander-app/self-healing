@@ -134,18 +134,29 @@ the hourly monitor on 2026-07-17.
 
 ## Cost control (poll pre-check)
 
-`dispatcher/src/poller.ts` reads the Linear queue before starting the agent.
-The shared `dispatcher/src/queue.ts` contract accepts a `monitor` label **or**
-`[Monitor]` title prefix, excludes parent/empty tickets, protects human-held
-`In Progress` tickets, and admits only stale `agent-claimed` reclaims.
-The daemon drains the pages, sorts priority then age, and passes one exact issue
-snapshot to the agent. The agent re-reads that issue before claiming once; it
-does not rediscover a different queue. `/status.lastPrecheck.candidate` identifies
-what was selected.
+`dispatcher/src/poller.ts` reads the Linear queue before every wakeup, including
+manual `/trigger`, startup, cron and provider retry. **A ticket must have a valid
+`createdAt` within the last 7 days, inclusive, and never in the future.** This is
+a hard limit with no configuration override: priority, recent `updatedAt`, active
+state and stale agent claims cannot admit older tickets. Old backlog is left
+untouched; this dispatcher fixes current bugs.
 
-Zero eligible candidates → skip inference. A manual `/trigger` retains discovery
-for newly filed tickets whose indexing may lag. Linear read failures remain
-**fail-open**, using the same queue contract inside the agent.
+The shared `dispatcher/src/queue.ts` contract also requires a `monitor` label
+**or** `[Monitor]` title prefix, excludes parent/empty tickets, protects human-held
+`In Progress` tickets, and admits only stale `agent-claimed` reclaims. The age
+window is sent to Linear as a server filter and checked locally after pagination.
+Only eligible recent tickets are ranked by priority then age. One exact issue
+snapshot (including `createdAt`) is passed to the agent, which re-reads it before
+claiming. Session entry and each Claude/Codex provider start recheck the hard age
+limit against the current clock, including fallback after an earlier attempt.
+
+Empty eligible queue or failed/incomplete Linear read → **zero inference**. No
+agent discovery fallback is allowed. `/status.lastPrecheck` exposes the outcome,
+selected candidate and any error; the existing precheck Prometheus metric also
+reports errors. All accepted manual triggers are durable (provide
+`Idempotency-Key` for HTTP retry deduplication); failed prechecks remain pending
+for the next drain/restart and only a successful run or confirmed empty queue
+acknowledges them.
 
 ---
 

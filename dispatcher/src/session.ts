@@ -17,7 +17,7 @@ import { executeWithFallback } from "./fallback";
 import { availableToAttempt, providerOrder, updateProvider } from "./providerState";
 import type { ProviderAttempt } from "./providerTypes";
 import { config } from "./config";
-import { candidateInstruction, queuePolicy, type SelectedCandidate } from "./queue";
+import { assertSelectedCandidate, CandidateEligibilityError, candidateInstruction, queuePolicy, type SelectedCandidate } from "./queue";
 import {
   traceEvent,
   recordRun,
@@ -161,7 +161,7 @@ function runInstruction(dryRun: boolean): string {
   return `Это автономный poll-tick claude-code-vm-job-dispatcher.
 
 Выполни ровно ОДИН цикл по своей конституции (CLAUDE.md):
-1. Follow the MONITOR QUEUE CONTRACT and SELECTED CANDIDATE below. A monitor label OR [Monitor] title prefix authorizes pickup; never reject a prefix-only candidate. Use agent-claimed and updatedAt to distinguish an abandoned claim from a human-held ticket, never the assignee.
+1. Follow the MONITOR QUEUE CONTRACT and SELECTED CANDIDATE below. Only tickets with valid createdAt within the last 7 days (never future dates) are authorized. No exception for priority, active/stale claims, trigger, or fallback. A monitor label OR [Monitor] title prefix is also required; never reject a prefix-only candidate. Use agent-claimed and updatedAt to distinguish an abandoned claim from a human-held ticket, never the assignee.
 2. ${dryRun ? "DRY_RUN: re-read the candidate and investigate read-only. Report the ticket you WOULD claim; do not change its state, assignee, labels, or comments." : "Re-read the candidate and claim it once before investigation: set In Progress, assign yourself, and add agent-claimed while preserving existing labels. If the snapshot changed or the claim fails, exit no-work."}
 3. FRESHNESS GATE (Step 3.5 в конституции): тикет — это ГИПОТЕЗА о баге на момент создания, а не факт на момент починки. ПЕРЕД тем как чинить — заново подтверди, что баг ещё живой В ТЕКУЩЕМ коде (воспроизведи сигнатуру в свежем окне; проверь не пофикшено ли уже поздним деплоем/коммитом). Не воспроизводится → "stale". Уже решено другим коммитом/деплоем → "fixed-elsewhere". Не чини то, что не смог воспроизвести.
 4. INTENT GATE (Step 3.6 в конституции): даже если баг воспроизводится — сначала спроси change feed (см. блок "CHANGE FEED" ниже), не объясняется ли аномалия НАМЕРЕННЫМ изменением прода (декоммишен / деплой / cutover). Изменение объясняет её → НЕ чини, outcome "intentional", Linear → Canceled с указанием объясняющего изменения. Никогда не восстанавливай/не переподнимай ресурс, чьё намеренное удаление есть в change feed. Только уверенно НЕОБЪЯСНЁННУЮ аномалию чинишь. Ты фейлишь CLOSED.
@@ -358,15 +358,15 @@ export function toolUsesFrom(msg: unknown): Array<{ tool: string; cmd?: string }
 }
 
 /**
- * Run a single dispatch session. Returns the run summary. Never throws —
- * any failure is captured as an "error" outcome so the cron loop keeps
- * ticking.
+ * Run one selected recent ticket. Eligibility failures throw so durable
+ * triggers remain pending; provider failures are recorded in the run summary.
  */
 export async function runDispatchSession(reason: string, candidate?: SelectedCandidate): Promise<RunSummary> {
   if (busy) {
     throw new Error("runDispatchSession called while busy");
   }
 
+  assertSelectedCandidate(candidate);
   if (!accountingStatus().healthy) throw new Error("Accounting unavailable; no provider attempt started");
   busy = true;
   const turnId = newTurnId();
@@ -430,6 +430,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   let attempts: ProviderAttempt[] = [];
   let numTurns = 0;
   let sessionError: string | null = null;
+  let eligibilityError: CandidateEligibilityError | null = null;
 
   // Watchdog. config.claudeMaxTurns bounds the turn COUNT but not wall-clock
   // time. A single hung turn would block the `for await` forever and leave
@@ -446,18 +447,22 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
 
   try {
     const result = await executeWithFallback({
-      providers: providerOrder(), prompt, signal: abortController.signal,
+      providers: providerOrder(), allowedIssueIds: [candidate.id, candidate.identifier], prompt, signal: abortController.signal,
       canAttempt: availableToAttempt,
       execute: (provider, attemptPrompt) => {
         const id = `${turnId}-${provider}`;
-        recordAttemptStarted(turnId, provider, provider === "claude" ? config.claudeModel : config.codexModel);
-        traceEvent(turnId, "attempt_started", { id, provider, model: provider === "claude" ? config.claudeModel : config.codexModel });
+        assertSelectedCandidate(candidate);
+        const beforeStart = () => {
+          assertSelectedCandidate(candidate);
+          recordAttemptStarted(turnId, provider, provider === "claude" ? config.claudeModel : config.codexModel);
+          traceEvent(turnId, "attempt_started", { id, provider, model: provider === "claude" ? config.claudeModel : config.codexModel });
+        };
         return provider === "codex"
-          ? executeCodex({ id, prompt: attemptPrompt, model: config.codexModel,
+          ? executeCodex({ id, beforeStart, prompt: attemptPrompt, model: config.codexModel,
               signal: abortController.signal,
               entries: { firebase: FIREBASE_MCP_ENTRY, sentry: SENTRY_MCP_ENTRY, linear: LINEAR_MCP_ENTRY },
               onTool: use => traceEvent(turnId, "tool_use", { provider, ...use }) })
-          : executeClaude({ id, prompt: attemptPrompt, abortController,
+          : executeClaude({ id, beforeStart, prompt: attemptPrompt, abortController,
               mcpServers: {
                 firebase: { command: "node", args: [FIREBASE_MCP_ENTRY], env: buildFirebaseMcpEnv() },
                 sentry: { command: "node", args: [SENTRY_MCP_ENTRY], env: buildSentryMcpEnv() },
@@ -473,10 +478,8 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     });
     output = result.output;
     sessionError = result.error;
-    numTurns = attempts.reduce((sum, a) => sum + a.turns, 0);
-    costUsd = attempts.length && attempts.every(a => a.estimatedCostUsd !== null)
-      ? attempts.reduce((sum, a) => sum + a.estimatedCostUsd!, 0) : null;
   } catch (err) {
+    if (err instanceof CandidateEligibilityError) eligibilityError = err;
     sessionError = timedOut
       ? `watchdog: dispatch exceeded MAX_RUN_MS (${Math.round(config.maxRunMs / 60000)}m) — aborted to release the busy lock and unwedge the poll loop`
       : err instanceof Error
@@ -489,6 +492,9 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     currentTurnId = null;
   }
 
+  numTurns = attempts.reduce((sum, a) => sum + a.turns, 0);
+  costUsd = attempts.length && attempts.every(a => a.estimatedCostUsd !== null)
+    ? attempts.reduce((sum, a) => sum + a.estimatedCostUsd!, 0) : eligibilityError && !attempts.length ? 0 : null;
   const finishedAt = new Date();
   const durationSec = Math.round((finishedAt.getTime() - startedAt.getTime()) / 1000);
 
@@ -521,6 +527,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
 
   traceEvent(turnId, "run_finished", { ...summary });
   recordRun(summary);
+  if (eligibilityError) throw eligibilityError;
 
   // Lifecycle observability (JOB-731, supersedes the 2026-06-08 "no Telegram"
   // policy): one Telegram per run that actually did work — "acted upon" /

@@ -23,7 +23,7 @@ function isIssue(value: unknown): value is QueueIssue {
     Array.isArray(issue.children?.nodes);
 }
 
-/** Read-only selection: drain every page before sorting so page order cannot starve old urgent issues. */
+/** Read-only selection: drain every page before sorting so page order cannot starve eligible recent issues. */
 export async function readCandidate({
   key, team, staleClaimBefore, fetchImpl = fetch,
 }: {
