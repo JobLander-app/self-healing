@@ -156,7 +156,10 @@ selected candidate and any error; the existing precheck Prometheus metric also
 reports errors. All accepted manual triggers are durable (provide
 `Idempotency-Key` for HTTP retry deduplication); failed prechecks remain pending
 for the next drain/restart and only a successful run or confirmed empty queue
-acknowledges them.
+acknowledges them. An empty queue holds newly accepted wakeups for a two-minute
+indexing grace period, checking again without inference; genuinely empty or
+old-only queues are then acknowledged. Expiry before fallback still reports any
+earlier provider attempt before retrying; a zero-attempt expiry remains silent.
 
 ---
 

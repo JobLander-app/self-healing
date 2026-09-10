@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { MAX_ISSUE_AGE_MS, CandidateEligibilityError, type SelectedCandidate } from "../src/queue";
-import { TriggerReceipts } from "../src/triggerReceipts";
+import { EMPTY_QUEUE_GRACE_MS, TriggerReceipts } from "../src/triggerReceipts";
 import { unknownUsage, type AttemptResult } from "../src/providerTypes";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shl-recent-"));
@@ -28,6 +28,8 @@ const NOW = Date.parse("2026-09-10T14:00:00Z");
 const recent: SelectedCandidate = { id: "issue-1", identifier: "JOB-1", createdAt: "2026-09-09T10:00:00Z", updatedAt: "2026-09-10T10:00:00Z", reclaim: false };
 const boundary = { ...recent, createdAt: new Date(NOW - MAX_ISSUE_AGE_MS).toISOString() };
 let calls: string[];
+let notifications: string[];
+let alertCalls: string[];
 let summaries: import("../src/trace").RunSummary[];
 
 function result(provider: "claude" | "codex", failed = false): AttemptResult {
@@ -44,15 +46,15 @@ function queueResponse(createdAt = recent.createdAt): Response {
 }
 
 beforeEach(() => {
-  calls = []; summaries = [];
+  calls = []; summaries = []; notifications = []; alertCalls = [];
   mock.method(Date, "now", () => NOW);
   mock.method(accounting, "accountingStatus", () => ({ healthy: true }));
-  mock.method(alerts, "alertAccounting", async () => {});
-  mock.method(alerts, "alertProviderReadiness", async () => {});
+  mock.method(alerts, "alertAccounting", async () => { alertCalls.push("accounting"); });
+  mock.method(alerts, "alertProviderReadiness", async () => { alertCalls.push("readiness"); });
   mock.method(providers, "providerOrder", () => ["claude", "codex"]);
   mock.method(providers, "availableToAttempt", () => true);
   mock.method(providers, "updateProvider", () => {});
-  mock.method(notify, "sendTelegram", async () => {});
+  mock.method(notify, "sendTelegram", async (message: string) => { notifications.push(message); });
   for (const name of ["traceEvent", "recordAttemptStarted", "recordAttempt"] as const) mock.method(trace, name, () => {});
   mock.method(trace, "recordRun", (summary: import("../src/trace").RunSummary) => { summaries.push(summary); });
   mock.method(claude, "executeClaude", async (input: Parameters<typeof claude.executeClaude>[0]) => { input.beforeStart?.(); calls.push("claude"); return result("claude"); });
@@ -107,6 +109,8 @@ test("candidate aging after session entry is refused at the actual provider star
   await assert.rejects(session.runDispatchSession("cron", boundary), CandidateEligibilityError);
   assert.deepEqual(calls, []);
   assert.equal(summaries[0].costUsd, 0);
+  assert.deepEqual(notifications, []);
+  assert.deepEqual(alertCalls, []);
   assert.equal(session.isBusy(), false);
 });
 
@@ -120,6 +124,10 @@ test("expired candidate never starts fallback and retains accounting for its ear
   assert.deepEqual(calls, ["claude"]);
   assert.equal(summaries[0].attempts?.length, 1);
   assert.equal(summaries[0].costUsd, 0.02);
+  assert.deepEqual(alertCalls, ["accounting", "readiness"]);
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0], /JOB-1: run FAILED/);
+  assert.match(notifications[0], /\$0.02/);
   assert.equal(session.isBusy(), false);
 });
 
@@ -170,7 +178,7 @@ test("manual HTTP trigger without an idempotency key is durable on precheck fail
   assert.deepEqual(calls, []);
   // Finish the pending receipt while mocks remain active; the unref'd router
   // timer must not carry test work into another test.
-  await new TriggerReceipts(process.env.TRIGGER_RECEIPTS_FILE!, async () => ({ ran: false, note: "precheck-skip" })).drain();
+  await new TriggerReceipts(process.env.TRIGGER_RECEIPTS_FILE!, async () => ({ ran: false, note: "precheck-skip" }), () => NOW + EMPTY_QUEUE_GRACE_MS).drain();
 });
 
 
@@ -207,4 +215,33 @@ test("eligibility loss after queue selection is observable and keeps the wakeup 
   assert.equal(poller.getLastPrecheck()?.result, "error");
   assert.match(poller.getLastPrecheck()?.error ?? "", /older than 7 days/);
   assert.deepEqual(calls, []);
+});
+
+
+test("old-only trigger queue retries briefly then settles without any inference", async () => {
+  const file = path.join(dir, "old-only.json");
+  let now = NOW;
+  mock.method(Date, "now", () => now);
+  mock.method(globalThis, "fetch", async () => queueResponse("2026-04-01T00:00:00Z"));
+  const receipts = new TriggerReceipts(file, () => poller.pollOnce("trigger"), () => now);
+  receipts.accept("old-only");
+  await receipts.drain();
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8"))["old-only"].done, false);
+  now += EMPTY_QUEUE_GRACE_MS;
+  await receipts.drain();
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8"))["old-only"].done, true);
+  assert.deepEqual(calls, []);
+});
+
+test("notification failure cannot consume an expiry-trigger retry after a real attempt", async () => {
+  mock.method(claude, "executeClaude", async (input: Parameters<typeof claude.executeClaude>[0]) => {
+    input.beforeStart?.(); calls.push("claude");
+    mock.method(Date, "now", () => NOW + 1);
+    return result("claude", true);
+  });
+  let deliveryAttempted = false;
+  mock.method(notify, "sendTelegram", async () => { deliveryAttempted = true; throw new Error("test Telegram unavailable"); });
+  await assert.rejects(session.runDispatchSession("trigger", boundary), CandidateEligibilityError);
+  assert.equal(deliveryAttempted, true);
+  assert.deepEqual(calls, ["claude"]);
 });

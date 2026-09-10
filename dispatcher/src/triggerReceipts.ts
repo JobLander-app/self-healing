@@ -1,12 +1,16 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+// Allow new issues to reach Linear indexing without agent discovery.
+export const EMPTY_QUEUE_GRACE_MS = 2 * 60_000;
+
 interface Receipt { done: boolean; at: number }
 type Poll = () => Promise<{ ran: boolean; note: string }>;
 
 /** Durable trigger receipts. A response lost after acceptance can be retried
  * without paying for another run. Pending receipts survive restart and are
- * retried until a poll runs or confirms there is no eligible work. A crash in
+ * retried until a poll runs or confirms there is no eligible work after a bounded
+ * indexing grace period. The persisted acceptance time survives restarts. A crash in
  * the run/receipt commit gap is safe through the poller's normal queue claims;
  * exactly-once inference across process crashes is not promised.
  */
@@ -53,13 +57,17 @@ export class TriggerReceipts {
       const pending = Object.entries(this.read()).filter(([, receipt]) => !receipt.done).map(([id]) => id);
       if (!pending.length) return;
       // A run handles at most one ticket, so it consumes only one wakeup. An
-      // empty-queue precheck can acknowledge the snapshot; newly arriving keys
-      // always wait for the next drain.
+      // empty queue only acknowledges receipts past their indexing grace;
+      // fresh receipts and keys arriving during this poll retry on the next drain.
       const result = await this.poll();
       if (result.ran || result.note === "precheck-skip") {
         const data = this.read();
-        const acknowledged = result.note === "precheck-skip" ? pending : pending.slice(0, 1);
-        for (const id of acknowledged) data[id] = { done: true, at: this.now() };
+        const now = this.now();
+        const acknowledged = result.note === "precheck-skip"
+          ? pending.filter(id => now - data[id].at >= EMPTY_QUEUE_GRACE_MS)
+          : pending.slice(0, 1);
+        if (!acknowledged.length) return;
+        for (const id of acknowledged) data[id] = { done: true, at: now };
         this.write(data);
       }
     } finally { this.running = false; }

@@ -514,7 +514,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     finishedAt: finishedAt.toISOString(),
     durationSec,
     outcome,
-    issueId: parsed.issue,
+    issueId: parsed.issue ?? (eligibilityError && attempts.length ? candidate.identifier : undefined),
     repo: parsed.repo,
     prUrl,
     costUsd,
@@ -527,7 +527,9 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
 
   traceEvent(turnId, "run_finished", { ...summary });
   recordRun(summary);
-  if (eligibilityError) throw eligibilityError;
+  // A rejected start with no inference stays silent; an earlier real attempt
+  // must notify before the retryable eligibility error is propagated.
+  if (eligibilityError && !attempts.length) throw eligibilityError;
 
   // Lifecycle observability (JOB-731, supersedes the 2026-06-08 "no Telegram"
   // policy): one Telegram per run that actually did work — "acted upon" /
@@ -547,5 +549,6 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
 
   console.log(`[session] Dispatch run ${turnId} done: ${outcome} (${durationSec}s, estimated $${costUsd?.toFixed(2) ?? "unknown"})`);
 
+  if (eligibilityError) throw eligibilityError;
   return summary;
 }
