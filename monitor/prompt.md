@@ -13,6 +13,27 @@ The deterministic collector owns counts, severity, signatures and timestamps.
 Do not reclassify or invent them. Telegram is handled by the launcher's durable
 outbox before this session; never send Telegram or repeat a P0 page yourself.
 
+## Local bookkeeping tools (Claude and Codex)
+
+Use the tools actually available in this session. Claude may provide native
+`Read`/`Write`; Codex may provide command/edit tools instead. Either interface is
+authorized to read exactly `triage-summary.json` and `linear-actions.json` in the
+current directory, and to update only `linear-actions.json`. A tool named `Read`
+is not required. Do not search MCP resources for these local files.
+
+When using a command tool, these initial reads are explicitly authorized:
+
+```sh
+cat triage-summary.json linear-actions.json
+```
+
+For action recording, use a native file editor or a command that writes the
+complete merged JSON to `linear-actions.json`. Preserve every recorded successful
+action; never replace prior progress with an empty example. File reads and this
+single-file bookkeeping are allowed in addition to the read-only PR command
+below. Do not read or write other local files, create scripts, or run unrelated
+commands.
+
 Read `triage-summary.json` and the existing `linear-actions.json`. If the summary
 is more than 15 minutes old or `triage_failed` is true, return a failed marker.
 Otherwise process every `escalations` entry using its exact `action`:
@@ -61,8 +82,9 @@ For each known service:
    `gh pr list --repo JobLander-app/<repo> --state open --json title,body,createdAt,url`.
    A PR younger than two hours explicitly covering this signature is a duplicate;
    record `{ "signature": "<exact signature>", "url": "<PR URL>" }` in
-   `pr_duplicates` and skip filing. This is the only reason to use Bash. Do not
-   run git commands, write scripts, invoke network clients, or start other CLIs.
+   `pr_duplicates` and skip filing. This read-only `gh pr list` and the exact-file
+   bookkeeping above are the only allowed command-tool uses. Do not run git
+   commands, write scripts, invoke network clients, or start other CLIs.
 3. Otherwise create one issue with `suggested_title` and the project/labels above.
    Include these sections: `## Problem (WHY)`, `## Observed signal`,
    `## Existing code inventory (DO NOT REWRITE)`, `## Acceptance criteria`,

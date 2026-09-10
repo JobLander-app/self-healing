@@ -257,15 +257,25 @@ def stop_session(process):
             process.wait()
 
 
-def session_succeeded(output):
+def session_error(output):
     marker = output.rfind("[SESSION_END]")
-    if marker < 0:
-        return False
-    try:
-        outcome, _ = json.JSONDecoder().raw_decode(output[marker + len("[SESSION_END]"):].strip())
-        return outcome.get("status") == "success"
-    except (ValueError, AttributeError):
-        return False
+    if marker >= 0:
+        try:
+            outcome, _ = json.JSONDecoder().raw_decode(output[marker + len("[SESSION_END]"):].strip())
+            if outcome.get("type") != "monitor":
+                return "monitor escalation returned missing or invalid session type"
+            if outcome.get("status") == "success":
+                return None
+            reason = outcome.get("reason")
+            if outcome.get("status") == "failed" and isinstance(reason, str) and reason.strip():
+                return "monitor escalation failed: " + reason.strip()[:1000]
+        except (ValueError, AttributeError):
+            pass
+    return "monitor escalation did not report success"
+
+
+def session_succeeded(output):
+    return session_error(output) is None
 
 
 def parse_provider_result(log_file):
@@ -309,10 +319,14 @@ def run_session(config):
         finally:
             stop_session(process)
     result = parse_provider_result(log_file)
-    if failure:
-        result["error"] = failure
-    if process.returncode or not session_succeeded(result["output"]):
-        result["error"] = result.get("error") or "monitor escalation did not report success"
+    errors = [error for error in (result.get("error"), failure) if error]
+    marker_error = session_error(result["output"])
+    # Keep explicit agent diagnostics alongside adapter/launcher failures. An
+    # absent marker adds no useful detail to an already-known transport failure.
+    if marker_error and (marker_error != "monitor escalation did not report success" or not errors):
+        errors.append(marker_error)
+    result["error"] = "; ".join(dict.fromkeys(errors)) or (
+        "monitor provider exited unsuccessfully" if process.returncode else None)
     actions_path = runtime / "linear-actions.json"
     try:
         shutil.copy2(actions_path, log_file.with_suffix(".actions.json"))

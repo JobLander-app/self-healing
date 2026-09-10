@@ -222,7 +222,7 @@ assert "Never claim work" in prompt
 assert Path("triage-summary.json").exists()
 Path("linear-actions.json").write_text(json.dumps({"linear_created":["JOB-42"],"linear_commented":[],"issue_by_signature":{"audio:failed":"JOB-42"}}))
 print("operational log")
-print(json.dumps({"output":'[SESSION_END] {"status":"success"}',"error":None,"attempts":[]}))
+print(json.dumps({"output":'[SESSION_END] {"type":"monitor","status":"success"}',"error":None,"attempts":[]}))
 ''')
         real_spawn = subprocess.Popen
         def spawn(command, **kwargs):
@@ -233,6 +233,113 @@ print(json.dumps({"output":'[SESSION_END] {"status":"success"}',"error":None,"at
             result = runner.run_session(self.config)
         self.assertIsNone(result["error"])
         self.assertEqual(result["actions"]["linear_created"], ["JOB-42"])
+
+    def test_command_only_provider_can_read_the_batch_and_persist_action_coverage(self):
+        # Exercise the prompt's executable read contract with only a command
+        # interface, as Codex has. No native Read/Write or inference is involved.
+        self.collector(escalations=[{"action": "linear_create_if_no_dup"}])(self.config)
+        fake = self.root / "command_provider.py"
+        fake.write_text(r'''import json,re,subprocess,sys
+prompt=sys.stdin.read()
+command=re.search(r"```sh\n(.*?)```", prompt, re.S).group(1).strip()
+read=subprocess.run(["sh","-c",command],capture_output=True,text=True,check=True).stdout
+decoder=json.JSONDecoder()
+summary,end=decoder.raw_decode(read)
+previous,_=decoder.raw_decode(read[end:].lstrip())
+assert summary["escalations"][0]["signature"] == "audio:failed"
+assert previous["issue_by_signature"] == {}
+previous["linear_created"].append("JOB-42")
+previous["issue_by_signature"]["audio:failed"]="JOB-42"
+subprocess.run(["sh","-c",'printf "%s\\n" "$1" > linear-actions.json',"bookkeeping",json.dumps(previous)],check=True)
+print(json.dumps({"output":'[SESSION_END] {"type":"monitor","status":"success"}',"error":None,"attempts":[]}))
+''')
+        real_spawn = subprocess.Popen
+        def spawn(command, **kwargs):
+            self.assertTrue(command[1].endswith("dispatcher/dist/providerCli.js"))
+            self.assertEqual(kwargs["cwd"], self.config.state_dir / "runtime")
+            return real_spawn([sys.executable, str(fake)], **kwargs)
+        with patch.object(runner, "provider_env", return_value=dict(os.environ)), \
+                patch.object(runner.subprocess, "Popen", side_effect=spawn):
+            result = runner.run_session(self.config)
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["actions"]["issue_by_signature"], {"audio:failed": "JOB-42"})
+        self.assertEqual(result["actions"]["linear_created"], ["JOB-42"])
+
+    def test_completed_transport_preserves_failed_marker_reason_and_pending_escalation(self):
+        # Reproduce the live failure: transport exit 0, but a failed monitor
+        # marker and no recorded outcomes. The diagnostic and outbox must survive.
+        reason = "Cannot read triage-summary.json: no local file-reading tool is available"
+        fake = self.root / "failed_provider.py"
+        fake.write_text("import json,sys\nsys.stdin.read()\nprint(" + repr(json.dumps({
+            "output": "[SESSION_END] " + json.dumps({"type": "monitor", "status": "failed", "reason": reason}),
+            "error": None, "attempts": [],
+        })) + ")\n")
+        real_spawn = subprocess.Popen
+        def spawn(command, **kwargs):
+            return real_spawn([sys.executable, str(fake)], **kwargs)
+        with patch.object(runner, "provider_env", return_value=dict(os.environ)), \
+                patch.object(runner.subprocess, "Popen", side_effect=spawn):
+            self.assertEqual(self.run_once(
+                collector=self.collector(escalations=[{"action": "linear_create_if_no_dup"}]),
+                session_runner=runner.run_session), 1)
+        result = json.loads((self.config.state_dir / "last-session.json").read_text())
+        self.assertIn("monitor escalation failed: " + reason, result["errors"])
+        self.assertEqual(result["pendingSignatures"], ["audio:failed"])
+        self.assertIn("audio:failed", json.loads((self.config.state_dir / "linear-outbox.json").read_text()))
+        self.assertFalse(result["heartbeatPublished"])
+
+    def run_fixture_provider(self, result, exit_code=0):
+        fake = self.root / "fixture_provider.py"
+        fake.write_text("import sys\nsys.stdin.read()\nprint(" + repr(json.dumps(result)) +
+                        ")\nsys.exit(" + str(exit_code) + ")\n")
+        real_spawn = subprocess.Popen
+        def spawn(command, **kwargs):
+            return real_spawn([sys.executable, str(fake)], **kwargs)
+        with patch.object(runner, "provider_env", return_value=dict(os.environ)), \
+                patch.object(runner.subprocess, "Popen", side_effect=spawn):
+            return runner.run_session(self.config)
+
+    def test_adapter_and_failed_marker_diagnostics_are_both_retained(self):
+        self.collector(escalations=[{"action": "linear_create_if_no_dup"}])(self.config)
+        marker = '[SESSION_END] {"type":"monitor","status":"failed","reason":"Linear read denied"}'
+        result = self.run_fixture_provider({"output": marker, "error": "provider stream interrupted", "attempts": []}, 1)
+        self.assertEqual(result["error"], "provider stream interrupted; monitor escalation failed: Linear read denied")
+
+    def test_session_error_aggregation_avoids_duplicate_or_generic_marker_noise(self):
+        self.collector()(self.config)
+        for output, adapter_error in [
+            ("no marker", "provider stream interrupted"),
+            ('[SESSION_END] {"type":"monitor","status":"failed","reason":"Linear read denied"}',
+             "monitor escalation failed: Linear read denied"),
+        ]:
+            with self.subTest(output=output):
+                result = self.run_fixture_provider({"output": output, "error": adapter_error, "attempts": []}, 1)
+                self.assertEqual(result["error"], adapter_error)
+
+    def test_nonzero_exit_with_valid_monitor_success_is_still_a_failure(self):
+        self.collector()(self.config)
+        result = self.run_fixture_provider({"output": '[SESSION_END] {"type":"monitor","status":"success"}',
+                                            "error": None, "attempts": []}, 1)
+        self.assertEqual(result["error"], "monitor provider exited unsuccessfully")
+
+    def test_unrelated_success_marker_cannot_publish_monitor_health_with_full_coverage(self):
+        # Complete per-signature action coverage does not authorize a different
+        # session type to claim that this monitor batch completed successfully.
+        for marker in ({"status": "success"}, {"type": "dispatcher", "status": "success"}):
+            with self.subTest(marker=marker):
+                result = {"output": "[SESSION_END] " + json.dumps(marker), "error": None, "attempts": []}
+                def session(config):
+                    provider = self.run_fixture_provider(result)
+                    provider["actions"] = {"linear_created": ["JOB-42"], "linear_commented": [],
+                                           "issue_by_signature": {"audio:failed": "JOB-42"}}
+                    return provider
+                self.assertEqual(self.run_once(
+                    collector=self.collector(escalations=[{"action": "linear_create_if_no_dup"}]),
+                    session_runner=session), 1)
+                stored = json.loads((self.config.state_dir / "last-session.json").read_text())
+                self.assertFalse(stored["heartbeatPublished"])
+                self.assertEqual(stored["status"], "failed")
+                self.assertIn("monitor escalation returned missing or invalid session type", stored["errors"])
 
     def test_usage_metrics_do_not_double_count_cached_input_or_invent_unknown_zero(self):
         ledger = self.config.provider_log_dir.parent / "usage-ledger.jsonl"
@@ -264,7 +371,10 @@ print(json.dumps({"output":'[SESSION_END] {"status":"success"}',"error":None,"at
     def test_marker_in_tool_text_or_failed_result_is_not_completion(self):
         self.assertFalse(runner.session_succeeded("No final marker"))
         self.assertFalse(runner.session_succeeded('[SESSION_END] {"status":"failed"}'))
-        self.assertTrue(runner.session_succeeded('[SESSION_END] {"status":"success"}'))
+        self.assertFalse(runner.session_succeeded('[SESSION_END] {"status":"success"}'))
+        self.assertFalse(runner.session_succeeded('[SESSION_END] {"type":"dispatcher","status":"success"}'))
+        self.assertFalse(runner.session_succeeded('[SESSION_END] {"type":null,"status":"success"}'))
+        self.assertTrue(runner.session_succeeded('[SESSION_END] {"type":"monitor","status":"success"}'))
 
 
 if __name__ == "__main__":
