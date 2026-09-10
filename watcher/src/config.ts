@@ -45,8 +45,8 @@ export const readConfig = ({ env }: { env: NodeJS.ProcessEnv }): WatchConfig => 
   threshold: parseThreshold({ raw: env.WATCH_THRESHOLD }),
   stateFile: env.WATCH_STATE_FILE ?? "/home/joblander/.output-watch-state",
   notifyScript:
-    env.WATCH_NOTIFY_SCRIPT ?? "/home/joblander/joblander/workspace/scripts/notify.sh",
-  tgEnvFile: env.WATCH_TG_ENV_FILE ?? "/home/joblander/workspace/.env",
+    env.WATCH_NOTIFY_SCRIPT ?? "/home/joblander/self-healing/deploy/bin/self-healing-notify.py",
+  tgEnvFile: env.WATCH_TG_ENV_FILE ?? "/home/joblander/.config/self-healing/telegram.env",
   triggerUrl: env.WATCH_TRIGGER_URL ?? "http://localhost:4100/trigger",
   dispatchToken:
     env.DISPATCH_TOKEN !== undefined && env.DISPATCH_TOKEN.length > 0

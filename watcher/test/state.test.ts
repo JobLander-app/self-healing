@@ -16,10 +16,20 @@ describe('state file ("COUNT PAGED" — bash-compatible)', () => {
     expect(parseState({ content: "5 0" })).toEqual({ count: 5, paged: false });
   });
 
-  it("defaults to 0/unpaged for missing, empty, or garbage files", () => {
+  it("defaults only for missing state; corrupt state cannot erase delivery history", () => {
     expect(parseState({ content: null })).toEqual({ count: 0, paged: false });
-    expect(parseState({ content: "" })).toEqual({ count: 0, paged: false });
-    expect(parseState({ content: "garbage" })).toEqual({ count: 0, paged: false });
+    expect(() => parseState({ content: "" })).toThrow("Corrupt watcher state");
+    expect(() => parseState({ content: "garbage" })).toThrow("Corrupt watcher state");
+  });
+
+  it("rejects malformed delivery flags and duplicate IDs before sending anything", () => {
+    const incident = { id: "cfec85b7-8f53-430a-a7d1-a413b8b66857", status: "fail", httpCode: "200",
+      regions: "test", recovered: false, delivered: {}, attempts: {}, retryAt: {} };
+    const parse = (outbox: unknown[]) => parseState({ content: `3 1\n${JSON.stringify({ version: 2, outbox })}\n` });
+    expect(() => parse([{ ...incident, delivered: true }])).toThrow("Invalid watcher outbox");
+    expect(() => parse([{ ...incident, delivered: { page: "false" } }])).toThrow("Invalid watcher outbox");
+    expect(() => parse([incident, incident])).toThrow("Duplicate watcher incident IDs");
+    expect(() => parseState({ content: "3garbage 1\n" })).toThrow("Corrupt watcher state");
   });
 
   it("serializes in the exact bash format (echo adds trailing newline)", () => {

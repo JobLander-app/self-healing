@@ -1,8 +1,8 @@
 /**
  * JOB-731 Phase 1: TypeScript port of watcher/output-watch.sh (JOB-670).
  * Single run, cron-compatible: `node dist/tick.js` every minute.
- * The bash script stays in place until cutover; the state file format is
- * shared, so the two are interchangeable mid-incident.
+ * Cron holds the watcher flock. Durable per-action state survives process
+ * restarts; the first line remains readable by the retired bash implementation.
  */
 import { readConfig } from "./config.js";
 import { buildRealEffects, gcloudSecretReader } from "./effects.js";

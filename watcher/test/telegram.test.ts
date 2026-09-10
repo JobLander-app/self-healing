@@ -25,7 +25,7 @@ const okFetch = (): { fetchImpl: PostFetchLike; calls: { url: string; body: stri
   const calls: { url: string; body: string }[] = [];
   const fetchImpl: PostFetchLike = vi.fn(async (url, init) => {
     calls.push({ url, body: init.body });
-    return { ok: true, status: 200 };
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 42 } }) };
   });
   return { fetchImpl, calls };
 };
@@ -131,7 +131,7 @@ describe("buildNotifyOwner — direct plain-text send (JOB-731)", () => {
   });
 
   it("falls back to notify.sh when the direct send returns 400", async () => {
-    const fetchImpl: PostFetchLike = vi.fn(async () => ({ ok: false, status: 400 }));
+    const fetchImpl: PostFetchLike = vi.fn(async () => ({ ok: false, status: 400, json: async () => ({ ok: false }) }));
     const runNotifyScript = vi.fn(async () => {});
     const notifyOwner = buildNotifyOwner({
       config: makeConfig(),
@@ -166,12 +166,12 @@ describe("buildNotifyOwner — direct plain-text send (JOB-731)", () => {
     });
   });
 
-  it("logs one PAGE_FAILED line and does NOT throw when both paths fail", async () => {
+  it("logs PAGE_FAILED and rejects so the outbox retries when both paths fail", async () => {
     const lines: string[] = [];
     const notifyOwner = buildNotifyOwner({
       config: makeConfig(),
       env: { TG_BOT_TOKEN: "123:abc", TG_CHAT_ID: "42" },
-      fetchImpl: vi.fn(async () => ({ ok: false, status: 400 })),
+      fetchImpl: vi.fn(async () => ({ ok: false, status: 400, json: async () => ({ ok: false }) })),
       runNotifyScript: vi.fn(async () => {
         throw new Error("notify.sh exit 1");
       }),
@@ -180,7 +180,7 @@ describe("buildNotifyOwner — direct plain-text send (JOB-731)", () => {
       },
     });
 
-    await expect(notifyOwner({ message: BROKEN_MESSAGE })).resolves.toBeUndefined();
+    await expect(notifyOwner({ message: BROKEN_MESSAGE })).rejects.toThrow("unconfirmed");
 
     const failed = lines.filter((l) => l.startsWith("PAGE_FAILED "));
     expect(failed).toHaveLength(1);
@@ -196,7 +196,7 @@ describe("buildNotifyOwner — direct plain-text send (JOB-731)", () => {
   });
 
   it("unresolvable creds count as a direct failure and use the fallback", async () => {
-    const fetchImpl = vi.fn(async () => ({ ok: true, status: 200 }));
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 42 } }) }));
     const runNotifyScript = vi.fn(async () => {});
     const notifyOwner = buildNotifyOwner({
       config: makeConfig(),
@@ -216,8 +216,8 @@ describe("buildNotifyOwner — direct plain-text send (JOB-731)", () => {
 });
 
 describe("readConfig — tgEnvFile (JOB-731)", () => {
-  it("defaults to the workspace .env and honors WATCH_TG_ENV_FILE", () => {
-    expect(readConfig({ env: {} }).tgEnvFile).toBe("/home/joblander/workspace/.env");
+  it("defaults to standalone credential file and honors WATCH_TG_ENV_FILE", () => {
+    expect(readConfig({ env: {} }).tgEnvFile).toBe("/home/joblander/.config/self-healing/telegram.env");
     expect(
       readConfig({ env: { WATCH_TG_ENV_FILE: "/custom/.env" } }).tgEnvFile,
     ).toBe("/custom/.env");
