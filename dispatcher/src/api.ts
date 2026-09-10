@@ -31,7 +31,7 @@ export function startApi(): Promise<void> {
       name: "claude-code-vm-job-dispatcher",
       version: "1.0.0",
       description: "Autonomous JobLander Linear ticket fixer — self-poll, no human in the loop",
-      endpoints: ["/health", "/status", "/trigger", "/feed", "/metrics"],
+      endpoints: ["/health", "/live", "/ready", "/status", "/trigger", "/feed", "/metrics"],
     });
   });
 

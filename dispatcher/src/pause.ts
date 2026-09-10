@@ -30,7 +30,11 @@ export interface PauseState {
 /** Does the session error look like a subscription usage-limit hit? */
 export function isLimitError(msg: string | null | undefined): boolean {
   if (!msg) return false;
-  return /hit your limit|usage limit|resets?\s+\d|rate.?limit|too many requests|\b429\b/i.test(msg);
+  return /hit your limit|usage limit|out of (?:extra )?usage|usage_limit_reached|insufficient_quota/i.test(msg);
+}
+
+export function isThrottleError(msg: string): boolean {
+  return /rate.?limit|too many requests|\b429\b/i.test(msg);
 }
 
 /**
@@ -38,18 +42,27 @@ export function isLimitError(msg: string | null | undefined): boolean {
  * Returns null if no parseable reset time is present.
  */
 export function parseResetTime(msg: string, now: Date): Date | null {
-  const m = msg.match(/resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(UTC\))?/i);
+  const iso = msg.match(/(?:resets?|retry(?:_at| at))[:\s]+(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/i);
+  if (iso && Number.isFinite(Date.parse(iso[1]))) return new Date(Date.parse(iso[1]) + 120_000);
+  const m = msg.match(/resets?\s+(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})(?:,?\s+(\d{4}))?,?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(UTC\))?/i);
   if (!m) return null;
-  let hour = parseInt(m[1], 10);
-  const min = m[2] ? parseInt(m[2], 10) : 0;
-  const ampm = m[3]?.toLowerCase();
+  let hour = Number(m[4]);
+  const min = Number(m[5] || 0);
+  const ampm = m[6]?.toLowerCase();
+  if (ampm && (hour < 1 || hour > 12)) return null;
   if (ampm === "pm" && hour < 12) hour += 12;
   if (ampm === "am" && hour === 12) hour = 0;
   if (hour > 23 || min > 59) return null;
-  const reset = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hour, min, 0, 0));
-  // If that wall-clock time already passed today, it's tomorrow's reset.
-  if (reset.getTime() <= now.getTime()) reset.setUTCDate(reset.getUTCDate() + 1);
-  // Small buffer so we resume just *after* the window actually clears.
+  const month = m[1] ? ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(m[1].toLowerCase()) : now.getUTCMonth();
+  const day = m[2] ? Number(m[2]) : now.getUTCDate();
+  const year = m[3] ? Number(m[3]) : now.getUTCFullYear();
+  const reset = new Date(Date.UTC(year, month, day, hour, min));
+  if (reset.getUTCMonth() !== month || reset.getUTCDate() !== day) return null;
+  if (reset.getTime() <= now.getTime()) {
+    if (!m[1]) reset.setUTCDate(reset.getUTCDate() + 1);
+    else if (!m[3] && month < now.getUTCMonth()) reset.setUTCFullYear(year + 1);
+    else return null;
+  }
   reset.setUTCMinutes(reset.getUTCMinutes() + 2);
   return reset;
 }

@@ -35,6 +35,7 @@ GRAFANA_ADMIN_SECRET="${grafana_admin_secret}"
 # Bump deliberately; checksums are verified against the release sha256sums.txt.
 PROMETHEUS_VERSION=2.53.2
 NODE_EXPORTER_VERSION=1.8.2
+CODEX_VERSION=0.153.4
 # -----------------------------------------------------------------------------
 
 export DEBIAN_FRONTEND=noninteractive
@@ -88,6 +89,9 @@ if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
 fi
 command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
+if ! codex --version 2>/dev/null | grep -Fxq "codex-cli $CODEX_VERSION"; then
+  npm install -g "@openai/codex@$CODEX_VERSION"
+fi
 
 # ---- 5. observability stack packages -------------------------------------------
 # Grafana + Caddy from their OFFICIAL apt repos (reproducible, auto-updated
@@ -225,6 +229,16 @@ fi
 # ---- 9. dispatcher + watcher ------------------------------------------------------
 if [ -d "$SH_DIR" ]; then
   log "[9/11] dispatcher .env + builds"
+  # Subscription credentials refresh in place; never overwrite an existing cache.
+  install -d -m 700 -o $AGENT_USER -g $AGENT_USER "$AGENT_HOME/.codex-shl"
+  install -d -m 700 -o $AGENT_USER -g $AGENT_USER "$AGENT_HOME/.agents/skills/yeet"
+  if [ ! -f "$AGENT_HOME/.codex-shl/config.toml" ]; then
+    install -m 600 -o $AGENT_USER -g $AGENT_USER "$SH_DIR/deploy/codex/config.toml" "$AGENT_HOME/.codex-shl/config.toml"
+  fi
+  install -m 600 -o $AGENT_USER -g $AGENT_USER "$SH_DIR/deploy/skills/yeet/SKILL.md" "$AGENT_HOME/.agents/skills/yeet/SKILL.md"
+  if ! as_agent env CODEX_HOME="$AGENT_HOME/.codex-shl" codex login status >/dev/null 2>&1; then
+    add_todo "Codex subscription login required: sudo -u $AGENT_USER -H env CODEX_HOME=$AGENT_HOME/.codex-shl codex login --device-auth; then verify a read-only exec turn before setting CODEX_ENABLED=true and CODEX_MODEL=gpt-6-astra in dispatcher env secret"
+  fi
 
   # dispatcher .env from Secret Manager (never on disk outside this file)
   if gcloud secrets versions access latest \

@@ -5,7 +5,8 @@
  * places only:
  *   1. Linear — the `In Progress` status is the concurrency claim, and the
  *      issue's terminal status (Done/Canceled/Backlog) is the outcome.
- *   2. JSONL turn traces on disk (logDir) — one file per dispatch run.
+ *   2. Local files — JSONL turn traces, durable usage ledger, provider state
+ *      and the notification outbox.
  *   3. Telegram — human-facing one-line summary per run.
  *
  * Port: handy-daemon owns :4000. We default to :4100 to avoid any collision.
@@ -47,6 +48,13 @@ export const config = {
   httpPort: parseInt(process.env.HTTP_PORT || "4100", 10),
 
   claudeModel: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
+  codexEnabled: process.env.CODEX_ENABLED === "true",
+  codexBin: process.env.CODEX_BIN || "codex",
+  codexModel: process.env.CODEX_MODEL || "",
+  ledgerMaxBytes: positiveInt("LEDGER_MAX_BYTES", process.env.LEDGER_MAX_BYTES, 128 * 1024 * 1024),
+  providerThrottleRetryMs: positiveInt("PROVIDER_THROTTLE_RETRY_MS", process.env.PROVIDER_THROTTLE_RETRY_MS, 60_000),
+  providerRetryMs: positiveInt("PROVIDER_RETRY_MS", process.env.PROVIDER_RETRY_MS, 3_600_000),
+  providerEvidenceMaxMs: positiveInt("PROVIDER_EVIDENCE_MAX_MS", process.env.PROVIDER_EVIDENCE_MAX_MS, 86_400_000),
 
   // Turn budget for one investigation. Raised 60 → 120 on 2026-07-28.
   //
@@ -153,3 +161,5 @@ export const LINEAR_AGENT_CLAIMED_LABEL_ID = "79756c33-7f85-4da7-9789-0d5146399a
 export const LINEAR_API_KEY_SECRET = "linear-api-key";
 export const CLAUDE_OAUTH_SECRET = "claude-code-oauth-token";
 export const SENTRY_TOKEN_SECRET = "joblander-sentry-monitor-token";
+
+if (config.codexEnabled && !config.codexModel) throw new Error("CODEX_MODEL must be explicitly verified and set when CODEX_ENABLED=true");

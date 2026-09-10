@@ -48,12 +48,12 @@
       "title": "Dependency health",
       "gridPos": { "h": 4, "w": 4, "x": 4, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [ { "expr": "clamp_max(min(selfheal_dispatcher_healthcheck_healthy), 5)", "refId": "A", "instant": true } ],
+      "targets": [ { "expr": "clamp_max(min(selfheal_dispatcher_healthcheck_healthy), 4)", "refId": "A", "instant": true } ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "textMode": "value" },
       "fieldConfig": { "defaults": {
         "unit": "none",
-        "displayName": "of 5 healthy",
-        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 4, "color": "orange" }, { "value": 5, "color": "green" } ] }
+        "displayName": "of 4 healthy",
+        "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 3, "color": "orange" }, { "value": 4, "color": "green" } ] }
       } }
     },
     {
@@ -149,13 +149,13 @@
     {
       "id": 8,
       "type": "stat",
-      "title": "Fixer spend",
+      "title": "Estimated usage cost (not billed)",
       "gridPos": { "h": 4, "w": 4, "x": 20, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [ { "expr": "max(selfheal_dispatcher_cost_usd_total)", "refId": "A", "instant": true } ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "value" },
       "fieldConfig": { "defaults": {
-        "unit": "currencyUSD", "decimals": 2, "displayName": "spent to date",
+        "unit": "currencyUSD", "decimals": 2, "displayName": "estimated to date",
         "color": { "mode": "fixed", "fixedColor": "#2dd4bf" }
       } }
     },
@@ -248,6 +248,11 @@
         "mappings": [ { "type": "value", "options": { "1": { "text": "OK", "color": "green", "index": 0 }, "0": { "text": "DOWN", "color": "red", "index": 1 } } } ],
         "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "red" }, { "value": 1, "color": "green" } ] }
       } }
-    }
+    },
+    {"id": 12, "type": "stat", "title": "Fixer readiness", "gridPos": {"h": 5, "w": 8, "x": 0, "y": 25}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "selfheal_dispatcher_ready", "refId": "A", "instant": true, "legendFormat": "Fixer readiness"}], "options": {"reduceOptions": {"values": false, "calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "justifyMode": "center", "orientation": "horizontal"}, "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"1": {"text": "OK", "color": "green", "index": 0}, "0": {"text": "DOWN", "color": "red", "index": 1}}}], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "red"}, {"value": 1, "color": "green"}]}}}},
+    {"id": 13, "type": "stat", "title": "Provider readiness", "gridPos": {"h": 5, "w": 8, "x": 8, "y": 25}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "selfheal_dispatcher_provider_ready", "refId": "A", "instant": true, "legendFormat": "{{provider}}"}], "options": {"reduceOptions": {"values": false, "calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "justifyMode": "center", "orientation": "horizontal"}, "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"1": {"text": "OK", "color": "green", "index": 0}, "0": {"text": "DOWN", "color": "red", "index": 1}}}], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "red"}, {"value": 1, "color": "green"}]}}}},
+    {"id": 14, "type": "stat", "title": "Attempts with unknown usage", "gridPos": {"h": 5, "w": 8, "x": 16, "y": 25}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum(selfheal_dispatcher_provider_usage_unknown_total)", "refId": "A", "instant": true, "legendFormat": "Attempts with unknown usage"}], "options": {"reduceOptions": {"values": false, "calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "justifyMode": "center", "orientation": "horizontal"}, "fieldConfig": {"defaults": {"unit": "short"}}},
+    {"id": 15, "type": "timeseries", "title": "Known provider tokens (input includes cached tokens)", "description": "Known subtotals exclude unreported fields. Missing reports appear in the unknown-usage stat and selfheal_dispatcher_provider_token_reports_total with coverage=unreported; an absent token series is not zero.", "gridPos": {"h": 8, "w": 16, "x": 0, "y": 30}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "sum by (provider, model, kind) (increase(selfheal_dispatcher_provider_tokens_total[$__range]))", "refId": "A", "legendFormat": "{{provider}} / {{model}} / {{kind}}"}], "fieldConfig": {"defaults": {"unit": "short"}}, "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}}},
+    {"id": 16, "type": "stat", "title": "Provider attempts / failures", "gridPos": {"h": 8, "w": 8, "x": 16, "y": 30}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "targets": [{"expr": "selfheal_dispatcher_provider_attempts_total", "refId": "A", "legendFormat": "{{provider}} attempts", "instant": true}, {"expr": "selfheal_dispatcher_provider_failures_total", "refId": "B", "legendFormat": "{{provider}} failures", "instant": true}], "options": {"reduceOptions": {"values": false, "calcs": ["lastNotNull"]}, "textMode": "value_and_name"}, "fieldConfig": {"defaults": {"unit": "short"}}}
   ]
 }
