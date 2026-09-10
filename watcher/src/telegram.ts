@@ -7,9 +7,9 @@
  * broke Telegram entity parsing (HTTP 400) and the P0 page was LOST.
  *
  * Fix: the watcher sends to api.telegram.org DIRECTLY with NO parse_mode
- * (a pager needs delivery, not formatting). notify.sh remains only as a
- * fallback; if both paths fail we log one structured PAGE_FAILED line and
- * never throw — the tick must continue.
+ * (a pager needs delivery, not formatting). A standalone helper resolves the
+ * existing Secret Manager credential as fallback. If both paths fail, reject
+ * so the durable outbox retries; other actions still continue.
  */
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
@@ -32,7 +32,7 @@ export type PostFetchLike = (
     body: string;
     signal: AbortSignal;
   },
-) => Promise<{ ok: boolean; status: number }>;
+) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
 
 /**
  * Parse simple KEY=VALUE lines (the workspace .env format). Values may be
@@ -77,7 +77,7 @@ export const fsEnvFileReader: EnvFileReader = async ({ path }) => {
 
 /**
  * Resolve bot token + chat id: process env TG_BOT_TOKEN / TG_CHAT_ID first,
- * then the env file at config.tgEnvFile (the same .env notify.sh sources).
+ * then the optional standalone env file at config.tgEnvFile.
  * Returns null when either value is missing everywhere.
  */
 export const resolveTelegramCreds = async ({
@@ -124,8 +124,10 @@ export const sendTelegramDirect = async ({
       signal: AbortSignal.timeout(20_000),
     },
   );
-  if (!response.ok) {
-    throw new Error(`telegram sendMessage HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`telegram sendMessage HTTP ${response.status}`);
+  const body = await response.json() as { ok?: boolean; result?: { message_id?: number } };
+  if (body.ok !== true || typeof body.result?.message_id !== "number") {
+    throw new Error("Telegram did not confirm a message_id");
   }
 };
 
@@ -134,24 +136,23 @@ export type NotifyScriptRunner = (input: {
   message: string;
 }) => Promise<void>;
 
-const bashNotifyScriptRunner: NotifyScriptRunner = async ({ script, message }) => {
-  await execFileAsync("bash", [script, message]);
+const notifyScriptRunner: NotifyScriptRunner = async ({ script, message }) => {
+  await execFileAsync(script, [message], { timeout: 35_000 });
 };
 
 /**
  * The notifyOwner effect (JOB-731 pager path):
  *   1. direct plain-text Telegram send (primary),
- *   2. legacy notify.sh (fallback — still Markdown, but better than nothing
- *      for messages that happen to parse),
+ *   2. standalone plain-text helper (credentials from Secret Manager),
  *   3. both failed → one structured `PAGE_FAILED {json}` stdout line, no
- *      throw: the tick (state save / Linear / trigger) must continue.
+ *      swallow: the outbox retries later and lets other actions continue.
  */
 export const buildNotifyOwner = ({
   config,
   env,
   fetchImpl,
   readEnvFile = fsEnvFileReader,
-  runNotifyScript = bashNotifyScriptRunner,
+  runNotifyScript = notifyScriptRunner,
   log = ({ line }) => {
     console.log(line);
   },
@@ -187,12 +188,13 @@ export const buildNotifyOwner = ({
     } catch (fallbackError) {
       log({
         line: `PAGE_FAILED ${JSON.stringify({
-          reason: "direct telegram send and notify.sh fallback both failed",
+          reason: "direct telegram send and standalone helper both failed",
           direct: directReason,
           fallback: String(fallbackError),
           message,
         })}`,
       });
+      throw new Error("Telegram delivery unconfirmed; retry via durable outbox");
     }
   };
 };

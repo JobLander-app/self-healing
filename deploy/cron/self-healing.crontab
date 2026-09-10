@@ -4,9 +4,8 @@
 #
 # Legacy reference: deploy/cron/joblander-agents.crontab.snapshot (old VM, as-found).
 
-# The TS watcher's notify.sh lives in the workspace clone on the NEW VM layout
-# (default inside the watcher still points at the legacy /home/joblander/joblander/... path).
-WATCH_NOTIFY_SCRIPT=/home/joblander/workspace/scripts/notify.sh
+# Standalone pager helper uses the existing Telegram secret; no workspace checkout.
+WATCH_NOTIFY_SCRIPT=/home/joblander/self-healing/deploy/bin/self-healing-notify.py
 
 # Consecutive bad samples (= minutes) before the watcher pages. Default in
 # watcher/src/config.ts is 3; measured evidence says 3 is far too low.
@@ -42,7 +41,7 @@ WATCH_THRESHOLD=15
 # --- ROLE HANDED OVER (TEST-PLAN stage 3, 2026-07-16): this VM is the LIVE
 # pager; the legacy VM's watcher cron line is commented out. Stage 4 (2026-07-17):
 # trigger targets THIS VM's dispatcher (default localhost:4100) — full loop local.
-* * * * * cd /home/joblander/self-healing/watcher && /usr/bin/node dist/tick.js >> /home/joblander/output-watch.log 2>&1 && touch /home/joblander/.watcher-last-ok && gcloud logging write self-healing-watcher "WATCHER_HEARTBEAT tick ok" --severity=INFO >/dev/null 2>&1
+* * * * * cd /home/joblander/self-healing/watcher && /usr/bin/flock -n /home/joblander/.output-watch.lock /usr/bin/node dist/tick.js >> /home/joblander/output-watch.log 2>&1 && touch /home/joblander/.watcher-last-ok && gcloud logging write self-healing-watcher "WATCHER_HEARTBEAT tick ok" --severity=INFO >/dev/null 2>&1
 
 # The `touch` above is a LOCAL heartbeat and lands BEFORE the Cloud Logging
 # write on purpose. On 2026-08-26 the tick kept succeeding every minute for six

@@ -31,10 +31,9 @@ import {
   LINEAR_JOB_TEAM_ID,
   LINEAR_MONITOR_LABEL_ID,
   LINEAR_API_KEY_SECRET,
-  CLAUDE_OAUTH_SECRET,
   SENTRY_TOKEN_SECRET,
 } from "./config";
-import { sendTelegram } from "./notify";
+import { healthAlert, alertProviderReadiness } from "./healthAlerts";
 
 const execFileAsync = promisify(execFile);
 
@@ -116,7 +115,7 @@ function resultText(r: RpcResponse["result"]): string {
     .trim();
 }
 
-async function probeMcp(input: {
+export async function probeMcp(input: {
   entry: string;
   smokeTool: string;
   smokeArgs: Record<string, unknown>;
@@ -126,19 +125,27 @@ async function probeMcp(input: {
   const child = spawn("node", [input.entry], {
     env: buildMcpEnv(),
     stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
   });
+  const stopTree = () => {
+    if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* exited */ } }
+  };
 
   const pending = new Map<number, (r: RpcResponse) => void>();
   let buf = "";
   let spawnErr: Error | null = null;
-
-  child.on("error", (e) => {
+  const failed = (e: unknown) => {
     spawnErr = e instanceof Error ? e : new Error(String(e));
     for (const resolve of pending.values()) resolve({ error: { message: spawnErr.message } });
     pending.clear();
-  });
+  };
+  child.on("error", failed);
+  child.stdin.on("error", failed); // asynchronous EPIPE is not caught by write's try/catch
+  child.stderr.resume(); // discard diagnostics, but never block a verbose MCP child
+  child.on("exit", stopTree);
   child.stdout.on("data", (d: Buffer) => {
     buf += d.toString();
+    if (buf.length > 1_000_000) { failed(new Error("MCP response exceeded 1 MB")); stopTree(); return; }
     let idx: number;
     while ((idx = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, idx).trim();
@@ -201,13 +208,14 @@ async function probeMcp(input: {
       arguments: input.smokeArgs,
     });
     if (callRes.error) throw new Error(`${input.smokeTool}: ${callRes.error.message}`);
+    if (!validSmokeResult(callRes.result)) throw new Error(`${input.smokeTool}: malformed or empty MCP result`);
     if (callRes.result?.isError === true) {
       throw new Error(`${input.smokeTool} isError: ${resultText(callRes.result).slice(0, 200)}`);
     }
 
     return { detail: `${toolCount} tools, ${input.smokeTool} smoke ok` };
   } finally {
-    child.kill("SIGKILL");
+    stopTree();
   }
 }
 
@@ -252,6 +260,13 @@ async function resolveSentryToken(): Promise<string> {
 // The five probes. Each returns {healthy, detail}; timing + try/catch is added
 // by the runner so one probe can never take down the others.
 // ---------------------------------------------------------------------------
+export function validSmokeResult(value: unknown): boolean {
+  const result = value as { content?: unknown; isError?: unknown } | undefined;
+  return !!result && Array.isArray(result.content) && result.content.length > 0 &&
+    (result.isError === undefined || typeof result.isError === "boolean") &&
+    result.content.every((item: any) => item?.type === "text" && typeof item.text === "string" && item.text.trim().length > 0);
+}
+
 async function probeFirebase(): Promise<string> {
   // stdio MCP: initialize → tools/list(>0) → firestore_list_collections (not
   // isError). Exercises ADC + datastore.viewer end to end — the real "can I
@@ -311,20 +326,6 @@ async function probeGcloud(): Promise<string> {
   return "gcloud logging read (cloud_run_revision) exit 0";
 }
 
-async function probeClaudeOauth(): Promise<string> {
-  // Presence-only. We deliberately do NOT call the Anthropic API — token
-  // EXPIRY is a known gap this probe cannot see. But an empty/absent token is
-  // the exact silent failure that broke the hourly monitor when the SA lacked
-  // Secret Manager access, so surfacing "present & non-empty" is worthwhile.
-  const token = await resolveSecret({
-    envVar: "CLAUDE_CODE_OAUTH_TOKEN",
-    secret: CLAUDE_OAUTH_SECRET,
-    timeoutMs: 15_000,
-  });
-  if (!token) throw new Error(`${CLAUDE_OAUTH_SECRET} resolved empty`);
-  return `token present (${token.length} chars); expiry not checked (known gap)`;
-}
-
 async function probeLinear(): Promise<string> {
   // stdio MCP: initialize → tools/list(>0) → list_teams (not isError). This
   // smokes the ACTUAL path the agent now uses — the vendored mcp/linear server
@@ -346,7 +347,6 @@ const PROBES: Array<{ dep: string; run: () => Promise<string> }> = [
   { dep: "firebase", run: probeFirebase },
   { dep: "sentry", run: probeSentry },
   { dep: "gcp", run: probeGcloud },
-  { dep: "claude-oauth-token", run: probeClaudeOauth },
   { dep: "linear", run: probeLinear },
 ];
 
@@ -430,27 +430,38 @@ async function fileSelfHealTicket(input: { key: string; dep: string; detail: str
   return body.data?.issueCreate?.issue?.identifier ?? null;
 }
 
-async function handleFailure(failure: DepResult): Promise<void> {
-  // Everything here is best-effort. A Linear/Telegram outage must not throw
-  // into the run loop — the healthcheck already recorded the failure in status.
+export async function reportDependencyFailure(failure: DepResult, actions: {
+  resolveKey: () => Promise<string>;
+  exists: (key: string) => Promise<boolean>;
+  file: (key: string) => Promise<string | null>;
+  notify: (message: string) => Promise<unknown>;
+}): Promise<void> {
+  let status: string;
   try {
-    const key = await resolveLinearApiKey();
-    if (await openSelfHealTicketExists({ key, dep: failure.dep })) {
-      console.log(`[healthcheck] ${failure.dep} down but an open [SelfHeal] ticket already exists — dedup, no new ticket/alert`);
-      return;
+    const key = await actions.resolveKey();
+    if (await actions.exists(key)) status = "Existing repair ticket remains open.";
+    else {
+      const id = await actions.file(key);
+      if (!id) throw new Error("issueCreate returned no issue identifier");
+      status = `Repair ticket ${id} filed.`;
     }
-    try {
-      await sendTelegram(
-        `⚠️ self-heal: dependency ${failure.dep} DOWN — ${failure.detail}. Filing repair ticket.`,
-      );
-    } catch (e) {
-      console.warn("[healthcheck] Telegram send failed (ignored):", e);
-    }
-    const id = await fileSelfHealTicket({ key, dep: failure.dep, detail: failure.detail });
-    console.log(`[healthcheck] Filed self-heal ticket for ${failure.dep}: ${id ?? "(no identifier)"}`);
   } catch (err) {
-    console.error(`[healthcheck] Failed to file self-heal ticket for ${failure.dep}:`, err instanceof Error ? err.message : err);
+    // Alert independently of Linear: if Linear itself is down, notification
+    // must still work and must never claim a repair ticket was filed.
+    status = `Repair ticket could not be filed: ${err instanceof Error ? err.message : String(err)}.`;
+    console.error(`[healthcheck] ${status}`);
   }
+  await actions.notify(`⚠️ self-heal: dependency ${failure.dep} DOWN — ${failure.detail}. ${status}`);
+}
+async function handleFailure(failure: DepResult): Promise<void> {
+  try {
+    await reportDependencyFailure(failure, {
+      resolveKey: resolveLinearApiKey,
+      exists: key => openSelfHealTicketExists({ key, dep: failure.dep }),
+      file: key => fileSelfHealTicket({ key, dep: failure.dep, detail: failure.detail }),
+      notify: message => healthAlert(`dependency:${failure.dep}`, true, message),
+    });
+  } catch (err) { console.error("[healthcheck] notification failed:", err); }
 }
 
 // ---------------------------------------------------------------------------
@@ -479,9 +490,9 @@ export async function runHealthcheck(): Promise<HealthcheckSnapshot> {
       (failures.length > 0 ? ` — DOWN: ${failures.map((f) => f.dep).join(", ")}` : ""),
   );
 
-  for (const failure of failures) {
-    await handleFailure(failure);
-  }
+  for (const failure of failures) await handleFailure(failure);
+  for (const healthy of results.filter(r => r.healthy)) await healthAlert(`dependency:${healthy.dep}`, false, `✅ Dependency ${healthy.dep} recovered: real probe succeeded.`);
+  await alertProviderReadiness();
 
   return snapshot;
 }

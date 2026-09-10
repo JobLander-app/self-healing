@@ -1,395 +1,122 @@
 import { describe, expect, it, vi } from "vitest";
-import type { TickEffects } from "../src/processSample.js";
-import { processSample } from "../src/processSample.js";
-import type { Sample } from "../src/types.js";
+import { processSample, type TickEffects } from "../src/processSample.js";
+import type { Sample, WatchState } from "../src/types.js";
+import { parseState, serializeState } from "../src/state.js";
 
-const URL = "https://example.a.run.app";
-
-const badSample = ({ bodyText }: { bodyText?: string } = {}): Sample => ({
-  status: "fail",
-  httpCode: "200",
-  bodyText:
-    bodyText ??
-    JSON.stringify({
-      status: "fail",
-      regions: { "europe-west1": { verdict: "fail_slow", reason: "hints dead" } },
-    }),
-});
-
-const healthySample = (): Sample => ({
-  status: "pass",
-  httpCode: "200",
-  bodyText: JSON.stringify({ status: "pass", regions: {} }),
-});
-
-const makeEffects = (): { effects: TickEffects; order: string[]; lines: string[] } => {
-  const order: string[] = [];
+const bad: Sample = { status: "fail", httpCode: "200", bodyText: '{"status":"fail"}' };
+const good: Sample = { status: "pass", httpCode: "200", bodyText: '{"status":"pass"}' };
+function harness() {
+  let state: WatchState = { count: 2, paged: false };
   const lines: string[] = [];
   const effects: TickEffects = {
-    notifyOwner: vi.fn(async () => {
-      order.push("telegram");
-    }),
-    createLinearTicket: vi.fn(async () => {
-      order.push("linear");
-      return "JOB-999";
-    }),
-    triggerDispatcher: vi.fn(async () => {
-      order.push("trigger");
-    }),
-    saveState: vi.fn(async () => {
-      order.push("saveState");
-    }),
-    log: vi.fn(({ line }: { line: string }) => {
-      lines.push(line);
-    }),
+    notifyOwner: vi.fn(async () => {}), createLinearTicket: vi.fn(async () => "JOB-999"),
+    triggerDispatcher: vi.fn(async () => {}),
+    saveState: vi.fn(async ({ state: next }) => { state = parseState({ content: serializeState({ state: next }) }); }),
+    log: ({ line }) => lines.push(line), writeMetrics: vi.fn(async () => {}),
   };
-  return { effects, order, lines };
-};
+  const tick = (sample = bad, now = 1_000_000, dryRun = false) => processSample({ sample,
+    prevState: state, threshold: 3, url: "https://detector.test", dryRun, effects, now });
+  return { effects, tick, state: () => state, set: (next: WatchState) => { state = next; }, lines };
+}
 
-const heartbeats = ({ lines }: { lines: string[] }): string[] =>
-  lines.filter((line) => line.startsWith("WATCHER_HEARTBEAT "));
-
-describe("processSample — incident sequence", () => {
-  it("pages with state persisted first, then Telegram, Linear, trigger", async () => {
-    const { effects, order } = makeEffects();
-    const decision = await processSample({
-      sample: badSample({}),
-      prevState: { count: 2, paged: false },
-      threshold: 3,
-      url: URL,
-      dryRun: false,
-      effects,
+describe("durable watcher delivery", () => {
+  it("checkpoints before effects; continued bad ticks do not repeat confirmed actions", async () => {
+    const h = harness();
+    h.effects.notifyOwner = vi.fn(async () => {
+      expect(h.state().outbox?.[0]?.id).toBeTruthy();
     });
-
-    expect(decision.shouldPage).toBe(true);
-    // saveState → page → linear create → "ticket created" page → trigger.
-    expect(order).toEqual([
-      "saveState",
-      "telegram",
-      "linear",
-      "telegram",
-      "trigger",
-    ]);
-    expect(effects.saveState).toHaveBeenCalledWith({
-      state: { count: 3, paged: true },
-    });
-    expect(effects.notifyOwner).toHaveBeenCalledWith({
-      message:
-        "URGENT P0 [output-watch]: /health/output = fail (HTTP 200). " +
-        "Input alive, output dead/unmeasurable. " +
-        "Regions: europe-west1:fail_slow (hints dead). " +
-        `${URL}/health/output`,
-    });
-    expect(effects.createLinearTicket).toHaveBeenCalledWith({
-      status: "fail",
-      httpCode: "200",
-      regions: "europe-west1:fail_slow (hints dead)",
-    });
+    await h.tick();
+    const id = h.state().outbox![0]!.id;
+    await h.tick(bad, 2_000_000);
+    expect(h.effects.notifyOwner).toHaveBeenCalledTimes(2); // page + created
+    expect(h.effects.createLinearTicket).toHaveBeenCalledTimes(1);
+    expect(h.effects.createLinearTicket).toHaveBeenCalledWith(expect.objectContaining({ incidentId: id }));
+    expect(h.effects.triggerDispatcher).toHaveBeenCalledWith({ incidentId: id });
+    expect(h.effects.writeMetrics).toHaveBeenLastCalledWith(expect.objectContaining({ pagedThisTick: false, pendingActions: 0 }));
   });
-
-  it("Telegram fires FIRST and is not failed by a throwing Linear ticket", async () => {
-    const { effects, order, lines } = makeEffects();
-    effects.createLinearTicket = vi.fn(async () => {
-      order.push("linear");
-      throw new Error("linear 500");
-    });
-
-    await expect(
-      processSample({
-        sample: badSample({}),
-        prevState: { count: 2, paged: false },
-        threshold: 3,
-        url: URL,
-        dryRun: false,
-        effects,
-      }),
-    ).resolves.toMatchObject({ shouldPage: true });
-
-    // Page already sent before Linear ran; trigger still ran after the throw.
-    expect(order).toEqual(["saveState", "telegram", "linear", "trigger"]);
-    expect(lines.some((l) => l.includes("linear create failed"))).toBe(true);
-    expect(heartbeats({ lines })).toHaveLength(1);
+  it("retries transient page failure after backoff across serialization without duplicating ticket", async () => {
+    const h = harness();
+    h.effects.notifyOwner = vi.fn().mockRejectedValueOnce(new Error("timeout after possible delivery")).mockResolvedValue(undefined);
+    await h.tick();
+    const first = h.state().outbox![0]!;
+    expect(first.delivered.page).toBeUndefined();
+    expect(first.delivered.ticket).toBe(true);
+    await h.tick(bad, 1_030_000);
+    expect(h.effects.notifyOwner).toHaveBeenCalledTimes(2);
+    await h.tick(bad, 1_060_000);
+    expect(h.effects.notifyOwner).toHaveBeenCalledTimes(3);
+    expect(h.effects.notifyOwner).toHaveBeenLastCalledWith(expect.objectContaining({ message: expect.stringContaining(first.id) }));
+    expect(h.effects.createLinearTicket).toHaveBeenCalledTimes(1);
+    expect(h.state().outbox![0]!.delivered.page).toBe(true);
+    expect(h.lines.some(l => l.includes("at-least-once"))).toBe(true);
   });
-
-  it("trigger failure is logged, never thrown", async () => {
-    const { effects, lines } = makeEffects();
-    effects.triggerDispatcher = vi.fn(async () => {
-      throw new Error("ECONNREFUSED 4100");
-    });
-
-    await expect(
-      processSample({
-        sample: badSample({}),
-        prevState: { count: 2, paged: false },
-        threshold: 3,
-        url: URL,
-        dryRun: false,
-        effects,
-      }),
-    ).resolves.toBeDefined();
-    expect(lines.some((l) => l.includes("dispatcher trigger failed"))).toBe(true);
+  it("retries failed Linear create with same UUID, and only triggers after a confirmed ticket", async () => {
+    const h = harness();
+    h.effects.createLinearTicket = vi.fn().mockRejectedValueOnce(new Error("lost response")).mockResolvedValue("JOB-999");
+    await h.tick();
+    expect(h.effects.triggerDispatcher).not.toHaveBeenCalled();
+    const id = h.state().outbox![0]!.id;
+    await h.tick(bad, 1_060_000);
+    expect(h.effects.createLinearTicket).toHaveBeenLastCalledWith(expect.objectContaining({ incidentId: id }));
+    expect(h.effects.triggerDispatcher).toHaveBeenCalledOnce();
+    expect(h.effects.notifyOwner).toHaveBeenCalledTimes(2);
   });
-
-  it("a failing Telegram page still lets Linear + trigger run (bash parity)", async () => {
-    const { effects, order } = makeEffects();
-    effects.notifyOwner = vi.fn(async () => {
-      order.push("telegram");
-      throw new Error("notify.sh exit 1");
-    });
-
-    await processSample({
-      sample: badSample({}),
-      prevState: { count: 2, paged: false },
-      threshold: 3,
-      url: URL,
-      dryRun: false,
-      effects,
-    });
-    // The ticket-created notify also runs after the successful linear create
-    // (its own notifyOwner throw is swallowed too), so trigger still lands.
-    expect(order).toEqual([
-      "saveState",
-      "telegram",
-      "linear",
-      "telegram",
-      "trigger",
-    ]);
+  it("retries failed trigger alone with same receipt key", async () => {
+    const h = harness();
+    h.effects.triggerDispatcher = vi.fn().mockRejectedValueOnce(new Error("503")).mockResolvedValue(undefined);
+    await h.tick();
+    await h.tick(bad, 1_060_000);
+    expect(h.effects.triggerDispatcher).toHaveBeenCalledTimes(2);
+    expect(h.effects.notifyOwner).toHaveBeenCalledTimes(2);
+    expect(h.effects.createLinearTicket).toHaveBeenCalledTimes(1);
   });
-
-  it("below threshold: only saves state, no page actions", async () => {
-    const { effects, order } = makeEffects();
-    await processSample({
-      sample: badSample({}),
-      prevState: { count: 0, paged: false },
-      threshold: 3,
-      url: URL,
-      dryRun: false,
-      effects,
-    });
-    expect(order).toEqual(["saveState"]);
-    expect(effects.saveState).toHaveBeenCalledWith({
-      state: { count: 1, paged: false },
-    });
+  it("recovery cancels stale pages/tickets, but retains failed recovery when a new incident starts", async () => {
+    const h = harness();
+    await h.tick();
+    const oldId = h.state().outbox![0]!.id;
+    h.effects.notifyOwner = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue(undefined);
+    await h.tick(good, 1_060_000);
+    expect(h.state().paged).toBe(false);
+    expect(h.state().outbox![0]!.recovered).toBe(true);
+    await h.tick(bad, 1_080_000);
+    await h.tick(bad, 1_090_000);
+    await h.tick(bad, 1_100_000);
+    expect(h.state().outbox).toHaveLength(2);
+    await h.tick(bad, 1_120_000);
+    expect(h.state().outbox).toHaveLength(1);
+    expect(h.state().outbox![0]!.id).not.toBe(oldId);
+    expect(h.effects.createLinearTicket).toHaveBeenCalledTimes(2);
   });
-
-  it("dedup while PAGED: no second page for the same incident", async () => {
-    const { effects, order } = makeEffects();
-    await processSample({
-      sample: badSample({}),
-      prevState: { count: 3, paged: true },
-      threshold: 3,
-      url: URL,
-      dryRun: false,
-      effects,
-    });
-    expect(order).toEqual(["saveState"]);
-    expect(effects.notifyOwner).not.toHaveBeenCalled();
-    expect(effects.saveState).toHaveBeenCalledWith({
-      state: { count: 4, paged: true },
-    });
+  it("malformed HTTP 200 never clears active incident or emits recovery", async () => {
+    const h = harness();
+    await h.tick();
+    await h.tick({ status: "unreachable", httpCode: "200", bodyText: "{broken" }, 1_060_000);
+    expect(h.state().paged).toBe(true);
+    expect(h.state().count).toBe(4);
+    expect(h.effects.notifyOwner).toHaveBeenCalledTimes(2);
   });
-});
-
-describe("processSample — ticket-created lifecycle message", () => {
-  it("sends the '🎫 … created' message after a successful ticket, page first", async () => {
-    const { effects, order } = makeEffects();
-    await processSample({
-      sample: badSample({}),
-      prevState: { count: 2, paged: false },
-      threshold: 3,
-      url: URL,
-      dryRun: false,
-      effects,
-    });
-
-    // Two notifyOwner calls: the P0 page first, the ticket-created message second.
-    expect(effects.notifyOwner).toHaveBeenCalledTimes(2);
-    expect(order.indexOf("linear")).toBeLessThan(order.lastIndexOf("telegram"));
-    const pageIdx = order.indexOf("telegram");
-    expect(pageIdx).toBeLessThan(order.indexOf("linear")); // page fired first
-    expect(effects.notifyOwner).toHaveBeenLastCalledWith({
-      message: "🎫 JOB-999 created — self-healing engaged",
-    });
+  it("legacy PAGED migration avoids new page/ticket and retries recovery", async () => {
+    const h = harness();
+    h.set(parseState({ content: "15 1\n" }));
+    await h.tick();
+    expect(h.effects.createLinearTicket).not.toHaveBeenCalled();
+    h.effects.notifyOwner = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue(undefined);
+    await h.tick(good);
+    expect(h.state().outbox).toHaveLength(1);
+    await h.tick(good, 1_060_000);
+    expect(h.state().outbox).toHaveLength(0);
   });
-
-  it("uses the exact identifier returned by createLinearTicket", async () => {
-    const { effects } = makeEffects();
-    effects.createLinearTicket = vi.fn(async () => "JOB-742");
-    await processSample({
-      sample: badSample({}),
-      prevState: { count: 2, paged: false },
-      threshold: 3,
-      url: URL,
-      dryRun: false,
-      effects,
-    });
-    expect(effects.notifyOwner).toHaveBeenLastCalledWith({
-      message: "🎫 JOB-742 created — self-healing engaged",
-    });
+  it("durable checkpoint failure stops before external mutations", async () => {
+    const h = harness();
+    h.effects.saveState = vi.fn(async () => { throw new Error("disk full"); });
+    await expect(h.tick()).rejects.toThrow("disk full");
+    expect(h.effects.notifyOwner).not.toHaveBeenCalled();
+    expect(h.effects.createLinearTicket).not.toHaveBeenCalled();
   });
-
-  it("no second message when the ticket create returns null (skipped)", async () => {
-    const { effects } = makeEffects();
-    effects.createLinearTicket = vi.fn(async () => null);
-    await processSample({
-      sample: badSample({}),
-      prevState: { count: 2, paged: false },
-      threshold: 3,
-      url: URL,
-      dryRun: false,
-      effects,
-    });
-    // Only the P0 page — no "🎫 created" follow-up.
-    expect(effects.notifyOwner).toHaveBeenCalledTimes(1);
-    expect(effects.notifyOwner).not.toHaveBeenCalledWith({
-      message: expect.stringContaining("🎫"),
-    });
-  });
-
-  it("ticket create failure: no second message, no throw, logged", async () => {
-    const { effects, lines } = makeEffects();
-    effects.createLinearTicket = vi.fn(async () => {
-      throw new Error("linear 500");
-    });
-
-    await expect(
-      processSample({
-        sample: badSample({}),
-        prevState: { count: 2, paged: false },
-        threshold: 3,
-        url: URL,
-        dryRun: false,
-        effects,
-      }),
-    ).resolves.toMatchObject({ shouldPage: true });
-
-    expect(effects.notifyOwner).toHaveBeenCalledTimes(1); // page only
-    expect(lines.some((l) => l.includes("linear create failed"))).toBe(true);
-    expect(effects.triggerDispatcher).toHaveBeenCalledTimes(1); // trigger still ran
-  });
-});
-
-describe("processSample — recovery", () => {
-  it("sends RECOVERED (before state reset) only if the incident paged", async () => {
-    const { effects, order } = makeEffects();
-    await processSample({
-      sample: healthySample(),
-      prevState: { count: 6, paged: true },
-      threshold: 3,
-      url: URL,
-      dryRun: false,
-      effects,
-    });
-    // bash notifies RECOVERED, then writes "0 0"
-    expect(order).toEqual(["telegram", "saveState"]);
-    expect(effects.notifyOwner).toHaveBeenCalledWith({
-      message:
-        "RECOVERED: /health/output = pass (HTTP 200). Product output flowing again.",
-    });
-    expect(effects.saveState).toHaveBeenCalledWith({
-      state: { count: 0, paged: false },
-    });
-  });
-
-  it("healthy without prior page: silent state reset", async () => {
-    const { effects, order } = makeEffects();
-    await processSample({
-      sample: healthySample(),
-      prevState: { count: 2, paged: false },
-      threshold: 3,
-      url: URL,
-      dryRun: false,
-      effects,
-    });
-    expect(order).toEqual(["saveState"]);
-    expect(effects.notifyOwner).not.toHaveBeenCalled();
-  });
-});
-
-describe("processSample — DRY_RUN hook", () => {
-  it("prints [DRY] lines instead of executing page actions (state still saved)", async () => {
-    const { effects, order, lines } = makeEffects();
-    await processSample({
-      sample: badSample({}),
-      prevState: { count: 2, paged: false },
-      threshold: 3,
-      url: URL,
-      dryRun: true,
-      effects,
-    });
-
-    expect(order).toEqual(["saveState"]);
-    expect(effects.notifyOwner).not.toHaveBeenCalled();
-    expect(effects.createLinearTicket).not.toHaveBeenCalled();
-    expect(effects.triggerDispatcher).not.toHaveBeenCalled();
-    expect(lines).toContainEqual(
-      "[DRY] notify P0 status=fail http=200 regions=europe-west1:fail_slow (hints dead)",
-    );
-    expect(
-      lines.some((l) => l.startsWith("[DRY] create [Monitor] ticket status=fail")),
-    ).toBe(true);
-    expect(lines).toContain("[DRY] POST dispatcher /trigger");
-  });
-
-  it("prints [DRY] for the RECOVERED notify too", async () => {
-    const { effects, lines } = makeEffects();
-    await processSample({
-      sample: healthySample(),
-      prevState: { count: 4, paged: true },
-      threshold: 3,
-      url: URL,
-      dryRun: true,
-      effects,
-    });
-    expect(lines).toContain("[DRY] notify RECOVERED pass");
-    expect(effects.notifyOwner).not.toHaveBeenCalled();
-  });
-});
-
-describe("processSample — heartbeat", () => {
-  it("emits exactly one structured WATCHER_HEARTBEAT line per tick", async () => {
-    const { effects, lines } = makeEffects();
-    await processSample({
-      sample: badSample({}),
-      prevState: { count: 2, paged: false },
-      threshold: 3,
-      url: URL,
-      dryRun: false,
-      effects,
-    });
-
-    const beats = heartbeats({ lines });
-    expect(beats).toHaveLength(1);
-    const payload: unknown = JSON.parse(
-      (beats[0] ?? "").replace("WATCHER_HEARTBEAT ", ""),
-    );
-    expect(payload).toMatchObject({
-      status: "fail",
-      http: "200",
-      bad: true,
-      count: 3,
-      paged: true,
-      pagedThisTick: true,
-      recovered: false,
-      dryRun: false,
-    });
-    expect(typeof (payload as { ts: unknown }).ts).toBe("string");
-  });
-
-  it("emits the heartbeat on healthy ticks as well", async () => {
-    const { effects, lines } = makeEffects();
-    await processSample({
-      sample: healthySample(),
-      prevState: { count: 0, paged: false },
-      threshold: 3,
-      url: URL,
-      dryRun: false,
-      effects,
-    });
-    const beats = heartbeats({ lines });
-    expect(beats).toHaveLength(1);
-    expect(JSON.parse((beats[0] ?? "").replace("WATCHER_HEARTBEAT ", ""))).toMatchObject(
-      { bad: false, count: 0, paged: false, pagedThisTick: false },
-    );
+  it("dry-run neither mutates delivery state nor sends notifications", async () => {
+    const h = harness();
+    await h.tick(bad, 1_000_000, true);
+    expect(h.effects.saveState).not.toHaveBeenCalled();
+    expect(h.effects.notifyOwner).not.toHaveBeenCalled();
   });
 });

@@ -28,7 +28,7 @@ export const gcloudSecretReader: SecretReader = async ({ secret, project }) => {
       `--secret=${secret}`,
       "--project",
       project,
-    ]);
+    ], { timeout: 15_000 });
     // Mirror bash `$(...)`: strip trailing newlines only.
     const value = stdout.replace(/\n+$/, "");
     return value.length > 0 ? value : null;
@@ -39,16 +39,6 @@ export const gcloudSecretReader: SecretReader = async ({ secret, project }) => {
 
 const LINEAR_MUTATION =
   "mutation($i:IssueCreateInput!){issueCreate(input:$i){success issue{identifier}}}";
-
-/** Shape of the issueCreate GraphQL response (only the fields we read). */
-interface LinearIssueCreateResponse {
-  data?: {
-    issueCreate?: {
-      success?: boolean;
-      issue?: { identifier?: string };
-    };
-  };
-}
 
 /** Real effects wiring for prod. Tests inject their own TickEffects. */
 export const buildRealEffects = ({
@@ -62,53 +52,44 @@ export const buildRealEffects = ({
   // fallback, PAGE_FAILED log when both fail — see telegram.ts.
   notifyOwner: buildNotifyOwner({ config, env: process.env }),
 
-  createLinearTicket: async ({ status, httpCode, regions }) => {
+  createLinearTicket: async ({ incidentId, status, httpCode, regions }) => {
     const key = await secretReader({
       secret: SECRETS.linearKey,
       project: config.project,
     });
-    if (key === null) return null; // bash skips silently when the key is empty
+    if (key === null) throw new Error("Linear credential unavailable");
+    const gql = async <T>(query: string, variables: unknown): Promise<T> => {
+      const response = await fetch("https://api.linear.app/graphql", {
+        method: "POST", headers: { Authorization: key, "Content-Type": "application/json" },
+        body: JSON.stringify({ query, variables }), signal: AbortSignal.timeout(20_000),
+      });
+      if (!response.ok) throw new Error(`Linear HTTP ${response.status}`);
+      const body = await response.json() as { errors?: unknown[]; data?: unknown };
+      if (body.errors?.length || !body.data) throw new Error("Linear GraphQL request failed");
+      return body.data as T;
+    };
+    // Query by immutable client-generated UUID before every create. A response
+    // timeout after commit is reconciled on the next attempt, with no duplicate.
+    const existing = await gql<{ issues?: { nodes?: { identifier?: string }[] } }>("query($id:ID!){issues(includeArchived:true,filter:{id:{eq:$id}},first:1){nodes{identifier}}}", { id: incidentId });
+    if (!Array.isArray(existing.issues?.nodes)) throw new Error("Malformed Linear lookup response");
+    if (existing.issues.nodes[0]?.identifier) return existing.issues.nodes[0].identifier as string;
     const { title, description } = buildLinearTicket({ status, httpCode, regions });
-    const response = await fetch("https://api.linear.app/graphql", {
-      method: "POST",
-      headers: { Authorization: key, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: LINEAR_MUTATION,
-        variables: {
-          i: {
-            teamId: LINEAR.jobTeam,
-            title,
-            description,
-            labelIds: [LINEAR.lblMonitor, LINEAR.lblBug, LINEAR.lblRepoBackend],
-            priority: 1,
-          },
-        },
-      }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!response.ok) {
-      throw new Error(`linear issueCreate HTTP ${response.status}`);
+    const created = await gql<{ issueCreate?: { success?: boolean; issue?: { identifier?: string } } }>(LINEAR_MUTATION, { i: { id: incidentId, teamId: LINEAR.jobTeam,
+      title, description: `${description}\n\nWatcher incident: ${incidentId}`,
+      labelIds: [LINEAR.lblMonitor, LINEAR.lblBug, LINEAR.lblRepoBackend], priority: 1 } });
+    if (created.issueCreate?.success !== true || !created.issueCreate.issue?.identifier) {
+      throw new Error("Linear issueCreate did not confirm success");
     }
-    // Plumb the created issue identifier back so the watcher can name it in
-    // the "🎫 … created" lifecycle Telegram. Absent identifier ⇒ null (no
-    // second message), never a throw — the ticket itself already landed.
-    const body = (await response.json()) as LinearIssueCreateResponse;
-    return body.data?.issueCreate?.issue?.identifier ?? null;
+    return created.issueCreate.issue.identifier as string;
   },
 
-  triggerDispatcher: async () => {
-    const token =
-      config.dispatchToken ??
-      (await secretReader({
-        secret: SECRETS.triggerToken,
-        project: config.project,
-      })) ??
-      "";
-    await fetch(config.triggerUrl, {
-      method: "POST",
-      headers: { "X-Dispatch-Token": token },
-      signal: AbortSignal.timeout(10_000),
-    });
+  triggerDispatcher: async ({ incidentId }) => {
+    const token = config.dispatchToken ?? await secretReader({ secret: SECRETS.triggerToken, project: config.project });
+    if (!token) throw new Error("Dispatcher trigger credential unavailable");
+    const response = await fetch(config.triggerUrl, { method: "POST",
+      headers: { "X-Dispatch-Token": token, "Idempotency-Key": `output-watch:${incidentId}` },
+      signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) throw new Error(`Dispatcher trigger HTTP ${response.status}`);
   },
 
   saveState: async ({ state }) => {
@@ -121,7 +102,7 @@ export const buildRealEffects = ({
 
   // JOB-731: Prometheus textfile write. writeWatcherMetrics is itself fail-soft
   // (skips when the node_exporter textfile dir is absent, never throws).
-  writeMetrics: async ({ detectorOk, consecutiveBad, pagedThisTick, recoveredThisTick }) => {
+  writeMetrics: async ({ detectorOk, consecutiveBad, pagedThisTick, recoveredThisTick, pendingActions }) => {
     await writeWatcherMetrics({
       path: config.metricsFile,
       now: Date.now(),
@@ -129,6 +110,7 @@ export const buildRealEffects = ({
       consecutiveBad,
       pagedThisTick,
       recoveredThisTick,
+      pendingActions,
     });
   },
 });

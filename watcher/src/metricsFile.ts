@@ -59,11 +59,13 @@ export const renderWatcherMetrics = ({
   detectorOk,
   consecutiveBad,
   counters,
+  pendingActions = 0,
 }: {
   now: number; // ms epoch
   detectorOk: boolean;
   consecutiveBad: number;
   counters: WatcherCounters;
+  pendingActions?: number;
 }): string => {
   const lines = [
     "# HELP selfheal_watcher_last_tick_timestamp_seconds Unix time of the last watcher tick.",
@@ -75,6 +77,9 @@ export const renderWatcherMetrics = ({
     "# HELP selfheal_watcher_consecutive_bad Consecutive bad samples in the current incident.",
     "# TYPE selfheal_watcher_consecutive_bad gauge",
     `selfheal_watcher_consecutive_bad ${consecutiveBad}`,
+    "# HELP selfheal_watcher_pending_actions Actions awaiting confirmed delivery.",
+    "# TYPE selfheal_watcher_pending_actions gauge",
+    `selfheal_watcher_pending_actions ${pendingActions}`,
     "# HELP selfheal_watcher_pages_total Owner pages sent (monotonic).",
     "# TYPE selfheal_watcher_pages_total counter",
     `${COUNTER_NAMES.pages} ${counters.pages}`,
@@ -97,6 +102,7 @@ export const writeWatcherMetrics = async ({
   consecutiveBad,
   pagedThisTick,
   recoveredThisTick,
+  pendingActions = 0,
 }: {
   path: string;
   now: number;
@@ -104,6 +110,7 @@ export const writeWatcherMetrics = async ({
   consecutiveBad: number;
   pagedThisTick: boolean;
   recoveredThisTick: boolean;
+  pendingActions?: number;
 }): Promise<void> => {
   try {
     const dir = dirname(path);
@@ -122,7 +129,7 @@ export const writeWatcherMetrics = async ({
       recoveries: prev.recoveries + (recoveredThisTick ? 1 : 0),
     };
 
-    const body = renderWatcherMetrics({ now, detectorOk, consecutiveBad, counters });
+    const body = renderWatcherMetrics({ now, detectorOk, consecutiveBad, counters, pendingActions });
 
     // Atomic: write a temp file in the SAME dir (rename is atomic only within a
     // filesystem), then rename over the target. A crash mid-write leaves the

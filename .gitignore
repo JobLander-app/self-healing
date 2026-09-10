@@ -17,3 +17,7 @@ crash.log
 
 # Terraform-built function source archive (regenerated on every plan/apply).
 infra/terraform/modules/self-healing-watchdog/.build/
+
+# Transient deployment guard and Python test bytecode.
+.deploying
+__pycache__/

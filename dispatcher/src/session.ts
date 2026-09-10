@@ -9,16 +9,24 @@
  * time, guarded by the module-level `busy` lock.
  */
 
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { accountingStatus } from "./accountingState";
+import { alertAccounting, alertProviderReadiness } from "./healthAlerts";
+import { executeClaude } from "./claude";
+import { executeCodex } from "./codex";
+import { executeWithFallback } from "./fallback";
+import { availableToAttempt, providerOrder, updateProvider } from "./providerState";
+import type { ProviderAttempt } from "./providerTypes";
 import { config } from "./config";
 import { candidateInstruction, queuePolicy, type SelectedCandidate } from "./queue";
 import {
   traceEvent,
   recordRun,
+  recordAttempt,
+  recordAttemptStarted,
   type RunOutcome,
   type RunSummary,
 } from "./trace";
-import { isLimitError, pauseFromLimitError } from "./pause";
+
 import { sendTelegram } from "./notify";
 import * as fs from "fs";
 import * as path from "path";
@@ -271,13 +279,13 @@ export function buildRunNotification(s: RunSummary): string | null {
   if (s.outcome !== "error" && !s.issueId) return null;
   if (s.outcome === "error") {
     const ticket = s.issueId ? `${s.issueId}: ` : "";
-    const cost = s.costUsd > 0 ? ` ${`$${s.costUsd.toFixed(2)}`},` : " ";
+    const cost = s.costUsd !== null && s.costUsd > 0 ? ` ${`$${s.costUsd.toFixed(2)}`},` : " ";
     return `${s.dryRun ? "[DRY_RUN] " : ""}⚠️ ${ticket}run FAILED — ${s.summary.trim() || "no detail"}.${cost}${s.durationSec}s, ${s.numTurns} turns`;
   }
 
   const ticket = s.issueId;
   const summary = s.summary.trim().length > 0 ? s.summary.trim() : "no summary";
-  const cost = `$${s.costUsd.toFixed(2)}`;
+  const cost = s.costUsd === null ? "cost estimate unavailable" : `estimated $${s.costUsd.toFixed(2)}`;
 
   let line: string;
   switch (s.outcome) {
@@ -359,6 +367,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     throw new Error("runDispatchSession called while busy");
   }
 
+  if (!accountingStatus().healthy) throw new Error("Accounting unavailable; no provider attempt started");
   busy = true;
   const turnId = newTurnId();
   currentTurnId = turnId;
@@ -411,13 +420,14 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     `  \`curl -s "${config.changeFeedUrl}/changes?entity=<type>:<id>&entity=<type>:<id>&since=<epoch_ms>&until=<epoch_ms>"\`\n` +
     `  entity types: gcp_instance | region | service | repo (repeat entity= per scope, OR-matched). Each row has an intent_text you judge over.\n` +
     `- intentLookbackHrs = ${config.intentLookbackHrs}h — set since = now − ${config.intentLookbackHrs}h (epoch ms), until = now (epoch ms).\n` +
-    `- FAIL OPEN on availability: if curl fails / the service is unreachable, that is NOT evidence of intent — proceed with the normal fix flow. FAIL CLOSED on judgment: if a returned change explains the anomaly, do NOT fix (outcome "intentional").\n`;
+    `- If the feed returns HTTP 503, missing/stale source coverage, or cannot be reached, continue read-only investigation and repair feed/credential reachability itself. Do not create/delete/restore resources, roll infrastructure back, or reverse potential intentional changes without fresh corroborating intent evidence. Fresh authoritative GitHub, GCP audit and Linear evidence may substitute for the unavailable feed; otherwise backlogged with the explicit coverage failure. If a returned change explains the anomaly, do NOT fix (outcome "intentional").\n`;
 
   const prompt = buildDispatchPrompt({ systemPrompt, freshnessPolicy, changeFeedPolicy, dryRunBanner,
     staleClaimMinutes: config.staleClaimMinutes, dryRun: config.dryRun, candidate });
 
   let output = "";
-  let costUsd = 0;
+  let costUsd: number | null = null;
+  let attempts: ProviderAttempt[] = [];
   let numTurns = 0;
   let sessionError: string | null = null;
 
@@ -435,46 +445,37 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   }, config.maxRunMs);
 
   try {
-    for await (const msg of query({
-      prompt,
-      options: {
-        model: config.claudeModel,
-        maxTurns: config.claudeMaxTurns,
-        allowedTools: [
-          "Bash",
-          "Read",
-          "Edit",
-          "Write",
-          "Glob",
-          "Grep",
-          "Agent",
-          // Vendored MCP servers (see mcpServers below). Wildcard grants every
-          // tool the server exposes; the SDK validates `mcp__<server>__*`.
-          "mcp__firebase__*",
-          "mcp__sentry__*",
-          "mcp__linear__*",
-        ],
-        mcpServers: {
-          firebase: { command: "node", args: [FIREBASE_MCP_ENTRY], env: buildFirebaseMcpEnv() },
-          sentry: { command: "node", args: [SENTRY_MCP_ENTRY], env: buildSentryMcpEnv() },
-          linear: { command: "node", args: [LINEAR_MCP_ENTRY], env: buildLinearMcpEnv() },
-        },
-        permissionMode: "bypassPermissions",
-        abortController,
+    const result = await executeWithFallback({
+      providers: providerOrder(), prompt, signal: abortController.signal,
+      canAttempt: availableToAttempt,
+      execute: (provider, attemptPrompt) => {
+        const id = `${turnId}-${provider}`;
+        recordAttemptStarted(turnId, provider, provider === "claude" ? config.claudeModel : config.codexModel);
+        traceEvent(turnId, "attempt_started", { id, provider, model: provider === "claude" ? config.claudeModel : config.codexModel });
+        return provider === "codex"
+          ? executeCodex({ id, prompt: attemptPrompt, model: config.codexModel,
+              signal: abortController.signal,
+              entries: { firebase: FIREBASE_MCP_ENTRY, sentry: SENTRY_MCP_ENTRY, linear: LINEAR_MCP_ENTRY },
+              onTool: use => traceEvent(turnId, "tool_use", { provider, ...use }) })
+          : executeClaude({ id, prompt: attemptPrompt, abortController,
+              mcpServers: {
+                firebase: { command: "node", args: [FIREBASE_MCP_ENTRY], env: buildFirebaseMcpEnv() },
+                sentry: { command: "node", args: [SENTRY_MCP_ENTRY], env: buildSentryMcpEnv() },
+                linear: { command: "node", args: [LINEAR_MCP_ENTRY], env: buildLinearMcpEnv() },
+              },
+              onMessage: msg => { for (const use of toolUsesFrom(msg)) traceEvent(turnId, "tool_use", { provider, ...use }); } });
       },
-    })) {
-      const m = msg as Record<string, unknown>;
-
-      if (m.type === "result") {
-        output = (m.result as string) || "";
-        costUsd = (m.total_cost_usd as number) || 0;
-        numTurns = (m.num_turns as number) || 0;
-      }
-
-      for (const use of toolUsesFrom(msg)) {
-        traceEvent(turnId, "tool_use", use);
-      }
-    }
+      record: attempt => {
+        attempts.push(attempt);
+        recordAttempt(turnId, attempt);
+        updateProvider(attempt);
+      },
+    });
+    output = result.output;
+    sessionError = result.error;
+    numTurns = attempts.reduce((sum, a) => sum + a.turns, 0);
+    costUsd = attempts.length && attempts.every(a => a.estimatedCostUsd !== null)
+      ? attempts.reduce((sum, a) => sum + a.estimatedCostUsd!, 0) : null;
   } catch (err) {
     sessionError = timedOut
       ? `watchdog: dispatch exceeded MAX_RUN_MS (${Math.round(config.maxRunMs / 60000)}m) — aborted to release the busy lock and unwedge the poll loop`
@@ -496,20 +497,10 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   const parsed = parseDispatchResult(output);
   let outcome: RunOutcome = sessionError ? "error" : parsed.outcome;
 
-  // Subscription rate-limit: don't burn ticks against a wall. Record the
-  // work-in-progress and pause until the reset time the error gives us; the
-  // index.ts watcher resumes automatically right after the window clears.
-  if (sessionError && isLimitError(sessionError)) {
-    const p = pauseFromLimitError(sessionError, parsed.issue ?? null);
-    traceEvent(turnId, "rate_limited", { until: p.until, inProgressIssue: p.inProgressIssue });
-  }
-
   const prMatch = output.match(/https:\/\/github\.com\/[^\s)]+\/pull\/\d+/);
   const prUrl = parsed.pr || prMatch?.[0];
 
-  const note =
-    parsed.note ||
-    (sessionError ? `session error: ${sessionError}` : output.slice(0, 280).replace(/\s+/g, " ").trim());
+  const note = sessionError ? `session error: ${sessionError}` : parsed.note || output.slice(0, 280).replace(/\s+/g, " ").trim();
 
   const summary: RunSummary = {
     turnId,
@@ -521,6 +512,8 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     repo: parsed.repo,
     prUrl,
     costUsd,
+    attempts,
+    costIsEstimate: true,
     numTurns,
     dryRun: config.dryRun,
     summary: note,
@@ -534,6 +527,8 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   // "in prod". no-work / no-ticket runs stay silent (see buildRunNotification).
   // Fail-soft: sendTelegram already swallows its own errors, and we belt-and-
   // suspenders around it so a TG failure can NEVER throw into the poll loop.
+  await alertAccounting().catch(err => console.error("[session] accounting alert failed:", err));
+  await alertProviderReadiness().catch(err => console.error("[session] readiness alert failed:", err));
   const notification = buildRunNotification(summary);
   if (notification !== null) {
     try {
@@ -543,7 +538,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     }
   }
 
-  console.log(`[session] Dispatch run ${turnId} done: ${outcome} (${durationSec}s, $${costUsd.toFixed(2)})`);
+  console.log(`[session] Dispatch run ${turnId} done: ${outcome} (${durationSec}s, estimated $${costUsd?.toFixed(2) ?? "unknown"})`);
 
   return summary;
 }

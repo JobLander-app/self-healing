@@ -109,6 +109,9 @@ jobs:
           # the host, so a quoting bug in them is an outage too.
           shellcheck deploy/bin/*.sh infra/terraform/self-healing/apply.sh
 
+      - name: Transactional deploy failure tests
+        run: python3 -m unittest discover -s deploy/test -p 'test_*.py' -v
+
   watchdog:
     name: watchdog (test)
     runs-on: ubuntu-latest

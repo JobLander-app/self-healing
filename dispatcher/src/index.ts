@@ -1,7 +1,7 @@
 import { config } from "./config";
+import { startHealthAlertRetry } from "./healthAlerts";
 import { startApi } from "./api";
 import { pollOnce, startPollCron, stopPollCron, startResumeWatcher } from "./poller";
-import { pauseRemainingMs, readPause } from "./pause";
 import { hydrateFromDisk } from "./trace";
 import { runHealthcheck, startHealthcheckCron } from "./healthcheck";
 
@@ -27,6 +27,7 @@ async function main() {
   // 1. Rebuild recent-run state from disk so /status and /feed are useful
   //    immediately after a restart (no DB to read from).
   hydrateFromDisk();
+  startHealthAlertRetry();
 
   // 2. Start HTTP API.
   await startApi();
@@ -37,8 +38,8 @@ async function main() {
   startResumeWatcher();
 
   // 3.5 Dependency healthcheck (JOB-731 follow-up): verify the toolchain the
-  //     dispatch session depends on (firebase/sentry MCP, gcloud, Claude OAuth
-  //     token, Linear). Runs once now (non-blocking, fail-soft — never crashes
+  //     dispatch session depends on (firebase/sentry MCP, gcloud,
+  //     Linear). Runs once now (non-blocking, fail-soft — never crashes
   //     the daemon) + every 6h. On a downed dep it files an inward `monitor`
   //     ticket the poll loop repairs.
   startHealthcheckCron();
@@ -50,12 +51,7 @@ async function main() {
   // 5. Kick one poll immediately on startup (don't wait for the first cron
   //    beat) — unless we're inside a rate-limit pause window that survived a
   //    restart, in which case pollOnce skips and the resume watcher takes over.
-  const pausedMs = pauseRemainingMs();
-  if (pausedMs > 0) {
-    console.log(`[claude-code-vm-job-dispatcher] Rate-limit pause active (~${Math.ceil(pausedMs / 60000)}m left, until ${readPause()?.until}); startup poll deferred.`);
-  } else {
-    console.log("[claude-code-vm-job-dispatcher] Running startup poll...");
-  }
+  console.log("[claude-code-vm-job-dispatcher] Checking startup work and provider readiness...");
   pollOnce("startup").catch((err) => console.error("[claude-code-vm-job-dispatcher] startup poll error:", err));
 
   console.log("[claude-code-vm-job-dispatcher] Ready. Self-polling...");

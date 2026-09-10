@@ -13,10 +13,14 @@ import * as cron from "node-cron";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { config } from "./config";
+import { isDeploymentInProgress } from "./deployment";
 import { buildQueueFilter, type SelectedCandidate } from "./queue";
 import { readCandidate } from "./queueClient";
 import { isBusy, runDispatchSession } from "./session";
-import { readPause, clearPause, pauseRemainingMs } from "./pause";
+import { accountingStatus } from "./accountingState";
+import { hydrateFromDisk } from "./trace";
+import { alertAccounting } from "./healthAlerts";
+import { providerOrder, availableToAttempt, nextProviderRetry } from "./providerState";
 
 const execFileAsync = promisify(execFile);
 
@@ -112,24 +116,22 @@ async function precheckCandidates(): Promise<{ outcome: PrecheckOutcome; candida
  * Never throws.
  */
 export async function pollOnce(reason: string): Promise<{ ran: boolean; note: string }> {
+  if (isDeploymentInProgress()) return { ran: false, note: "deploying" };
   if (isBusy()) {
     console.log(`[poller] Skipping tick (reason: ${reason}) — already busy`);
     return { ran: false, note: "busy" };
   }
-  // Respect a subscription rate-limit pause. While paused, every tick would
-  // just re-hit the wall, so skip until the reset time. Once elapsed, clear
-  // the pause and proceed (the limit window has closed).
-  const remaining = pauseRemainingMs();
-  if (remaining > 0) {
-    const until = readPause()?.until;
-    console.log(`[poller] Skipping tick (reason: ${reason}) — rate-limit pause, ~${Math.ceil(remaining / 60000)}m left (until ${until})`);
-    return { ran: false, note: `paused ${Math.ceil(remaining / 60000)}m` };
+  // Retry storage replay after repair without restarting liveness endpoints.
+  if (!accountingStatus().healthy) hydrateFromDisk();
+  await alertAccounting().catch(err => console.error("[poller] accounting alert failed:", err));
+  if (!accountingStatus().healthy) return { ran: false, note: "accounting unavailable" };
+  if (!providerOrder().some(p => availableToAttempt(p))) {
+    return { ran: false, note: "all providers cooling down" };
   }
-  if (readPause()) clearPause(); // window elapsed → resume normal operation
   // Cheap Linear pre-check before spawning the (expensive) agent. Manual
   // /trigger BYPASSES it: a trigger means the watcher just filed a ticket
   // (Linear indexing may lag) and it is also the operator fire-drill path.
-  // Cron/startup/limit-reset ticks all pre-check. "error" falls through to a
+  // Cron/startup/provider-retry ticks all pre-check. "error" falls through to a
   // normal run (fail open — see the pre-check block above).
   let candidate: SelectedCandidate | undefined;
   if (reason !== "trigger") {
@@ -151,6 +153,7 @@ export async function pollOnce(reason: string): Promise<{ ran: boolean; note: st
       return { ran: false, note: "busy" };
     }
   }
+  if (isDeploymentInProgress()) return { ran: false, note: "deploying" };
   try {
     await runDispatchSession(reason, candidate);
     return { ran: true, note: "completed" };
@@ -183,18 +186,16 @@ export function stopPollCron(): void {
 
 let resumeWatcher: NodeJS.Timeout | null = null;
 
-/**
- * Watch for a rate-limit pause to expire and resume work *immediately* (within
- * 60s), rather than waiting up to a full POLL_CRON interval. Only acts at the
- * moment a pause elapses; otherwise the normal cron drives polling.
- */
+/** Retry each provider deadline once within 60s; normal cron remains active. */
 export function startResumeWatcher(): void {
+  let lastDeadline = -Infinity;
   resumeWatcher = setInterval(() => {
-    const p = readPause();
-    if (p && pauseRemainingMs() === 0) {
-      console.log("[poller] Rate-limit window elapsed → resuming immediately.");
-      pollOnce("limit-reset").catch((err) => console.error("[poller] resume error:", err));
+    const deadline = nextProviderRetry(lastDeadline);
+    if (deadline !== null && deadline <= Date.now() && deadline !== lastDeadline) {
+      lastDeadline = deadline;
+      console.log("[poller] Provider retry window elapsed → checking work.");
+      pollOnce("provider-retry").catch(err => console.error("[poller] resume error:", err));
     }
   }, 60_000);
-  console.log("[poller] Resume watcher armed (60s) for rate-limit windows.");
+  console.log("[poller] Resume watcher armed (60s) for provider retry windows.");
 }
