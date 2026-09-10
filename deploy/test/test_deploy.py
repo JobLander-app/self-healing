@@ -182,8 +182,12 @@ esac
 from pathlib import Path
 class Config:
  @classmethod
- def from_env(cls): return Path(os.environ['MOCK_MONITOR_TARGET'])
-def migrate_state(target):
+ def from_env(cls):
+  config=cls()
+  config.state_dir=Path(os.environ['MOCK_MONITOR_TARGET'])
+  return config
+def migrate_state(config):
+ target=config.state_dir
  if not target.exists():
   target.mkdir(parents=True)
   shutil.copyfile(os.environ['MOCK_LEGACY_STATE'],target/'suppressions.json')
@@ -203,6 +207,54 @@ def migrate_state(target):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((target / 'suppressions.json').read_text(), legacy.read_text())
         self.assertTrue((self.host / 'var/log/self-healing-monitor/turns').is_dir())
+
+    def install_real_monitor_release(self):
+        self.git('reset', '-q', '--keep', self.new)
+        # Run the real copy-once migration through actual transactional CD.
+        source = SCRIPT.parents[2] / 'monitor/run_monitor.py'
+        self.write(self.repo / 'monitor/run_monitor.py', source.read_text())
+        self.git('add', 'monitor/run_monitor.py')
+        self.git('commit', '-qm', 'standalone monitor release')
+        self.new = self.git('rev-parse', 'HEAD').strip()
+        self.git('push', '-q', 'origin', 'main')
+        self.git('reset', '-q', '--keep', self.old)
+        home = self.root / 'agent-home'
+        legacy = home / 'workspace/teams/logs/monitoring'
+        self.write(legacy / 'known-errors.json', '{"old-decision":"suppressed"}\n')
+        self.write(legacy / 'latest-report.json', '{"timestamp":"before-cutover"}\n')
+        target = home / '.local/state/self-healing/monitor'
+        return legacy, target, {'HOME': str(home), 'MONITOR_STATE_DIR': str(target)}
+
+    def test_failed_first_monitor_cutover_recopies_newer_legacy_state_on_retry(self):
+        legacy, target, env = self.install_real_monitor_release()
+        self.assert_rollback(self.deploy(FAIL_VERIFY='1', **env))
+        self.assertFalse(target.exists())
+        self.write(legacy / 'known-errors.json', '{"later-decision":"suppressed"}\n')
+        self.write(legacy / 'latest-report.json', '{"timestamp":"after-rollback"}\n')
+        result = self.deploy(**env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ['known-errors.json', 'latest-report.json']:
+            self.assertEqual((target / name).read_text(), (legacy / name).read_text())
+
+    def test_interrupted_first_monitor_cutover_removes_only_its_new_target(self):
+        legacy, target, env = self.install_real_monitor_release()
+        killed = self.deploy(KILL_ACTIVATION='1', **env)
+        self.assertLess(killed.returncode, 0, killed.stderr)
+        self.assertTrue(target.is_dir())
+        manifest = self.root / 'registry/transaction.env'
+        self.assertIn(str(target), manifest.read_text())
+        self.assert_rollback(self.deploy(**env))
+        self.assertFalse(target.exists())
+        self.assertTrue((legacy / 'known-errors.json').is_file())
+
+    def test_monitor_state_existing_before_deploy_survives_rollback(self):
+        legacy, target, env = self.install_real_monitor_release()
+        self.write(target / 'known-errors.json', '{"current-decision":"suppressed"}\n')
+        self.write(target / 'latest-report.json', '{"timestamp":"current-state"}\n')
+        self.assert_rollback(self.deploy(FAIL_VERIFY='1', **env))
+        self.assertEqual((target / 'known-errors.json').read_text(), '{"current-decision":"suppressed"}\n')
+        self.assertEqual((target / 'latest-report.json').read_text(), '{"timestamp":"current-state"}\n')
+        self.assertEqual((legacy / 'known-errors.json').read_text(), '{"old-decision":"suppressed"}\n')
 
     def install_console_template(self):
         self.git('reset', '-q', '--keep', self.new)

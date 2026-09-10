@@ -44,6 +44,10 @@ write new suppressions. Do not pre-create the final state directory. Later launc
 overwrite the new state from that historical copy. Rolling back code requires
 pointing the older launcher at the current `MONITOR_STATE_DIR` so newly recorded
 actions and suppressions are not lost.
+If the first deployment fails during activation, CD removes only the new state
+target recorded as absent before that transaction. The resumed legacy launcher
+keeps its old tree current, and a later retry copies those newer files. A state
+directory that already existed before deployment is preserved during rollback.
 Bootstrap uses `python3 monitor/run_monitor.py --migrate-only` before starting
 the dispatcher. This command refuses a busy monitor lock and performs no
 collection, credential resolution, delivery or inference.
