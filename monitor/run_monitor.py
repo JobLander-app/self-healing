@@ -257,15 +257,23 @@ def stop_session(process):
             process.wait()
 
 
-def session_succeeded(output):
+def session_error(output):
     marker = output.rfind("[SESSION_END]")
-    if marker < 0:
-        return False
-    try:
-        outcome, _ = json.JSONDecoder().raw_decode(output[marker + len("[SESSION_END]"):].strip())
-        return outcome.get("status") == "success"
-    except (ValueError, AttributeError):
-        return False
+    if marker >= 0:
+        try:
+            outcome, _ = json.JSONDecoder().raw_decode(output[marker + len("[SESSION_END]"):].strip())
+            if outcome.get("status") == "success":
+                return None
+            reason = outcome.get("reason")
+            if outcome.get("status") == "failed" and isinstance(reason, str) and reason.strip():
+                return "monitor escalation failed: " + reason.strip()[:1000]
+        except (ValueError, AttributeError):
+            pass
+    return "monitor escalation did not report success"
+
+
+def session_succeeded(output):
+    return session_error(output) is None
 
 
 def parse_provider_result(log_file):
@@ -311,8 +319,9 @@ def run_session(config):
     result = parse_provider_result(log_file)
     if failure:
         result["error"] = failure
-    if process.returncode or not session_succeeded(result["output"]):
-        result["error"] = result.get("error") or "monitor escalation did not report success"
+    marker_error = session_error(result["output"])
+    if process.returncode or marker_error:
+        result["error"] = result.get("error") or marker_error or "monitor provider exited unsuccessfully"
     actions_path = runtime / "linear-actions.json"
     try:
         shutil.copy2(actions_path, log_file.with_suffix(".actions.json"))

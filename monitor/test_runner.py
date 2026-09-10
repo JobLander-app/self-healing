@@ -234,6 +234,60 @@ print(json.dumps({"output":'[SESSION_END] {"status":"success"}',"error":None,"at
         self.assertIsNone(result["error"])
         self.assertEqual(result["actions"]["linear_created"], ["JOB-42"])
 
+    def test_command_only_provider_can_read_the_batch_and_persist_action_coverage(self):
+        # Exercise the prompt's executable read contract with only a command
+        # interface, as Codex has. No native Read/Write or inference is involved.
+        self.collector(escalations=[{"action": "linear_create_if_no_dup"}])(self.config)
+        fake = self.root / "command_provider.py"
+        fake.write_text(r'''import json,re,subprocess,sys
+prompt=sys.stdin.read()
+command=re.search(r"```sh\n(.*?)```", prompt, re.S).group(1).strip()
+read=subprocess.run(["sh","-c",command],capture_output=True,text=True,check=True).stdout
+decoder=json.JSONDecoder()
+summary,end=decoder.raw_decode(read)
+previous,_=decoder.raw_decode(read[end:].lstrip())
+assert summary["escalations"][0]["signature"] == "audio:failed"
+assert previous["issue_by_signature"] == {}
+previous["linear_created"].append("JOB-42")
+previous["issue_by_signature"]["audio:failed"]="JOB-42"
+subprocess.run(["sh","-c",'printf "%s\\n" "$1" > linear-actions.json',"bookkeeping",json.dumps(previous)],check=True)
+print(json.dumps({"output":'[SESSION_END] {"type":"monitor","status":"success"}',"error":None,"attempts":[]}))
+''')
+        real_spawn = subprocess.Popen
+        def spawn(command, **kwargs):
+            self.assertTrue(command[1].endswith("dispatcher/dist/providerCli.js"))
+            self.assertEqual(kwargs["cwd"], self.config.state_dir / "runtime")
+            return real_spawn([sys.executable, str(fake)], **kwargs)
+        with patch.object(runner, "provider_env", return_value=dict(os.environ)), \
+                patch.object(runner.subprocess, "Popen", side_effect=spawn):
+            result = runner.run_session(self.config)
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["actions"]["issue_by_signature"], {"audio:failed": "JOB-42"})
+        self.assertEqual(result["actions"]["linear_created"], ["JOB-42"])
+
+    def test_completed_transport_preserves_failed_marker_reason_and_pending_escalation(self):
+        # Reproduce the live failure: transport exit 0, but a failed monitor
+        # marker and no recorded outcomes. The diagnostic and outbox must survive.
+        reason = "Cannot read triage-summary.json: no local file-reading tool is available"
+        fake = self.root / "failed_provider.py"
+        fake.write_text("import json,sys\nsys.stdin.read()\nprint(" + repr(json.dumps({
+            "output": "[SESSION_END] " + json.dumps({"type": "monitor", "status": "failed", "reason": reason}),
+            "error": None, "attempts": [],
+        })) + ")\n")
+        real_spawn = subprocess.Popen
+        def spawn(command, **kwargs):
+            return real_spawn([sys.executable, str(fake)], **kwargs)
+        with patch.object(runner, "provider_env", return_value=dict(os.environ)), \
+                patch.object(runner.subprocess, "Popen", side_effect=spawn):
+            self.assertEqual(self.run_once(
+                collector=self.collector(escalations=[{"action": "linear_create_if_no_dup"}]),
+                session_runner=runner.run_session), 1)
+        result = json.loads((self.config.state_dir / "last-session.json").read_text())
+        self.assertIn("monitor escalation failed: " + reason, result["errors"])
+        self.assertEqual(result["pendingSignatures"], ["audio:failed"])
+        self.assertIn("audio:failed", json.loads((self.config.state_dir / "linear-outbox.json").read_text()))
+        self.assertFalse(result["heartbeatPublished"])
+
     def test_usage_metrics_do_not_double_count_cached_input_or_invent_unknown_zero(self):
         ledger = self.config.provider_log_dir.parent / "usage-ledger.jsonl"
         ledger.parent.mkdir()

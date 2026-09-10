@@ -41,7 +41,7 @@ monitor, dispatcher) is the reusable engine.
 |---|---|---|---|
 | **Detector** (consumer-owned) | "did value reach the user?" — JobLander's is `/health/output`, per region vs same-window-yesterday baseline (JOB-668) | JobLander `backend` repo, `src/services/health-output/` | inside the consumer's service (Cloud Run, 3 regions) — NOT this repo |
 | **Watcher** | polls the detector 1/min; on 3 consecutive bad samples: Telegram P0 → Linear `[Monitor]` ticket → wakes the dispatcher; RECOVERED on clear. Hysteresis avoids flapping (JOB-670, JOB-725) | `watcher/` | minute cron on the VM |
-| **Hourly monitor** | error-side triage (Cloud Run / Cloud Functions / LiveKit VMs / Sentry) → escalations + verbatim P0 alerts; a Claude session sends only what the deterministic `triage.py` prepared | `monitor/` | hourly cron on the VM |
+| **Hourly monitor** | error-side triage (Cloud Run / Cloud Functions / LiveKit VMs / Sentry) → escalations + verbatim P0 alerts; a subscription provider session files only what deterministic `triage.py` prepared | `monitor/` | hourly cron on the VM |
 | **Dispatcher** | autonomous fixer: picks ONE `monitor`-labeled Linear ticket per tick, investigates prod, writes a fix, opens a PR, and auto-merges (the sanctioned Self-Healing Loop exception) — or proves it's not a bug | `dispatcher/` | systemd on the VM, HTTP :4100 (`/trigger`, `/status`, `/feed`) |
 | **Watchdog** (off-box) | the only layer that is not on the VM: reads heartbeat age from Cloud Logging every 5 min, pages Telegram, and resets the instance on its own — budgeted, and never on a signal it has never seen (2026-08-26) | `watchdog/` | Cloud Scheduler → Cloud Functions gen2, `europe-west1` |
 
