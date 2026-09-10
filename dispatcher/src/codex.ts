@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { config, LINEAR_AGENT_CLAIMED_LABEL_ID } from "./config";
 import { classifyFailure, safeError } from "./providerState";
 import { unknownUsage, type AttemptResult, type ProviderAttempt, type TokenUsage } from "./providerTypes";
@@ -39,15 +42,38 @@ export function codexTool(event: Record<string, any>): { tool: string } | null {
   }
   return null;
 }
-export async function executeCodex(input: {
+interface CodexInput {
   id: string; prompt: string; model: string; entries: Record<string, string>;
   signal: AbortSignal; onTool: (use: { tool: string }) => void;
-}): Promise<AttemptResult> {
+}
+export function executeCodex(input: CodexInput): Promise<AttemptResult> {
+  return executeCodexTransport(input, { args: codexArgs(input.entries, input.model), env: codexEnv() });
+}
+
+/** Smoke has no repair tools or cloud credentials. Keep the original auth home
+ * so subscription refreshes remain in place, but ignore its config/rules. */
+export async function executeCodexSmoke(input: Omit<CodexInput, "entries">): Promise<AttemptResult> {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "shl-codex-probe-"));
+  const env: NodeJS.ProcessEnv = { HOME: cwd, TMPDIR: cwd,
+    CODEX_HOME: path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), ".codex-shl")) };
+  for (const key of ["PATH", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR"]) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  const args = codexArgs({}, input.model).filter(arg => arg !== "--dangerously-bypass-approvals-and-sandbox");
+  args.splice(args.length - 1, 0, "--sandbox", "read-only", "--ignore-user-config", "--ignore-rules",
+    "-c", 'approval_policy="never"', "-c", 'cli_auth_credentials_store="file"',
+    "-c", 'history.persistence="none"', "-c", 'web_search="disabled"',
+    "--disable", "apps", "--disable", "shell_tool", "--disable", "multi_agent");
+  try { return await executeCodexTransport({ ...input, entries: {} }, { args, env, cwd }); }
+  finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+}
+
+async function executeCodexTransport(input: CodexInput, launch: { args: string[]; env: NodeJS.ProcessEnv; cwd?: string }): Promise<AttemptResult> {
   const attempt: ProviderAttempt = { id: input.id, provider: "codex", model: input.model, startedAt: new Date().toISOString(), finishedAt: "", status: "failed", usage: unknownUsage(), estimatedCostUsd: null, costSource: "unavailable", turns: 0 };
   let output = "", stderr = "", buffer = "", failure = "", completed = false, toolsUsed = false, transportFailed = false;
   const issueIds = new Set<string>();
   const tracedItems = new Set<string>();
-  const child = spawn(config.codexBin, codexArgs(input.entries, input.model), { env: codexEnv(), stdio: ["pipe", "pipe", "pipe"], detached: true });
+  const child = spawn(config.codexBin, launch.args, { env: launch.env, cwd: launch.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
   const kill = () => { if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* exited */ } } };
   const abort = () => { failure = "watchdog: Codex run aborted"; kill(); };
   input.signal.addEventListener("abort", abort, { once: true });
