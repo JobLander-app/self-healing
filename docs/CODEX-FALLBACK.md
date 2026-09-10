@@ -160,7 +160,9 @@ deadlines rather than obsolete global pause state.
 Capability failure/recovery is notified independently of Linear and does not
 create recurring quota repair tickets. Dependency tickets are deduplicated,
 but notification delivery is tracked separately: a failed Telegram send stays
-pending across restart and retries each minute. Existing open tickets do not
+pending across restart and retries each minute. A delivered failure stays silent
+until recovery; another failure after recovery starts a new notification.
+Existing open tickets do not
 suppress a previously undelivered alert. Recovery notifications require a real
 successful probe or turn. Grafana includes overall/provider readiness, actual
 token counters, attempts/failures and unknown-usage counts.

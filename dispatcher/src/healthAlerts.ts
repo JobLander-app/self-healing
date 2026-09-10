@@ -46,8 +46,13 @@ async function deliver(key: string, send = sendTelegram): Promise<void> {
 }
 export async function healthAlert(key: string, active: boolean, message: string, send = sendTelegram): Promise<void> {
   const previous = state()[key];
-  if (!active && !previous?.active) return;
-  if (previous?.active === active && !previous.pending && Date.now() - (previous.deliveredAt ?? 0) < 6 * 3_600_000) return;
+  // One delivered notification per state transition. Repeated probes must
+  // retry pending delivery without re-enqueuing an acknowledged outage.
+  if (previous?.active === active) {
+    if (previous.pending) await deliver(key, send);
+    return;
+  }
+  if (!active && !previous) return;
   state()[key] = { active, message: safeError(message), pending: true };
   save();
   await deliver(key, send);

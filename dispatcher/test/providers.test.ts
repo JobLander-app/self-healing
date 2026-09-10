@@ -303,3 +303,41 @@ test("Prometheus metric families are contiguous even with multiple providers and
     if (name !== last) { assert.equal(seen.has(name), false, `${name} reappears after another family`); seen.add(name); last = name; }
   }
 });
+
+test("delivered active alerts remain suppressed beyond six hours until recovery and recurrence", async () => {
+  const { healthAlert } = await import("../src/healthAlerts");
+  const messages: string[] = [];
+  const send = async (message: string) => { messages.push(message); return true; };
+  const originalNow = Date.now;
+  const start = originalNow();
+  try {
+    Date.now = () => start;
+    await healthAlert("no-realert", true, "down", send);
+    for (const hours of [6, 12, 24, 72]) {
+      Date.now = () => start + hours * 3_600_000;
+      await healthAlert("no-realert", true, "still down", send);
+    }
+    assert.deepEqual(messages, ["down"]);
+    await healthAlert("no-realert", false, "recovered", send);
+    await healthAlert("no-realert", false, "still healthy", send);
+    await healthAlert("no-realert", true, "down again", send);
+    assert.deepEqual(messages, ["down", "recovered", "down again"]);
+  } finally { Date.now = originalNow; }
+});
+
+test("repeated state observations retry pending delivery without replacing an in-flight alert", async () => {
+  const { healthAlert } = await import("../src/healthAlerts");
+  let calls = 0;
+  await healthAlert("pending-observation", true, "down", async () => { calls++; return false; });
+  let acknowledge!: () => void;
+  const pending = healthAlert("pending-observation", true, "still down", async () => {
+    calls++;
+    await new Promise<void>(resolve => { acknowledge = resolve; });
+    return true;
+  });
+  await healthAlert("pending-observation", true, "down again during delivery", async () => { calls++; return true; });
+  acknowledge(); await pending;
+  await healthAlert("pending-observation", true, "still down after delivery", async () => { calls++; return true; });
+  assert.equal(calls, 2);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, "health-alerts.json"), "utf8"))["pending-observation"].pending, false);
+});
