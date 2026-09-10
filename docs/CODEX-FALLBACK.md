@@ -123,10 +123,17 @@ SDK model breakdown is retained and used for token metrics when submodels ran.
   already includes cached tokens, so `cached_input_tokens` is not added again.
 * `cachedInput` and `cacheWrite` are subsets of input. Do not sum them with input.
 * `null` means not reported/unknown; numeric zero means the provider reported
-  zero. Missing usage increments the unknown-usage counter.
+  zero. Any missing field (including cache reads/writes or a model breakdown)
+  increments the attempt's unknown-usage counter. Token totals contain only
+  known values; a field with no reports has no token series. Per-field
+  `selfheal_dispatcher_provider_token_reports_total{coverage="reported"|"unreported"}`
+  counts distinguish partial known totals from complete coverage.
 * `estimatedCostUsd` from Claude is the SDK's estimate, not the subscription
   invoice. Codex does not report dollar cost: its estimate stays `null`.
   Aggregate cost metrics contain known estimates only; they are never billed USD.
+  `/status.recentKnownEstimatedCostUsd` retains each known attempt estimate even
+  when the mixed-provider run's full `costUsd` is unknown; legacy runs fall back
+  to their recorded run estimate.
 
 ## Liveness, readiness and notifications
 

@@ -70,10 +70,11 @@ CodeRabbit auto-reviews ONLY where auto incremental reviews are enabled (see Rev
 
 - Wait ~60–90 seconds after the push, then poll ALL THREE endpoints for `coderabbitai`:
   ```
-  gh api repos/{owner}/{repo}/issues/{number}/comments --jq '[.[] | select(.user.login | test("coderabbit"; "i")) | {body, created_at}]'
-  gh api repos/{owner}/{repo}/pulls/{number}/comments  --jq '[.[] | select(.user.login | test("coderabbit"; "i")) | {path, line, body}]'
-  gh api repos/{owner}/{repo}/pulls/{number}/reviews   --jq '[.[] | select(.user.login | test("coderabbit"; "i")) | {state, body}]'
+  gh api --paginate repos/{owner}/{repo}/issues/{number}/comments --jq '[.[] | select(.user.login | test("coderabbit"; "i")) | {body, created_at}]'
+  gh api --paginate repos/{owner}/{repo}/pulls/{number}/comments  --jq '[.[] | select(.user.login | test("coderabbit"; "i")) | {path, line, body}]'
+  gh api --paginate repos/{owner}/{repo}/pulls/{number}/reviews   --jq '[.[] | select(.user.login | test("coderabbit"; "i")) | {state, body}]'
   ```
+  - Always read every page: replies can push new findings beyond the default 30 results.
   - `/issues/{n}/comments` — the high-level summary + walkthrough comment (primary "it ran" signal).
   - `/pulls/{n}/comments` — inline, line-anchored findings (the actionable ones).
   - `/pulls/{n}/reviews` — the review wrapper / status.
@@ -97,8 +98,8 @@ Honor applicable repository review requirements unless the current user instruct
 
 - Check if a Codex review already exists (don't double-trigger):
   ```
-  gh api repos/{owner}/{repo}/issues/{number}/comments --jq '[.[] | select(.user.login | test("codex"; "i"))] | length'
-  gh api repos/{owner}/{repo}/pulls/{number}/comments  --jq '[.[] | select(.user.login | test("codex"; "i"))] | length'
+  gh api --paginate repos/{owner}/{repo}/issues/{number}/comments --jq '[.[] | select(.user.login | test("codex"; "i"))] | length'
+  gh api --paginate repos/{owner}/{repo}/pulls/{number}/comments  --jq '[.[] | select(.user.login | test("codex"; "i"))] | length'
   ```
 - If none, comment `@codex review`. Wait ~60s, then poll BOTH `/issues/{n}/comments` (summary verdict — the PRIMARY Codex signal, even "no major issues") and `/pulls/{n}/comments` (inline findings) for `chatgpt-codex-connector`. Retry up to 5× at 60s (Codex can take 3–6 min).
 - Done condition: an explicit Codex verdict on either endpoint.

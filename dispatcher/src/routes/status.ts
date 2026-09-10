@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { isBusy, getCurrentTurnId } from "../session";
-import { getRecentRuns, getLastRun } from "../trace";
+import { getRecentRuns, getLastRun, type RunSummary } from "../trace";
 import { getLastPrecheck } from "../poller";
 import { getLastHealthcheck } from "../healthcheck";
 import { config } from "../config";
@@ -32,6 +32,12 @@ router.get("/ready", (_req: Request, res: Response) => {
   res.status(state.ready ? 200 : 503).json({ status: state.ready ? "ok" : "degraded", ...state });
 });
 
+export function knownEstimatedCost(run: RunSummary): number {
+  return run.attempts?.length
+    ? run.attempts.reduce((sum, attempt) => sum + (attempt.estimatedCostUsd ?? 0), 0)
+    : run.costUsd ?? 0;
+}
+
 // GET /status — busy flag + last run + recent cost.
 router.get("/status", (_req: Request, res: Response) => {
   const recent = getRecentRuns(10);
@@ -62,7 +68,7 @@ router.get("/status", (_req: Request, res: Response) => {
     maxRunMs: config.maxRunMs,
     recentRuns: recent.length,
     recentCostUsd: recent.some(r => r.costUsd === null) ? null : Math.round(recentCost * 100) / 100,
-    recentKnownEstimatedCostUsd: Math.round(recentCost * 100) / 100,
+    recentKnownEstimatedCostUsd: Math.round(recent.reduce((sum, run) => sum + knownEstimatedCost(run), 0) * 100) / 100,
     // JOB-731: pre-check observability. null until the first pre-checked tick.
     lastPrecheck: getLastPrecheck(),
     // JOB-731 follow-up: dependency healthcheck. null until the first run.

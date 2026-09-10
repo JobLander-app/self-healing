@@ -3,7 +3,7 @@
  * estimate, not a subscription bill. Missing token/cost reports stay unknown.
  */
 import type { RunOutcome, RunSummary } from "./trace";
-import type { ProviderAttempt } from "./providerTypes";
+import type { ProviderAttempt, TokenUsage } from "./providerTypes";
 import { accountingStatus } from "./accountingState";
 import { providerReadiness } from "./providerState";
 import type { HealthcheckSnapshot } from "./healthcheck";
@@ -48,7 +48,10 @@ const runsByOutcome: Record<RunOutcome, number> = {
   unknown: 0,
 };
 let costUsdTotal = 0;
-const modelTokens = new Map<string, { provider: string; model: string; input: number; cachedInput: number; cacheWrite: number; output: number }>();
+const TOKEN_KINDS = ["input", "cachedInput", "cacheWrite", "output"] as const;
+type FieldCounts = Record<keyof TokenUsage, number>;
+const emptyFields = (): FieldCounts => ({ input: 0, cachedInput: 0, cacheWrite: 0, output: 0 });
+const modelTokens = new Map<string, { provider: string; model: string; total: FieldCounts; reported: FieldCounts; unreported: FieldCounts }>();
 const attemptCounters = new Map<string, { provider: string; model: string; attempts: number; failures: number; input: number; cachedInput: number; cacheWrite: number; output: number; unknown: number; estimatedCost: number }>();
 export function incrementAttemptCounters(a: ProviderAttempt): void {
   const key = `${a.provider}:${a.model}`;
@@ -56,12 +59,17 @@ export function incrementAttemptCounters(a: ProviderAttempt): void {
   if (!c) { c = { provider: a.provider, model: a.model, attempts: 0, failures: 0, input: 0, cachedInput: 0, cacheWrite: 0, output: 0, unknown: 0, estimatedCost: 0 }; attemptCounters.set(key, c); }
   c.attempts++;
   if (a.status === "failed") c.failures++;
-  if (a.usage.input === null || a.usage.output === null) c.unknown++;
-  for (const row of a.models?.length ? a.models : [{ model: a.model, usage: a.usage }]) {
+  const rows = a.models?.length ? a.models : [{ model: a.model, usage: a.usage }];
+  if ([a.usage, ...rows.map(row => row.usage)].some(usage => TOKEN_KINDS.some(kind => usage[kind] === null))) c.unknown++;
+  for (const row of rows) {
     const modelKey = `${a.provider}:${row.model}`;
     let tokens = modelTokens.get(modelKey);
-    if (!tokens) { tokens = { provider: a.provider, model: row.model, input: 0, cachedInput: 0, cacheWrite: 0, output: 0 }; modelTokens.set(modelKey, tokens); }
-    for (const k of ["input", "cachedInput", "cacheWrite", "output"] as const) tokens[k] += row.usage[k] ?? 0;
+    if (!tokens) { tokens = { provider: a.provider, model: row.model, total: emptyFields(), reported: emptyFields(), unreported: emptyFields() }; modelTokens.set(modelKey, tokens); }
+    for (const kind of TOKEN_KINDS) {
+      const value = row.usage[kind];
+      if (value === null) tokens.unreported[kind]++;
+      else { tokens.reported[kind]++; tokens.total[kind] += value; }
+    }
   }
   c.estimatedCost += a.estimatedCostUsd ?? 0;
   costUsdTotal += a.estimatedCostUsd ?? 0;
@@ -154,10 +162,19 @@ export function renderMetrics(input: MetricsInput): string {
         out.push(`${metric}{${labels}} ${Number(c[key].toFixed(6))}`);
       }
     }
-    out.push("# HELP selfheal_dispatcher_provider_tokens_total Actual reported tokens; cached input and writes are subsets of input.", "# TYPE selfheal_dispatcher_provider_tokens_total counter");
+    out.push("# HELP selfheal_dispatcher_provider_tokens_total Known token subtotal, excluding unreported fields; coverage is in provider_token_reports_total. Cached input and writes are subsets of input.", "# TYPE selfheal_dispatcher_provider_tokens_total counter");
     for (const c of modelTokens.values()) {
       const labels = `provider=${JSON.stringify(c.provider)},model=${JSON.stringify(c.model)}`;
-      for (const kind of ["input", "cachedInput", "cacheWrite", "output"] as const) out.push(`selfheal_dispatcher_provider_tokens_total{${labels},kind="${kind}"} ${c[kind]}`);
+      for (const kind of TOKEN_KINDS) {
+        if (c.reported[kind] > 0) out.push(`selfheal_dispatcher_provider_tokens_total{${labels},kind="${kind}"} ${c.total[kind]}`);
+      }
+    }
+    out.push("# HELP selfheal_dispatcher_provider_token_reports_total Per-field usage report coverage; unreported is unknown, not zero tokens.", "# TYPE selfheal_dispatcher_provider_token_reports_total counter");
+    for (const c of modelTokens.values()) {
+      const labels = `provider=${JSON.stringify(c.provider)},model=${JSON.stringify(c.model)}`;
+      for (const kind of TOKEN_KINDS) {
+        for (const coverage of ["reported", "unreported"] as const) out.push(`selfheal_dispatcher_provider_token_reports_total{${labels},kind="${kind}",coverage="${coverage}"} ${c[coverage][kind]}`);
+      }
     }
   }
 
