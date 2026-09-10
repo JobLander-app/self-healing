@@ -81,6 +81,10 @@ So the loop now watches itself from three places at once:
 
 ---
 
+The monitor and executor are both owned by this repository. See
+[`monitor/README.md`](monitor/README.md) for standalone monitor lifecycle, state
+migration, P0 delivery retries and successful-completion alerts.
+
 ## Dispatcher tooling (MCP servers, vendored in-repo)
 
 The dispatcher's investigation session (Claude Agent SDK `query()` in
@@ -170,9 +174,10 @@ watcher/       TypeScript port of output-watch.sh — pure decision core
                (Telegram-first paging, best-effort Linear/trigger, heartbeat).
                vitest suite. output-watch.sh kept for reference/parity.
 monitor/       triage.py (deterministic collector: Cloud Run/Functions/LiveKit
-               via Cloud Logging + Sentry) + run-monitor-session.sh (hourly
-               Claude escalation session; runs from THIS repo, reads state in
-               the workspace checkout).
+               via Cloud Logging + Sentry) + standalone run_monitor.py and
+               prompt.md. Empty batches skip inference; escalation uses the
+               shared dispatcher provider runner. Durable state stays outside
+               the checkout, migrated once from the historical workspace path.
 dispatcher/    Node 20 + TS autonomous fixer. src/ (reconstructed, tsc → dist/,
                dist committed — the VM runs dist), CLAUDE.md (the fixer's
                constitution — a security-level document, versioned), poller.ts

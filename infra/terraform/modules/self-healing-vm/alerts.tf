@@ -1,11 +1,12 @@
 # Alerting for the self-healing loop itself — "who watches the watcher".
 #
-# Two absence (dead-man style) policies:
+# Absence (dead-man style) policies:
 #   1. WATCHER_HEARTBEAT absent 5 min  → the watcher cron is dead/broken.
 #   2. meetings_saved absent 4h        → product-level STT outage backstop
 #      (codifies the hand-made JOB-651 policy; the hand-made one stays
 #      until cutover, Phase 4 — resources here use distinct names so the
 #      two coexist).
+#   3. MONITOR_HEARTBEAT success absent 2h -> hourly escalation is broken.
 
 resource "google_monitoring_notification_channel" "email" {
   project      = var.project_id
@@ -81,6 +82,60 @@ resource "google_monitoring_alert_policy" "watcher_dead_man" {
   alert_strategy {
     auto_close = "86400s"
   }
+}
+
+# Successful quiet runs count too. Failed collection, missing providers, failed
+# P0 delivery or incomplete escalation deliberately do not publish this signal.
+# Two hours allow the hourly interval plus bounded collection/escalation time.
+resource "google_logging_metric" "monitor_heartbeat" {
+  project = var.project_id
+  name    = "self_healing_monitor_heartbeat"
+  filter  = "logName=\"projects/${var.project_id}/logs/self-healing-monitor\" AND textPayload:\"MONITOR_HEARTBEAT success\""
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+  }
+}
+
+resource "google_monitoring_alert_policy" "monitor_dead_man" {
+  project      = var.project_id
+  display_name = "P1: self-healing monitor success absent 2h (dead-man) — JOB-947"
+  combiner     = "OR"
+
+  documentation {
+    mime_type = "text/markdown"
+    content   = <<-EOT
+      The hourly monitor on `${var.vm_name}` has not completed successfully for
+      two hours. The watcher/dispatcher heartbeats do not cover this process.
+      A quiet collection emits success without inference; an empty queue is healthy.
+
+      Check `/home/joblander/.local/state/self-healing/monitor/last-session.json`,
+      `last-triage-run.log`, and `journalctl -t joblander-monitor`. Provider attempts
+      are retained under `/var/log/self-healing-monitor`; inspect quota/auth state
+      and pending `p0-outbox.json` deliveries. Verify the single hourly cron still
+      points to `self-healing/monitor/run-monitor-session.sh`.
+      Do not reset the VM for this signal: a model quota or tool failure needs
+      diagnosis, not a reboot of a healthy host.
+    EOT
+  }
+
+  conditions {
+    display_name = "MONITOR_HEARTBEAT success absent 2h"
+    condition_absent {
+      filter   = "resource.type = \"global\" AND metric.type = \"logging.googleapis.com/user/${google_logging_metric.monitor_heartbeat.name}\""
+      duration = "7200s"
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+      trigger { count = 1 }
+    }
+  }
+
+  notification_channels = concat([google_monitoring_notification_channel.email.id], var.extra_notification_channel_ids)
+  alert_strategy { auto_close = "86400s" }
 }
 
 # --- 2. Backstop: no meetings saved for 4h (JOB-651) ------------------------

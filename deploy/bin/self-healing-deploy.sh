@@ -288,6 +288,18 @@ if [ -d "$TX/stage/monitor" ]; then
   install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0750 \
     "$SYSTEM_ROOT/var/log/self-healing-monitor" "$SYSTEM_ROOT/var/log/self-healing-monitor/turns"
 fi
+# A failed first cutover restores the legacy cron, which resumes writing the
+# legacy tree. Remove only a target created by THIS transaction so the retry
+# imports that newer legacy state. Established monitor state is never backed
+# up or removed: its live reports and suppressions must survive code rollback.
+if [ -f "$TX/stage/monitor/run_monitor.py" ]; then
+  monitor_target="$(as_agent env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$TX/stage/monitor" \
+    python3 -c 'from run_monitor import Config; print(Config.from_env().state_dir)')"
+  [[ "$monitor_target" = /* && "$monitor_target" != / ]]
+  if [ ! -e "$monitor_target" ] && [ ! -L "$monitor_target" ]; then
+    ABSENT_PATHS+=("$monitor_target")
+  fi
+fi
 # Durable rollback metadata precedes ALL live mutations. A SIGKILL/reboot
 # after this point resumes restoration on the next CD timer tick.
 ACTIVATING=1

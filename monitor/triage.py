@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Deterministic monitor collection + triage for JobLander production.
 
-Runs BEFORE the LLM monitor session (invoked by scripts/run-monitor-session.sh).
+Runs BEFORE the LLM monitor session (invoked by monitor/run-monitor-session.sh).
 Collects errors from GCP Logging / Cloud Run / LiveKit VMs / Sentry, groups them
 by signature with REAL counts and timestamps, assigns severity strictly by the
-thresholds documented in agents/claude/monitor.md, diffs against the previous
+thresholds implemented below, diffs against the previous
 report, and emits ready-made escalation items (including verbatim P0 alert
-texts). The LLM session only performs Linear dedup and sends the prepared
-texts — it never invents severities, counts, timestamps or file paths.
+texts). The runner delivers P0 pages; the LLM session only performs Linear
+dedup and filing. It never invents severities, counts, timestamps or file paths.
 
-State directory (the ONLY one): teams/logs/monitoring/
+State directory: MONITOR_STATE_DIR or ~/.local/state/self-healing/monitor
 Outputs:
-  latest-report.json        — full report (schema of monitor.md Шаг 7)
+  latest-report.json        — full report, including committed escalation actions
   <YYYY-MM-DDTHH>.json      — hourly archive copy
   triage-summary.json       — compact agent-facing escalation list
 """
@@ -19,6 +19,7 @@ Outputs:
 import datetime
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -29,8 +30,8 @@ REGIONS = ["europe-west1", "us-central1", "australia-southeast1", "asia-south1"]
 # Live LiveKit regions. lk-au-southeast1 removed 2026-07-18: it has no running
 # GCE instance (daily Spot delete cycle, currently absent) and the backend does
 # not serve Australia — monitoring a phantom fired a false P0 every run. If AU is
-# re-provisioned, add it back here AND in agents/claude/monitor.md (see the
-# config-drift note there). ROOT FIX (tracked): derive this list from reality
+# re-provisioned, update this detector list after verifying the service is active.
+# ROOT FIX (tracked): derive this list from reality
 # (VMs that emit gcplogs recently — logging.viewer already granted) instead of a
 # hand-maintained duplicate, so a decommission can never leave a phantom.
 LK_URLS = {
@@ -51,7 +52,7 @@ LK_VM_FILTER = " OR ".join(
     f'jsonPayload.instance.name="{vm}"' for vm in LK_URLS
 )
 WINDOW_HOURS = 2
-STATE_DIR = os.environ.get("MONITOR_STATE_DIR", "teams/logs/monitoring")
+STATE_DIR = os.environ.get("MONITOR_STATE_DIR", str(Path.home() / ".local/state/self-healing/monitor"))
 SENTRY_ORG = "joblander-z2"
 SENTRY_PROJECT_ID = "4511020395069520"
 # Sentry issues are counted over a 7-day window (its thresholds are 7d-based),
@@ -953,7 +954,7 @@ def main():
     latest_path = os.path.join(STATE_DIR, "latest-report.json")
     archive_path = os.path.join(STATE_DIR, now[:13] + ".json")  # YYYY-MM-DDTHH
     if not hard_fail:
-        # Per-service status (monitor.md Шаг 7 schema): derived from collected
+        # Per-service status: derived from collected
         # error groups — DEGRADED if any active P0/P1 group, else HEALTHY.
         def service_status(svc_name):
             sev = {g.get("severity") for g in final_groups
@@ -971,7 +972,7 @@ def main():
         report = {
             "timestamp": now,
             "window_hours": WINDOW_HOURS,
-            "generated_by": "scripts/monitor/triage.py",
+            "generated_by": "self-healing/monitor/triage.py",
             "services": services,
             "error_groups": final_groups,
             "summary": summary,

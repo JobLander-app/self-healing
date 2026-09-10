@@ -301,6 +301,16 @@ if [ -d "$SH_DIR" ]; then
 
   # ---- 10. systemd unit + cron ----------------------------------------------------
   log "[10/11] systemd + cron"
+  # Migrate before the executor can write suppressions to the new state path.
+  # Do not pre-create the final monitor directory: migration copies it once.
+  install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0750 \
+    /var/log/self-healing-monitor /var/log/self-healing-monitor/turns \
+    "$AGENT_HOME/.local/state/self-healing"
+  MONITOR_STATE_READY=1
+  as_agent python3 "$SH_DIR/monitor/run_monitor.py" --migrate-only || {
+    MONITOR_STATE_READY=0
+    add_todo "monitor state migration failed or monitor is busy — rerun init after checking the shared Monitor lock; dispatcher start deferred"
+  }
   # Dispatcher trace/turn logs (LOG_DIR in .env). Found during the stage-2 fire
   # drill: without it every traceEvent hits EACCES and per-turn traces are lost
   # (run still works — trace is fail-soft — but /feed history dies on restart).
@@ -310,11 +320,11 @@ if [ -d "$SH_DIR" ]; then
     /etc/systemd/system/claude-code-vm-job-dispatcher.service
   systemctl daemon-reload
   systemctl enable claude-code-vm-job-dispatcher.service
-  if [ -f "$SH_DIR/dispatcher/.env" ] && [ -f "$SH_DIR/dispatcher/dist/index.js" ]; then
+  if [ -f "$SH_DIR/dispatcher/.env" ] && [ -f "$SH_DIR/dispatcher/dist/index.js" ] && [ "$MONITOR_STATE_READY" = 1 ]; then
     systemctl restart claude-code-vm-job-dispatcher.service \
       || add_todo "dispatcher service failed to start — journalctl -u claude-code-vm-job-dispatcher"
   else
-    add_todo "dispatcher service enabled but NOT started (missing .env or dist/index.js)"
+    add_todo "dispatcher service enabled but NOT started (missing .env/dist or monitor state migration incomplete)"
   fi
 
   # change-ingest: SQLite data dir + systemd unit (localhost :4200 change feed).
