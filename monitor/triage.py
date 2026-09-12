@@ -17,12 +17,14 @@ Outputs:
 """
 
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 
 PROJECT = "meet-assistant-6d8ad"
@@ -149,14 +151,53 @@ def gcloud_logging_read(log_filter, limit=QUERY_LIMIT, freshness=f"{WINDOW_HOURS
     return entries
 
 
-def entry_message(entry):
-    if entry.get("textPayload"):
-        return str(entry["textPayload"])
-    jp = entry.get("jsonPayload", {})
-    msg = jp.get("message")
+def payload_message(entry):
+    """Extract an explicit message; payload metadata alone is not a message."""
+    text = entry.get("textPayload")
+    if text and str(text).strip():
+        return str(text)
+    jp = entry.get("jsonPayload")
+    msg = jp.get("message") if isinstance(jp, dict) else None
     if isinstance(msg, dict):
-        msg = msg.get("message") or json.dumps(msg)
-    return str(msg) if msg else json.dumps(jp)[:300]
+        msg = msg.get("message") or (json.dumps(msg) if msg else None)
+    if msg and str(msg).strip():
+        return str(msg)
+    return None
+
+
+def entry_message(entry):
+    msg = payload_message(entry)
+    if msg is not None:
+        return msg
+    request = request_context(entry)
+    if request:
+        return (f"HTTP {request['status']} {request['method']} {request['path']} "
+                f"(revision {request['revision']})")[:300]
+    jp = entry.get("jsonPayload")
+    if jp is not None:
+        return json.dumps(jp)[:300]
+    return "No message payload"
+
+
+def request_context(entry):
+    """Keep request-log evidence without copying URL credentials or query data."""
+    request = entry.get("httpRequest")
+    if not isinstance(request, dict) or not request:
+        return None
+    url = str(request.get("requestUrl") or "")
+    try:
+        path = (urllib.parse.urlsplit(url).path or "/") if url else "unknown-route"
+    except ValueError:
+        path = "unknown-route"
+    labels = entry.get("resource", {}).get("labels", {})
+    return {
+        "status": str(request.get("status") or "unknown"),
+        "method": str(request.get("requestMethod") or "UNKNOWN").upper(),
+        "path": path,
+        "revision": labels.get("revision_name", "unknown"),
+        "trace": entry.get("trace"),
+        "insert_id": entry.get("insertId"),
+    }
 
 
 NOISE_RES = [
@@ -194,6 +235,19 @@ def add_to_groups(groups, signature, service, region, ts, message):
         g["last_seen"] = ts
 
 
+def request_route_signature(path):
+    """Normalize volatile IDs while preserving the complete route structure."""
+    if path == "/":
+        return "root"
+    normalized = path
+    for pattern, replacement in NOISE_RES:
+        normalized = pattern.sub(replacement, normalized)
+    # The readable slug alone loses punctuation, case and everything beyond
+    # seven words. Hash the full normalized path before that lossy conversion.
+    digest = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+    return f"path-{slugify(normalized)}-{digest}"
+
+
 def collect_cloud_run(groups):
     entries = gcloud_logging_read(
         'resource.type="cloud_run_revision" AND severity>=ERROR'
@@ -203,8 +257,19 @@ def collect_cloud_run(groups):
         service = labels.get("service_name", "unknown")
         region = labels.get("location", "unknown")
         msg = entry_message(e)
-        add_to_groups(groups, f"{service}:{region}:{slugify(msg)}",
+        request = request_context(e)
+        if request and payload_message(e) is None:
+            # Status codes must not collapse to <n>, and deployments must not
+            # create a new signature for an unchanged failing route.
+            route = request_route_signature(request["path"])
+            slug = f"http-{request['status']}-{slugify(request['method'])}-{route}"
+        else:
+            slug = slugify(msg)
+        signature = f"{service}:{region}:{slug}"
+        add_to_groups(groups, signature,
                       service, region, e.get("timestamp", ""), msg)
+        if request:
+            groups[signature].setdefault("request_context", request)
     log(f"cloud run: {len(entries)} error entries")
 
 
@@ -472,8 +537,12 @@ def collect_sentry(groups):
     if not token:
         collection_errors.append({"cmd": "sentry", "error": "no SENTRY_TOKEN available"})
         return
-    url = (f"https://sentry.io/api/0/organizations/{SENTRY_ORG}/issues/"
-           f"?project={SENTRY_PROJECT_ID}&query=is%3Aunresolved&sort=freq&limit=100&statsPeriod=7d")
+    # Classify locally: a server-side category filter would also exclude issues
+    # without a category before the missing-classification guard can retain them.
+    query = urllib.parse.urlencode({"project": SENTRY_PROJECT_ID,
+                                    "query": "is:unresolved",
+                                    "sort": "freq", "limit": 100, "statsPeriod": "7d"})
+    url = f"https://sentry.io/api/0/organizations/{SENTRY_ORG}/issues/?{query}"
     try:
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -483,9 +552,20 @@ def collect_sentry(groups):
         return
     kept = 0
     stale = []
+    non_errors = []
     fresh_cutoff = (datetime.datetime.now(datetime.timezone.utc)
                     - datetime.timedelta(hours=SENTRY_FRESH_HOURS))
     for issue in issues:
+        category = str(issue.get("issueCategory") or "").lower()
+        level = str(issue.get("level") or "").lower()
+        issue_type = str(issue.get("issueType") or issue.get("type") or "").lower()
+        # Check the response too: older API payloads may omit category, and
+        # error-category log messages may still be informational. Missing fields
+        # are not proof of noise, so retain them without inventing an error type.
+        if ((category and category != "error") or issue_type.startswith("performance")
+                or level in {"debug", "info", "log", "warning", "sample"}):
+            non_errors.append({"id": issue.get("id"), "category": category, "level": level})
+            continue
         raw = json.dumps(issue)
         if "inpage.js" in raw or "posthog-recorder.js" in raw \
                 or "Failed to connect to MetaMask" in raw \
@@ -509,9 +589,11 @@ def collect_sentry(groups):
         except ValueError:
             pass
         uc = int(issue.get("userCount", 0))
-        meta = issue.get("metadata", {})
+        meta = issue.get("metadata") or {}
         culprit = (issue.get("culprit") or "unknown").split("/")[-1] or "unknown"
-        sig = f"sentry:joblander-app:{slugify(culprit)}:{slugify(str(meta.get('type', 'error')))}"
+        title = str(issue.get("title") or meta.get("title") or "Untyped Sentry issue")
+        error_type = str(meta.get("type") or title)
+        sig = f"sentry:joblander-app:{slugify(culprit)}:{slugify(error_type)}"
         if count >= 50 or uc >= 5:
             sev = "P1"
         elif count >= 10 or uc >= 2:
@@ -530,15 +612,20 @@ def collect_sentry(groups):
             "user_count": uc,
             "sentry_id": issue.get("id"),
             "sentry_url": issue.get("permalink"),
+            "sentry_title": title,
+            "sentry_level": level or None,
+            "sentry_category": category or None,
             "first_seen": issue.get("firstSeen", ""),
             "last_seen": issue.get("lastSeen", ""),
             "severity": sev,
-            "sample_message": f"{meta.get('type', '')}: {str(meta.get('value', ''))[:200]}",
+            "sample_message": (f"{error_type}: {meta['value']}" if meta.get("value") else title)[:300],
         }
         kept += 1
     if stale:
         log(f"sentry: {len(stale)} issue(s) skipped as stale "
             f"(no event in {SENTRY_FRESH_HOURS}h): {stale}")
+    if non_errors:
+        log(f"sentry: {len(non_errors)} non-error issue(s) excluded: {non_errors}")
     log(f"sentry: {len(issues)} issues, {kept} after noise + freshness filters")
 
 
@@ -835,7 +922,9 @@ def build_escalations(final_groups, cooldowns=None):
         item = {k: g.get(k) for k in ("signature", "service", "region", "count",
                                       "first_seen", "last_seen", "severity",
                                       "diff_status", "sample_message", "linear_issue",
-                                      "sentry_url", "user_count")}
+                                      "sentry_url", "user_count", "sentry_title",
+                                      "sentry_level", "sentry_category", "request_context")}
+        item["window"] = g.get("window", f"{WINDOW_HOURS}h")
         item["suggested_title"] = f"[Monitor] {g['service']} {g['region']}: {g['signature'].split(':')[-1]}"
 
         # --- Cooldown gate (JOB-858) ---
