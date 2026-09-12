@@ -90,7 +90,11 @@ For each known service:
    `## Existing code inventory (DO NOT REWRITE)`, `## Acceptance criteria`,
    `## Out of scope`. The observed signal must include
    `- **Signature:** \`<exact signature>\`` and the exact count, first/last seen,
-   region, sample message, and Sentry URL when present. Use `investigate` for code
+   counting window (`window`), region, sample message, and Sentry URL when present.
+   Preserve `sentry_title`, `sentry_level`, `sentry_category` and `request_context`
+   when supplied. A seven-day count is not a count of today's failures; a request
+   log's HTTP status is evidence of a failed request, not proof of its root cause.
+   Use `investigate` for code
    paths you have not inspected. Scope the fix to this signal and require fresh
    post-deploy verification and green CI. Do not invent user impact or causes.
 

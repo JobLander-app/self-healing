@@ -11,6 +11,14 @@ workspace launcher, throughout collection, state migration and escalation.
 Deploy activation also waits for that lock. Do not add a second cron.
 
 1. Collect and classify deterministically with `triage.py`.
+   Sentry collection targets error-category issues and rejects explicit non-error
+   categories, performance types and informational/warning levels before inference.
+   Missing classification fields stay eligible; the real title replaces an absent
+   exception type. The prepared evidence preserves the seven-day counting window.
+   Cloud Run request logs without a message retain HTTP status, method, route,
+   revision and trace evidence. Request signatures distinguish statuses and routes
+   but stay stable across revisions; URL credentials, query and fragment are omitted.
+   Real HTTP 5xx events still count toward the existing escalation thresholds.
 2. Persist prepared P0 pages to `p0-outbox.json`, deliver verbatim through Telegram,
    and remove only acknowledged deliveries. Failed deliveries retry next launch,
    even if the next collection fails. A crash after delivery can repeat a page;
