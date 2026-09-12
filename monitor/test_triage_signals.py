@@ -161,11 +161,27 @@ class SignalTests(unittest.TestCase):
 
     def test_text_and_structured_exceptions_keep_their_original_signatures(self):
         for payload in ({"textPayload": "RuntimeError: room failed"},
-                        {"jsonPayload": {"message": "RuntimeError: room failed"}}):
+                        {"jsonPayload": {"message": "RuntimeError: room failed"}},
+                        {"jsonPayload": {"message": {"message": "RuntimeError: room failed"}}}):
             with self.subTest(payload=payload):
                 groups = self.collect_requests([request_log(**payload)])
                 self.assertEqual(list(groups), ["joblander-app:us-central1:runtimeerror-room-failed"])
                 self.assertEqual(next(iter(groups.values()))["sample_message"], "RuntimeError: room failed")
+
+    def test_message_less_payload_metadata_does_not_merge_http_failures(self):
+        for payload in ({"component": "request"}, {"message": " "}, {"message": {}},
+                        ["metadata"], "metadata"):
+            with self.subTest(payload=payload):
+                entries = [request_log(status=status, url="https://joblander.app" + path,
+                                       jsonPayload=payload, textPayload=" ")
+                           for status, path in ((500, "/api/first"), (503, "/api/first"), (500, "/api/second"))
+                           for _ in range(6)]
+                groups = self.collect_requests(entries)
+                self.assertEqual(len(groups), 3)
+                self.assertTrue(all(g["count"] == 6 for g in groups.values()))
+                for group in groups.values():
+                    self.assertTrue(group["sample_message"].startswith("HTTP " + group["request_context"]["status"]))
+                self.assertTrue(all(item["action"] == "report_only" for item in self.escalations(groups)[1]))
 
     def test_non_object_json_does_not_abort_request_collection(self):
         for payload in (["failure"], "failure", 42, 0, False, []):

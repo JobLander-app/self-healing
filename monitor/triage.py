@@ -151,25 +151,31 @@ def gcloud_logging_read(log_filter, limit=QUERY_LIMIT, freshness=f"{WINDOW_HOURS
     return entries
 
 
-def entry_message(entry):
-    if entry.get("textPayload"):
-        return str(entry["textPayload"])
+def payload_message(entry):
+    """Extract an explicit message; payload metadata alone is not a message."""
+    text = entry.get("textPayload")
+    if text and str(text).strip():
+        return str(text)
     jp = entry.get("jsonPayload")
-    if jp is None:
-        jp = {}
-    if not isinstance(jp, dict):
-        return json.dumps(jp)[:300]
-    msg = jp.get("message")
+    msg = jp.get("message") if isinstance(jp, dict) else None
     if isinstance(msg, dict):
-        msg = msg.get("message") or json.dumps(msg)
-    if msg:
+        msg = msg.get("message") or (json.dumps(msg) if msg else None)
+    if msg and str(msg).strip():
         return str(msg)
-    if jp:
-        return json.dumps(jp)[:300]
+    return None
+
+
+def entry_message(entry):
+    msg = payload_message(entry)
+    if msg is not None:
+        return msg
     request = request_context(entry)
     if request:
         return (f"HTTP {request['status']} {request['method']} {request['path']} "
                 f"(revision {request['revision']})")[:300]
+    jp = entry.get("jsonPayload")
+    if jp is not None:
+        return json.dumps(jp)[:300]
     return "No message payload"
 
 
@@ -252,7 +258,7 @@ def collect_cloud_run(groups):
         region = labels.get("location", "unknown")
         msg = entry_message(e)
         request = request_context(e)
-        if request and not e.get("textPayload") and not e.get("jsonPayload"):
+        if request and payload_message(e) is None:
             # Status codes must not collapse to <n>, and deployments must not
             # create a new signature for an unchanged failing route.
             route = request_route_signature(request["path"])
