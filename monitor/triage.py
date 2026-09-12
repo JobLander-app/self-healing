@@ -805,7 +805,7 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
     filter: {
       team: { name: { eq: "JobLander" } }
       title: { startsWith: "[Monitor]" }
-      state: { type: { in: [canceled, completed] } }
+      state: { type: { in: ["canceled", "completed"] } }
       updatedAt: { gt: $since }
     }
     first: 50
@@ -846,6 +846,8 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
 
             if result.get("errors"):
                 log(f"cooldown: Linear GraphQL errors (fail open): {result['errors']}")
+                collection_errors.append({"cmd": "linear cooldown", "informational": True,
+                                          "error": str(result["errors"])[:300]})
                 return {}
 
             issues = (result.get("data") or {}).get("issues", {}) or {}
@@ -860,6 +862,8 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
             log(f"cooldown: stopped after {MAX_PAGES} pages — more closed tickets exist")
     except Exception as e:  # noqa: BLE001 — fail open, never block monitoring
         log(f"cooldown: Linear API error (fail open): {e}")
+        collection_errors.append({"cmd": "linear cooldown", "informational": True,
+                                  "error": str(e)[:300]})
         return {}
 
     cooldowns = {}
