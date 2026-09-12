@@ -11,8 +11,8 @@ workspace launcher, throughout collection, state migration and escalation.
 Deploy activation also waits for that lock. Do not add a second cron.
 
 1. Collect and classify deterministically with `triage.py`.
-   Sentry collection targets error-category issues and rejects explicit non-error
-   categories, performance types and informational/warning levels before inference.
+   Sentry collection fetches unresolved issues and locally rejects explicit
+   non-error categories, performance types and informational/warning levels before inference.
    Missing classification fields stay eligible; the real title replaces an absent
    exception type. The prepared evidence preserves the seven-day counting window.
    Cloud Run request logs without a message retain HTTP status, method, route,

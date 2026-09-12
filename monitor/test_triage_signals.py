@@ -44,7 +44,7 @@ class SignalTests(unittest.TestCase):
                 patch.object(triage.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps(issues).encode())) as fetch:
             triage.collect_sentry(groups)
         query = parse_qs(urlsplit(fetch.call_args.args[0].full_url).query)
-        self.assertEqual(query["query"], ["is:unresolved issue.category:error"])
+        self.assertEqual(query["query"], ["is:unresolved"])
         return groups
 
     def escalations(self, groups):

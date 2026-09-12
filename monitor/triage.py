@@ -517,10 +517,10 @@ def collect_sentry(groups):
     if not token:
         collection_errors.append({"cmd": "sentry", "error": "no SENTRY_TOKEN available"})
         return
-    # Performance issues can have level=error too. Filter by category upstream
-    # so frequent performance signals cannot crowd errors out of the first page.
+    # Classify locally: a server-side category filter would also exclude issues
+    # without a category before the missing-classification guard can retain them.
     query = urllib.parse.urlencode({"project": SENTRY_PROJECT_ID,
-                                    "query": "is:unresolved issue.category:error",
+                                    "query": "is:unresolved",
                                     "sort": "freq", "limit": 100, "statsPeriod": "7d"})
     url = f"https://sentry.io/api/0/organizations/{SENTRY_ORG}/issues/?{query}"
     try:
