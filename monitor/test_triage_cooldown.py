@@ -10,6 +10,8 @@ Both should have been suppressed by the cooldown gate; these tests verify that.
 """
 
 import datetime
+import io
+import json
 import sys
 import unittest
 from unittest.mock import patch
@@ -291,7 +293,7 @@ def _node(ident, sig, state_type, *, completed=None, canceled=None, updated=None
 
 def _fake_linear(pages):
     """Serve GraphQL pages in order; assert the cursor is threaded through."""
-    calls = {"n": 0, "cursors": []}
+    calls = {"n": 0, "cursors": [], "queries": []}
 
     class _Resp:
         def __init__(self, body):
@@ -306,6 +308,7 @@ def _fake_linear(pages):
     def _urlopen(req, timeout=None):  # noqa: ARG001
         import json as _json
         body = _json.loads(req.data.decode())
+        calls["queries"].append(body["query"])
         calls["cursors"].append(body["variables"].get("after"))
         page = pages[min(calls["n"], len(pages) - 1)]
         calls["n"] += 1
@@ -325,6 +328,28 @@ class TestCooldownCollection(unittest.TestCase):
         with patch.object(triage, "run_cmd", return_value="lin_api_key\n"), \
              patch("urllib.request.urlopen", urlopen):
             return triage.collect_closed_signature_cooldowns(), calls
+
+    def test_state_type_filter_sends_graphql_strings_not_enum_values(self):
+        # Production Linear returned HTTP400 GRAPHQL_VALIDATION_FAILED for
+        # bare canceled/completed values: IssueState.type uses string comparison.
+        pages = [{"pageInfo": {"hasNextPage": False}, "nodes": []}]
+        _, calls = self._collect(pages)
+        self.assertRegex(calls["queries"][0], r'in:\s*\["canceled",\s*"completed"\]')
+
+    def test_lookup_failures_are_observable_but_still_fail_open(self):
+        from urllib.error import HTTPError
+        for failure in (HTTPError(triage.LINEAR_API_URL, 400, "Bad Request", {}, None),
+                        {"errors": [{"message": "invalid filter"}]}):
+            with self.subTest(failure=failure):
+                triage.collection_errors.clear()
+                kwargs = ({"side_effect": failure} if isinstance(failure, Exception)
+                          else {"return_value": io.BytesIO(json.dumps(failure).encode())})
+                with patch.object(triage, "run_cmd", return_value="test-key"), \
+                        patch("urllib.request.urlopen", **kwargs):
+                    self.assertEqual(triage.collect_closed_signature_cooldowns(), {})
+                self.assertEqual(len(triage.collection_errors), 1)
+                self.assertEqual(triage.collection_errors[0]["cmd"], "linear cooldown")
+                self.assertTrue(triage.collection_errors[0]["informational"])
 
     def test_cooldown_age_uses_the_terminal_timestamp_not_updatedat(self):
         # Closed long ago, edited a minute ago. updatedAt would restart the
