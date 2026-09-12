@@ -153,7 +153,11 @@ def gcloud_logging_read(log_filter, limit=QUERY_LIMIT, freshness=f"{WINDOW_HOURS
 def entry_message(entry):
     if entry.get("textPayload"):
         return str(entry["textPayload"])
-    jp = entry.get("jsonPayload") or {}
+    jp = entry.get("jsonPayload")
+    if jp is None:
+        jp = {}
+    if not isinstance(jp, dict):
+        return json.dumps(jp)[:300]
     msg = jp.get("message")
     if isinstance(msg, dict):
         msg = msg.get("message") or json.dumps(msg)
@@ -237,7 +241,7 @@ def collect_cloud_run(groups):
         if request and not e.get("textPayload") and not e.get("jsonPayload"):
             # Status codes must not collapse to <n>, and deployments must not
             # create a new signature for an unchanged failing route.
-            route = "root" if request["path"] == "/" else slugify(request["path"])
+            route = "root" if request["path"] == "/" else f"path-{slugify(request['path'])}"
             slug = f"http-{request['status']}-{slugify(request['method'])}-{route}"
         else:
             slug = slugify(msg)

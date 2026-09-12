@@ -121,9 +121,10 @@ class SignalTests(unittest.TestCase):
 
     def test_requests_distinguish_route_status_method_but_not_revision(self):
         entries = [request_log(), request_log(revision="app-00195"), request_log(status=503),
-                   request_log(url="https://joblander.app/api/checkout"), request_log(method="GET")]
+                   request_log(url="https://joblander.app/api/checkout"), request_log(method="GET"),
+                   request_log(url="https://joblander.app/root")]
         groups = self.collect_requests(entries)
-        self.assertEqual(len(groups), 4)
+        self.assertEqual(len(groups), 5)
         self.assertEqual(groups["joblander-app:us-central1:http-500-post-root"]["count"], 2)
 
     def test_url_credentials_and_query_do_not_reach_evidence_or_signature(self):
@@ -153,6 +154,14 @@ class SignalTests(unittest.TestCase):
                 groups = self.collect_requests([request_log(**payload)])
                 self.assertEqual(list(groups), ["joblander-app:us-central1:runtimeerror-room-failed"])
                 self.assertEqual(next(iter(groups.values()))["sample_message"], "RuntimeError: room failed")
+
+    def test_non_object_json_does_not_abort_request_collection(self):
+        for payload in (["failure"], "failure", 42, 0, False, []):
+            with self.subTest(payload=payload):
+                groups = self.collect_requests([request_log(jsonPayload=payload), request_log()])
+                self.assertEqual(sum(g["count"] for g in groups.values()), 2)
+                self.assertEqual(triage.entry_message({"jsonPayload": payload}), json.dumps(payload))
+                self.assertTrue(all(g.get("request_context") for g in groups.values()))
 
     def test_real_http_spike_still_pages_p0(self):
         groups = self.collect_requests([request_log() for _ in range(1001)])
