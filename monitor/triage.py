@@ -17,6 +17,7 @@ Outputs:
 """
 
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -228,6 +229,19 @@ def add_to_groups(groups, signature, service, region, ts, message):
         g["last_seen"] = ts
 
 
+def request_route_signature(path):
+    """Normalize volatile IDs while preserving the complete route structure."""
+    if path == "/":
+        return "root"
+    normalized = path
+    for pattern, replacement in NOISE_RES:
+        normalized = pattern.sub(replacement, normalized)
+    # The readable slug alone loses punctuation, case and everything beyond
+    # seven words. Hash the full normalized path before that lossy conversion.
+    digest = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+    return f"path-{slugify(normalized)}-{digest}"
+
+
 def collect_cloud_run(groups):
     entries = gcloud_logging_read(
         'resource.type="cloud_run_revision" AND severity>=ERROR'
@@ -241,7 +255,7 @@ def collect_cloud_run(groups):
         if request and not e.get("textPayload") and not e.get("jsonPayload"):
             # Status codes must not collapse to <n>, and deployments must not
             # create a new signature for an unchanged failing route.
-            route = "root" if request["path"] == "/" else f"path-{slugify(request['path'])}"
+            route = request_route_signature(request["path"])
             slug = f"http-{request['status']}-{slugify(request['method'])}-{route}"
         else:
             slug = slugify(msg)

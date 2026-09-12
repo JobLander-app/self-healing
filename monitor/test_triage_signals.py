@@ -141,6 +141,18 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(len(groups), 1)
         self.assertEqual(next(iter(groups.values()))["count"], 2)
 
+    def test_route_structure_case_and_long_suffixes_do_not_collide(self):
+        paths = ["/api/foo-bar", "/api/foo/bar", "/api/Foo-bar", "/api/foo_bar",
+                 "/api/a/b/c/d/e/f/first", "/api/a/b/c/d/e/f/second"]
+        groups = self.collect_requests([request_log(url="https://joblander.app" + path)
+                                        for path in paths for _ in range(6)])
+        self.assertEqual(len(groups), len(paths))
+        self.assertTrue(all(g["count"] == 6 for g in groups.values()))
+        self.assertEqual({g["request_context"]["path"] for g in groups.values()}, set(paths))
+        pages, items = self.escalations(groups)
+        self.assertEqual(pages, [])
+        self.assertTrue(all(item["action"] == "report_only" for item in items))
+
     def test_malformed_or_missing_request_url_does_not_crash_collection(self):
         for url in ("http://[invalid", None, ""):
             with self.subTest(url=url):
