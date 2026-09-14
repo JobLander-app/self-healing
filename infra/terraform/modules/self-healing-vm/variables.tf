@@ -189,6 +189,34 @@ variable "console_domain" {
   default     = "self-healing.joblander.app"
 }
 
+variable "chatwoot_domain" {
+  description = <<-EOT
+    Optional second FQDN served by the same Caddy: the Chatwoot support app,
+    reverse-proxied to `chatwoot_upstream_port` on localhost. Chatwoot was
+    consolidated onto this VM on 2026-09-14 (its own e2-small was retired to
+    save ~20 EUR/mo), and without this the vhost lives only as a hand-edit in
+    /etc/caddy/Caddyfile that the next `terraform apply` would silently wipe,
+    taking customer support down.
+
+    Empty (the default) means no Chatwoot vhost is rendered. Keep it empty for
+    any VM this module builds other than self-healing-1: Caddy would otherwise
+    request a Let's Encrypt cert for a name whose DNS does not point at that
+    host, failing the HTTP-01 challenge on a loop and burning LE rate limit.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "chatwoot_upstream_port" {
+  description = <<-EOT
+    localhost port the Chatwoot rails container publishes. 3000 is taken by
+    Grafana on this VM, so the docker compose stack at /opt/chatwoot publishes
+    127.0.0.1:3100. Only read when `chatwoot_domain` is non-empty.
+  EOT
+  type        = number
+  default     = 3100
+}
+
 variable "grafana_admin_secret" {
   description = <<-EOT
     Secret Manager secret_id holding the seeded Grafana admin password.

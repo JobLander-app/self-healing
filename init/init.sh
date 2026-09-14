@@ -26,6 +26,8 @@ REPO_BRANCH="${repo_branch}"
 DISPATCHER_ENV_SECRET="${dispatcher_env_secret}"
 GH_TOKEN_SECRET="${gh_token_secret}"
 CONSOLE_DOMAIN="${console_domain}"
+CHATWOOT_DOMAIN="${chatwoot_domain}"
+CHATWOOT_UPSTREAM_PORT="${chatwoot_upstream_port}"
 GRAFANA_ADMIN_SECRET="${grafana_admin_secret}"
 # -----------------------------------------------------------------------------
 
@@ -446,6 +448,29 @@ if [ -d "$SH_DIR" ]; then
   mkdir -p /etc/caddy
   sed "s/__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN/g" "$SH_DIR/deploy/caddy/Caddyfile" \
     > /etc/caddy/Caddyfile
+
+  # Optional second vhost: Chatwoot, consolidated onto this VM on 2026-09-14 so
+  # its own e2-small could be retired. Appended here rather than baked into the
+  # template because the template is shared by every VM this module builds, and
+  # a Chatwoot vhost on a host that chat.joblander.app does NOT resolve to would
+  # fail the ACME HTTP-01 challenge on a loop and burn Let's Encrypt rate limit.
+  # Empty CHATWOOT_DOMAIN (the default) renders nothing.
+  #
+  # Without this block the vhost exists only as a hand-edit of
+  # /etc/caddy/Caddyfile, and the next `terraform apply` silently wipes it,
+  # taking customer support offline.
+  if [ -n "$CHATWOOT_DOMAIN" ]; then
+    cat >> /etc/caddy/Caddyfile <<CADDY_CHATWOOT
+
+# Chatwoot support app (docker compose stack at /opt/chatwoot). TLS is issued
+# and renewed automatically by Caddy over ACME HTTP-01, which works because
+# $CHATWOOT_DOMAIN resolves to this VM.
+$CHATWOOT_DOMAIN {
+	reverse_proxy localhost:$CHATWOOT_UPSTREAM_PORT
+}
+CADDY_CHATWOOT
+    log "caddy: rendered Chatwoot vhost $CHATWOOT_DOMAIN -> localhost:$CHATWOOT_UPSTREAM_PORT"
+  fi
 
   # Grafana secrets → a root-only systemd EnvironmentFile. Keeps plaintext out
   # of grafana.ini / git. Two secrets live here, both interpolated by Grafana:
