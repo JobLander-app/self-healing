@@ -88,14 +88,16 @@ resource "google_compute_instance" "this" {
     # Idempotent provisioning — the whole loop stands up from this script.
     # Re-runs are safe: `sudo google_metadata_script_runner startup`.
     startup-script = templatefile("${path.module}/../../../../init/init.sh", {
-      project_id            = var.project_id
-      self_healing_repo_url = var.self_healing_repo_url
-      workspace_repo_url    = var.workspace_repo_url
-      repo_branch           = var.repo_branch
-      dispatcher_env_secret = var.dispatcher_env_secret
-      gh_token_secret       = var.gh_token_secret
-      console_domain        = var.console_domain
-      grafana_admin_secret  = var.grafana_admin_secret
+      project_id             = var.project_id
+      self_healing_repo_url  = var.self_healing_repo_url
+      workspace_repo_url     = var.workspace_repo_url
+      repo_branch            = var.repo_branch
+      dispatcher_env_secret  = var.dispatcher_env_secret
+      gh_token_secret        = var.gh_token_secret
+      console_domain         = var.console_domain
+      chatwoot_domain        = var.chatwoot_domain
+      chatwoot_upstream_port = var.chatwoot_upstream_port
+      grafana_admin_secret   = var.grafana_admin_secret
     })
   }
 

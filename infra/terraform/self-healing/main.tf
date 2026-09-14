@@ -93,6 +93,12 @@ module "self_healing" {
   # Flip to true at cutover (Phase 4).
   deletion_protection = false
 
+  # Chatwoot was consolidated onto this VM on 2026-09-14 (its own e2-small was
+  # retired, ~20 EUR/mo). Caddy on this host serves it alongside the console.
+  # Declared here so `terraform apply` reproduces the vhost instead of wiping
+  # the hand-edit and taking customer support offline.
+  chatwoot_domain = "chat.joblander.app"
+
   labels = {
     purpose = "self-healing-loop"
     ticket  = "job-731"
