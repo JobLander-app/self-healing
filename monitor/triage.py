@@ -1007,6 +1007,203 @@ def build_escalations(final_groups, cooldowns=None):
     return p0_alerts, escalations
 
 
+def _firestore_doc_fields(collection, doc_id, token):
+    """Fetch a Firestore document via REST and return its fields dict.
+
+    Returns {} on 404 (document absent) or returns None on HTTP errors / network
+    failures.  Authentication uses the supplied bearer token.
+    """
+    url = (f"https://firestore.googleapis.com/v1/projects/{PROJECT}"
+           f"/databases/(default)/documents/{collection}/{doc_id}")
+    try:
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode()).get("fields", {})
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {}   # document does not exist
+        raise
+    except Exception:  # noqa: BLE001
+        raise
+
+
+def _fs_int(fields, name):
+    """Extract an integer from a Firestore typed-value field."""
+    f = fields.get(name, {})
+    v = f.get("integerValue") or f.get("doubleValue")
+    return int(float(v)) if v is not None else 0
+
+
+def _fs_str(fields, name):
+    """Extract a string from a Firestore typed-value field."""
+    return fields.get(name, {}).get("stringValue") or ""
+
+
+def check_duplicate_worker(groups):
+    """Monitor the daily duplicate-free-grant worker (JOB-1007/JOB-1010).
+
+    Checks Firestore: `duplicate_worker_runs/{yesterday}`:
+    - Document missing or errors > 0 → P2 (worker did not complete cleanly).
+    - purchasedMinutesReduced > 0 → P1 (must never happen; immediate Telegram).
+    - mode in doc != DUPLICATE_WORKER_MODE env var → P2 (config drift).
+    - revokedMinutes/day > 3× trailing 7-day median → P2 (false-positive wave).
+
+    Skipped when DUPLICATE_WORKER_MODE=off (worker not yet live).
+    All Firestore failures are informational — never count toward hard_fail.
+    """
+    mode = os.environ.get("DUPLICATE_WORKER_MODE", "off").strip()
+    if mode == "off":
+        return
+
+    # Obtain an access token via ADC (Application Default Credentials).
+    token_raw = run_cmd(["gcloud", "auth", "print-access-token"], optional=True)
+    token = (token_raw or "").strip()
+    if not token:
+        collection_errors.append({
+            "cmd": "check_duplicate_worker",
+            "error": "no GCP access token — duplicate worker check skipped",
+            "informational": True,
+        })
+        return
+
+    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    now = utcnow_iso()
+
+    # --- Fetch yesterday's run record ---
+    try:
+        fields = _firestore_doc_fields("duplicate_worker_runs", yesterday, token)
+    except Exception as e:  # noqa: BLE001
+        collection_errors.append({
+            "cmd": "check_duplicate_worker",
+            "error": f"Firestore error fetching duplicate_worker_runs/{yesterday}: {str(e)[:200]}",
+            "informational": True,
+        })
+        return
+
+    if not fields:
+        # Document absent → worker did not run or failed before persisting.
+        sig = "duplicate-worker:missing-run"
+        groups[sig] = {
+            "signature": sig,
+            "service": "backend",
+            "region": "europe-west1",
+            "count": 1,
+            "first_seen": now,
+            "last_seen": now,
+            "severity": "P2",
+            "sample_message": (
+                f"duplicate_worker_runs/{yesterday} not found in Firestore — "
+                f"daily duplicate-free-grant worker (DUPLICATE_WORKER_MODE={mode}) "
+                f"did not run or failed to persist its run record."
+            ),
+        }
+        log(f"duplicate worker check: {yesterday} — run record MISSING")
+        return
+
+    errors_count = _fs_int(fields, "errors")
+    purchased_reduced = _fs_int(fields, "purchasedMinutesReduced")
+    revoked_minutes = _fs_int(fields, "revokedMinutes")
+    doc_mode = _fs_str(fields, "mode")
+
+    log(f"duplicate worker check: {yesterday} mode={doc_mode!r} errors={errors_count} "
+        f"purchasedReduced={purchased_reduced} revokedMinutes={revoked_minutes}")
+
+    # --- Check 1: errors > 0 → P2 ---
+    if errors_count > 0:
+        sig = "duplicate-worker:run-errors"
+        groups[sig] = {
+            "signature": sig,
+            "service": "backend",
+            "region": "europe-west1",
+            "count": errors_count,
+            "first_seen": now,
+            "last_seen": now,
+            "severity": "P2",
+            "sample_message": (
+                f"duplicate_worker_runs/{yesterday}: errors={errors_count} "
+                f"(mode={doc_mode}). Daily duplicate worker completed with errors."
+            ),
+        }
+
+    # --- Check 2: purchasedMinutesReduced > 0 → P1 (must NEVER happen) ---
+    if purchased_reduced > 0:
+        sig = "duplicate-worker:purchased-minutes-reduced"
+        groups[sig] = {
+            "signature": sig,
+            "service": "backend",
+            "region": "europe-west1",
+            "count": purchased_reduced,
+            "first_seen": now,
+            "last_seen": now,
+            "severity": "P1",
+            "sample_message": (
+                f"CRITICAL: duplicate_worker_runs/{yesterday}: "
+                f"purchasedMinutesReduced={purchased_reduced} — "
+                "the duplicate worker reduced purchased minutes, which must never happen."
+            ),
+        }
+
+    # --- Check 3: mode mismatch → P2 ---
+    if doc_mode and doc_mode != mode:
+        sig = "duplicate-worker:mode-mismatch"
+        groups[sig] = {
+            "signature": sig,
+            "service": "backend",
+            "region": "europe-west1",
+            "count": 1,
+            "first_seen": now,
+            "last_seen": now,
+            "severity": "P2",
+            "sample_message": (
+                f"duplicate_worker_runs/{yesterday}: mode={doc_mode!r} but "
+                f"DUPLICATE_WORKER_MODE env={mode!r}. Configuration drift?"
+            ),
+        }
+
+    # --- Check 4: revocation spike → P2 ---
+    # revokedMinutes/day > 3× trailing 7-day median (possible false-positive wave).
+    if revoked_minutes > 0:
+        _check_duplicate_worker_spike(groups, revoked_minutes, token, now)
+
+
+def _check_duplicate_worker_spike(groups, today_revoked, token, now):
+    """P2 when today's revokedMinutes > 3× the trailing 7-day median.
+
+    Needs ≥3 prior data points; skips silently if Firestore is unavailable or
+    history is too thin.  All fetch failures are informational.
+    """
+    prior = []
+    for offset in range(1, 8):
+        day = (datetime.date.today() - datetime.timedelta(days=offset)).isoformat()
+        try:
+            f = _firestore_doc_fields("duplicate_worker_runs", day, token)
+            if f:
+                prior.append(_fs_int(f, "revokedMinutes"))
+        except Exception:  # noqa: BLE001
+            pass  # missing/unreachable → skip that day
+
+    if len(prior) < 3:
+        return  # insufficient history
+
+    median = sorted(prior)[len(prior) // 2]
+    if median > 0 and today_revoked > 3 * median:
+        sig = "duplicate-worker:revocation-spike"
+        groups[sig] = {
+            "signature": sig,
+            "service": "backend",
+            "region": "europe-west1",
+            "count": today_revoked,
+            "first_seen": now,
+            "last_seen": now,
+            "severity": "P2",
+            "sample_message": (
+                f"Duplicate worker revoked {today_revoked} free minutes today — "
+                f">3× trailing 7-day median ({median}). "
+                "Possible false-positive wave (e.g. new campus NAT)."
+            ),
+        }
+
+
 def utcnow_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1024,6 +1221,12 @@ def main():
     collect_transcription_delay(groups)
     lk_statuses = check_lk_health()
     collect_sentry(groups)
+
+    # JOB-1010: check that the daily duplicate-free-grant worker ran and
+    # produced no errors. Skipped when DUPLICATE_WORKER_MODE=off.
+    # Must run BEFORE assign_severity so severity can be adjusted by the
+    # generic count thresholds like any other group.
+    check_duplicate_worker(groups)
 
     assign_severity(groups, lk_statuses, stage_counts, audio_timeouts,
                     geo_misroutes, anam_count)

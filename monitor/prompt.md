@@ -58,6 +58,27 @@ state, and label UUIDs with those tools rather than guessing. New issues use
 `To Do` (resolve its actual id), `monitor`, `Bug`, and the matching `repo:` label.
 Priority is 1 for P0, 2 for P1, 3 for P2. Never assign the executor's claim label.
 
+## Duplicate-free-grant worker signals (JOB-1010)
+
+`triage.py` checks Firestore `duplicate_worker_runs/{YYYY-MM-DD}` (yesterday's
+date) when `DUPLICATE_WORKER_MODE != off`. The signals it can produce are:
+
+| Signature | Severity | Meaning |
+| --- | --- | --- |
+| `duplicate-worker:missing-run` | P2 | Document absent — worker did not run or failed before persisting its record. |
+| `duplicate-worker:run-errors` | P2 | `errors` field > 0 — worker completed but with errors. |
+| `duplicate-worker:purchased-minutes-reduced` | **P1** | `purchasedMinutesReduced` > 0 — purchased minutes were reduced (must never happen). |
+| `duplicate-worker:mode-mismatch` | P2 | `mode` in run record differs from `DUPLICATE_WORKER_MODE` env var. |
+| `duplicate-worker:revocation-spike` | P2 | `revokedMinutes/day` > 3× trailing 7-day median (possible false-positive wave, e.g. new campus NAT). |
+
+All of these route to the `backend` repo / project. The `purchased-minutes-reduced`
+signal is P1 and will produce a Telegram page as well as a Linear ticket — this
+represents a financial data integrity failure.
+
+**Firestore path:** `projects/meet-assistant-6d8ad/databases/(default)/documents/duplicate_worker_runs/{YYYY-MM-DD}`
+
+**Run record fields:** `mode` (string), `errors` (int), `purchasedMinutesReduced` (int), `revokedMinutes` (int), `accountsRevoked` (int), `clustersProcessed` (int), `pendingAcceptance` (int).
+
 | Signal service | Target repository | Linear project UUID |
 | --- | --- | --- |
 | `joblander-app` | `joblander.app` | `6a24042d-5002-4a4d-bb3b-ba1afdffdabb` |
