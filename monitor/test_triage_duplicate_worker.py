@@ -183,6 +183,29 @@ class DuplicateWorkerCheckTests(unittest.TestCase):
         self.assertIn("must never happen", g["sample_message"])
         self.assertEqual(g["count"], 3)
 
+    def test_purchased_minutes_reduced_triggers_telegram(self):
+        """P1 purchased-minutes-reduced MUST emit Telegram — spec (JOB-1010)."""
+        groups = _run_check(
+            doc_fields={"errors": 0, "purchasedMinutesReduced": 2,
+                        "revokedMinutes": 0, "mode": "write"},
+            mode="write",
+        )
+        # Simulate diff_with_previous marking it "new".
+        sig = "duplicate-worker:purchased-minutes-reduced"
+        final_groups = [{**groups[sig], "diff_status": "new"}]
+        p0_alerts, escalations = triage.build_escalations(final_groups)
+        # Telegram alert list must be non-empty for this P1 signal.
+        self.assertTrue(
+            len(p0_alerts) > 0,
+            "build_escalations must return a Telegram alert for purchased-minutes-reduced P1",
+        )
+        self.assertTrue(
+            any("PURCHASED MINUTES REDUCED" in alert or "purchased" in alert.lower()
+                for alert in p0_alerts),
+        )
+        item = next(e for e in escalations if e.get("signature") == sig)
+        self.assertEqual(item["action"], "telegram_p1_financial_and_linear")
+
     def test_zero_purchased_reduced_no_p1(self):
         groups = _run_check(
             doc_fields={"errors": 0, "purchasedMinutesReduced": 0,

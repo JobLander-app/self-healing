@@ -22,6 +22,7 @@ import json
 import os
 from pathlib import Path
 import re
+import statistics
 import subprocess
 import sys
 import urllib.parse
@@ -633,17 +634,22 @@ def assign_severity(groups, lk_statuses, stage_counts, audio_timeouts,
                     geo_misroutes=0, anam_count=0):
     """Thresholds from agents/claude/monitor.md Шаг 4 + §1.5/§1.6 triage rules."""
     for g in groups.values():
-        if "severity" in g:  # sentry groups already classified
-            continue
         c = g["count"]
         if c > 1000:
-            g["severity"] = "P0"
+            new_sev = "P0"
         elif c > 100:
-            g["severity"] = "P1"
+            new_sev = "P1"
         elif c >= 10:
-            g["severity"] = "P2"
+            new_sev = "P2"
         else:
-            g["severity"] = "P3"
+            new_sev = "P3"
+        if "severity" not in g:
+            g["severity"] = new_sev
+        elif _SEV_RANK.get(new_sev, 0) > _SEV_RANK.get(g["severity"], 0):
+            # Generic count thresholds act as a floor-raise: never lower a
+            # severity already set by a caller (Sentry/duplicate-worker), but
+            # DO raise it if the spike is severe enough (e.g. errors=1001 → P0).
+            g["severity"] = new_sev
     # voice-agent specific rules — only ever RAISE severity, never lower what
     # the generic count thresholds already assigned.
     rank = {"P3": 0, "P2": 1, "P1": 2, "P0": 3}
@@ -995,6 +1001,16 @@ def build_escalations(final_groups, cooldowns=None):
             p0_alerts.append(text)
             item["action"] = "telegram_p0_and_linear"
             item["alert_text"] = text
+        elif (sev == "P1"
+              and g.get("signature") == "duplicate-worker:purchased-minutes-reduced"):
+            # Financial-integrity signal: purchased minutes were reduced — must
+            # NEVER happen per the spec (JOB-1010).  Emit immediate Telegram even
+            # though this is P1, not P0, because the constitition mandates it.
+            text = (f"URGENT P1 — PURCHASED MINUTES REDUCED: "
+                    f"{g.get('sample_message', g.get('signature', ''))[:200]}")
+            p0_alerts.append(text)
+            item["action"] = "telegram_p1_financial_and_linear"
+            item["alert_text"] = text
         elif sev == "P1" and status in ("new", "worsened"):
             item["action"] = "linear_create_if_no_dup"
         elif sev == "P1" and status == "recurring":
@@ -1173,19 +1189,26 @@ def _check_duplicate_worker_spike(groups, today_revoked, token, now):
     history is too thin.  All fetch failures are informational.
     """
     prior = []
-    for offset in range(1, 8):
+    # Offsets 2–8 give the 7 days BEFORE yesterday (the monitored date).
+    # Offset 1 would be yesterday itself — that's what we're comparing against,
+    # so it must not appear in the baseline history.
+    for offset in range(2, 9):
         day = (datetime.date.today() - datetime.timedelta(days=offset)).isoformat()
         try:
             f = _firestore_doc_fields("duplicate_worker_runs", day, token)
             if f:
                 prior.append(_fs_int(f, "revokedMinutes"))
-        except Exception:  # noqa: BLE001
-            pass  # missing/unreachable → skip that day
+        except Exception as e:  # noqa: BLE001
+            collection_errors.append({
+                "cmd": f"check_duplicate_worker_spike/{day}",
+                "error": str(e)[:200],
+                "informational": True,
+            })
 
     if len(prior) < 3:
         return  # insufficient history
 
-    median = sorted(prior)[len(prior) // 2]
+    median = statistics.median(prior)
     if median > 0 and today_revoked > 3 * median:
         sig = "duplicate-worker:revocation-spike"
         groups[sig] = {
