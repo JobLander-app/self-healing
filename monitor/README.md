@@ -11,6 +11,12 @@ workspace launcher, throughout collection, state migration and escalation.
 Deploy activation also waits for that lock. Do not add a second cron.
 
 1. Collect and classify deterministically with `triage.py`.
+   LiveKit uses Cloud since 2026-09-19; retired SFU VM HTTP and disk checks
+   are removed. Voice-agent error, stage, timeout, avatar and latency collectors
+   query the three regional Cloud Run worker pools, including JSON `level` errors
+   when GCP severity is absent. LiveKit is reported as managed; this is not a
+   synthetic end-to-end SFU health check. Pending HTTP/disk and VM log alerts for
+   the four retired hosts are discarded; unrelated durable alerts remain pending.
    Sentry collection fetches unresolved issues and locally rejects explicit
    non-error categories, performance types and informational/warning levels before inference.
    Missing classification fields stay eligible; the real title replaces an absent

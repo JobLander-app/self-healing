@@ -48,7 +48,7 @@ class SignalTests(unittest.TestCase):
         return groups
 
     def escalations(self, groups):
-        triage.assign_severity(groups, {}, {}, 0)
+        triage.assign_severity(groups, {}, 0)
         with tempfile.TemporaryDirectory() as state:
             final, _ = triage.diff_with_previous(groups, state)
         return triage.build_escalations(final)
