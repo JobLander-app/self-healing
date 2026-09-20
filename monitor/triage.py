@@ -349,9 +349,8 @@ def collect_anam_failures(groups):
         limit=QUERY_LIMIT,
     )
     for e in entries:
-        region = voice_agent_region(e)
         add_to_groups(groups, "voice-agent:all:anam-avatar-start-failed",
-                      "ai-voice-agent-python", region, e.get("timestamp", ""), entry_message(e))
+                      "ai-voice-agent-python", "all", e.get("timestamp", ""), entry_message(e))
     # Severity floor (P2 when >3/2h) is applied in assign_severity via
     # raise_to so the generic thresholds can still escalate to P1/P0.
     log(f"anam failures: {len(entries)} entries")

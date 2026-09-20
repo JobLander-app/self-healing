@@ -23,7 +23,7 @@ PROJECT = "meet-assistant-6d8ad"
 MONITOR_DIR = Path(__file__).resolve().parent
 ESCALATION_ACTIONS = {"telegram_p0_and_linear", "linear_create_if_no_dup", "linear_ensure_open_issue"}
 # These SFU hosts were intentionally retired on 2026-09-19 for LiveKit Cloud.
-# Remove only their infrastructure alerts, including durable pre-migration work.
+# Remove their infrastructure and VM log alerts, including pre-migration work.
 RETIRED_LK_VMS = {"lk-eu-west4", "lk-us-central1", "lk-asia-south1", "lk-au-southeast1"}
 RETIRED_LK_SIGNATURES = {
     signature for vm in RETIRED_LK_VMS
@@ -31,8 +31,14 @@ RETIRED_LK_SIGNATURES = {
 }
 
 
+def retired_lk_signature(signature):
+    return signature in RETIRED_LK_SIGNATURES or any(
+        signature.startswith(f"voice-agent:{vm}:") for vm in RETIRED_LK_VMS)
+
+
 def retired_lk_page(alert):
-    return any(alert.startswith(f"URGENT P0: LiveKit server {vm} HTTP ")
+    return any(alert.startswith((f"URGENT P0: LiveKit server {vm} HTTP ",
+                                 f"URGENT P0: voice-agent:{vm}:"))
                for vm in RETIRED_LK_VMS)
 
 
@@ -156,8 +162,8 @@ def prepare_escalations(config, summary):
         pending.pop(suppressed["signature"], None)
     for item in summary["escalations"]:
         pending[item["signature"]] = {**item, "prepared_at": summary["timestamp"]}
-    for signature in RETIRED_LK_SIGNATURES:
-        pending.pop(signature, None)
+    pending = {signature: item for signature, item in pending.items()
+               if not retired_lk_signature(signature)}
     write_json(path, pending)
     batch = {**summary, "escalations": list(pending.values())}
     write_json(config.state_dir / "escalation-batch.json", batch)

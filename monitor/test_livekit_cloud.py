@@ -47,6 +47,9 @@ class LiveKitCloudTests(unittest.TestCase):
 
     def test_collection_never_probes_retired_hosts_or_reports_them_down(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
+            runner.write_json(Path(directory) / "latest-report.json", {"error_groups": [{
+                "signature": "lk-server:lk-asia-south1:down", "service": "livekit",
+                "region": "lk-asia-south1", "severity": "P0", "count": 1}]})
             stack.enter_context(patch.object(triage, "STATE_DIR", directory))
             stack.enter_context(patch.object(triage, "gcloud_logging_read", return_value=[]))
             stack.enter_context(patch.object(triage, "collect_sentry"))
@@ -62,6 +65,19 @@ class LiveKitCloudTests(unittest.TestCase):
         self.assertEqual(summary["escalations"], [])
         self.assertNotIn("livekit-vms", report["services"])
         self.assertEqual(report["services"]["livekit"], {"hosting": "cloud", "status": "MANAGED"})
+        self.assertEqual(report["error_groups"][0]["diff_status"], "resolved")
+
+    def test_anam_aggregate_does_not_attribute_mixed_regions_to_first_worker(self):
+        entries = [{"resource": {"labels": {"location": region}},
+                    "jsonPayload": {"message": "Failed to start avatar"},
+                    "timestamp": triage.utcnow_iso()}
+                   for region in ["europe-west1", "asia-south1"] * 2]
+        groups = {}
+        with patch.object(triage, "gcloud_logging_read", return_value=entries):
+            count = triage.collect_anam_failures(groups)
+        triage.assign_severity(groups, {}, 0, anam_count=count)
+        group = groups["voice-agent:all:anam-avatar-start-failed"]
+        self.assertEqual((group["region"], group["count"], group["severity"]), ("all", 4, "P2"))
 
     def test_retired_pending_work_is_removed_but_real_alerts_still_retry(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -69,12 +85,16 @@ class LiveKitCloudTests(unittest.TestCase):
             retired = "lk-server:lk-asia-south1:down"
             active = "voice-agent:asia-south1:connection-failed"
             pending = {retired: {"signature": retired}, active: {"signature": active}}
+            for vm in runner.RETIRED_LK_VMS:
+                signature = f"voice-agent:{vm}:connection-failed"
+                pending[signature] = {"signature": signature}
             runner.write_json(config.state_dir / "linear-outbox.json", pending)
             batch = runner.prepare_escalations(config, {"timestamp": runner.timestamp(), "escalations": []})
             self.assertEqual([e["signature"] for e in batch["escalations"]], [active])
             obsolete_page = "URGENT P0: LiveKit server lk-asia-south1 HTTP 0 (expected 200) — detected 2026-09-20T09:00:39Z"
             real_page = "URGENT P0: voice-agent:all:connection-failed — 1100 errors/2h"
-            runner.write_json(config.state_dir / "p0-outbox.json", {"old": obsolete_page, "real": real_page})
+            old_worker_page = "URGENT P0: voice-agent:lk-eu-west4:failed — 1100 errors/2h"
+            runner.write_json(config.state_dir / "p0-outbox.json", {"old": obsolete_page, "worker": old_worker_page, "real": real_page})
             pager = Mock(side_effect=RuntimeError("retry later"))
             sent, failures = runner.deliver_pending(config, [obsolete_page], pager)
             self.assertEqual(sent, [])
