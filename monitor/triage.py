@@ -2,7 +2,7 @@
 """Deterministic monitor collection + triage for JobLander production.
 
 Runs BEFORE the LLM monitor session (invoked by monitor/run-monitor-session.sh).
-Collects errors from GCP Logging / Cloud Run / LiveKit VMs / Sentry, groups them
+Collects errors from GCP Logging / Cloud Run services and worker pools / Sentry, groups them
 by signature with REAL counts and timestamps, assigns severity strictly by the
 thresholds implemented below, diffs against the previous
 report, and emits ready-made escalation items (including verbatim P0 alert
@@ -30,29 +30,13 @@ import urllib.request
 
 PROJECT = "meet-assistant-6d8ad"
 REGIONS = ["europe-west1", "us-central1", "australia-southeast1", "asia-south1"]
-# Live LiveKit regions. lk-au-southeast1 removed 2026-07-18: it has no running
-# GCE instance (daily Spot delete cycle, currently absent) and the backend does
-# not serve Australia — monitoring a phantom fired a false P0 every run. If AU is
-# re-provisioned, update this detector list after verifying the service is active.
-# ROOT FIX (tracked): derive this list from reality
-# (VMs that emit gcplogs recently — logging.viewer already granted) instead of a
-# hand-maintained duplicate, so a decommission can never leave a phantom.
-LK_URLS = {
-    "lk-eu-west4": "https://lk-eu.joblander.app",
-    "lk-us-central1": "https://lk-us.joblander.app",
-    "lk-asia-south1": "https://lk-in.joblander.app",
-}
-# LK docker-log stream (JOB-731 stage 3M): the containers on all 4 LK VMs run
-# docker's `gcplogs` log driver, which ships to logName=".../logs/gcplogs-
-# docker-driver" with the VM name in jsonPayload.instance.name and CLEAN
-# message text. The older fluentd-style ".../logs/docker" stream is a garbled
-# duplicate (binary framing prefixes inside message) and lk-eu-west4 does not
-# emit to it at all — collecting from it missed the entire EU VM (verified
-# against live logs 2026-07-17). Requires only roles/logging.viewer — works
-# under the self-healing VM's minimal SA (no ssh, no compute.instances.get).
-LK_DRIVER_LOGNAME = f'logName="projects/{PROJECT}/logs/gcplogs-docker-driver"'
-LK_VM_FILTER = " OR ".join(
-    f'jsonPayload.instance.name="{vm}"' for vm in LK_URLS
+# LiveKit SFU moved to Cloud and the self-hosted VMs were retired 2026-09-19.
+# Voice agents now emit structured logs from regional Cloud Run worker pools.
+VOICE_AGENT_LOG_FILTER = (
+    'resource.type="cloud_run_worker_pool" AND '
+    '(resource.labels.worker_pool_name="voice-agent-eu" OR '
+    'resource.labels.worker_pool_name="voice-agent-us" OR '
+    'resource.labels.worker_pool_name="voice-agent-in")'
 )
 WINDOW_HOURS = 2
 STATE_DIR = os.environ.get("MONITOR_STATE_DIR", str(Path.home() / ".local/state/self-healing/monitor"))
@@ -287,28 +271,27 @@ def collect_cloud_functions(groups):
     log(f"cloud functions: {len(entries)} error entries")
 
 
-def lk_entry_vm(entry):
-    """VM name of a gcplogs-docker-driver entry (jsonPayload.instance.name)."""
-    inst = entry.get("jsonPayload", {}).get("instance")
-    return inst.get("name", "unknown") if isinstance(inst, dict) else "unknown"
+def voice_agent_region(entry):
+    return entry.get("resource", {}).get("labels", {}).get("location", "unknown")
 
 
-def collect_lk_docker(groups):
+def collect_voice_agent_errors(groups):
+    # The worker's JSON logger supplies level, not always GCP severity.
     entries = gcloud_logging_read(
-        f'{LK_DRIVER_LOGNAME} AND resource.type="gce_instance" '
-        f'AND jsonPayload.message=~"ERROR" AND ({LK_VM_FILTER})', limit=QUERY_LIMIT
+        f'{VOICE_AGENT_LOG_FILTER} AND (severity>=ERROR OR '
+        'jsonPayload.level=~"(?i)^(error|critical|fatal)$")', limit=QUERY_LIMIT
     )
     for e in entries:
-        vm = lk_entry_vm(e)
+        region = voice_agent_region(e)
         msg = entry_message(e)
-        add_to_groups(groups, f"voice-agent:{vm}:{slugify(msg)}",
-                      "ai-voice-agent-python", vm, e.get("timestamp", ""), msg)
-    log(f"lk docker: {len(entries)} error entries")
+        add_to_groups(groups, f"voice-agent:{region}:{slugify(msg)}",
+                      "ai-voice-agent-python", region, e.get("timestamp", ""), msg)
+    log(f"voice agent workers: {len(entries)} error entries")
 
 
 def collect_stage_errors(groups):
     entries = gcloud_logging_read(
-        'resource.type="gce_instance" AND jsonPayload.message=~"STAGE_ERROR"', limit=QUERY_LIMIT
+        f'{VOICE_AGENT_LOG_FILTER} AND jsonPayload.message=~"STAGE_ERROR"', limit=QUERY_LIMIT
     )
     by_code = {}
     for e in entries:
@@ -327,7 +310,7 @@ def collect_stage_errors(groups):
 
 def collect_audio_timeouts(groups):
     entries = gcloud_logging_read(
-        'resource.type="gce_instance" AND jsonPayload.message=~"Audio Timeout Error"', limit=QUERY_LIMIT
+        f'{VOICE_AGENT_LOG_FILTER} AND jsonPayload.message=~"Audio Timeout Error"', limit=QUERY_LIMIT
     )
     for e in entries:
         msg = entry_message(e)
@@ -362,14 +345,13 @@ def collect_geo_misroutes(groups):
 def collect_anam_failures(groups):
     """monitor.md §1.5: Anam `Failed to start avatar` > 3/2h → P2."""
     entries = gcloud_logging_read(
-        f'{LK_DRIVER_LOGNAME} AND resource.type="gce_instance" '
-        f'AND jsonPayload.message=~"Failed to start avatar" AND ({LK_VM_FILTER})',
+        f'{VOICE_AGENT_LOG_FILTER} AND jsonPayload.message=~"Failed to start avatar"',
         limit=QUERY_LIMIT,
     )
     for e in entries:
-        vm = lk_entry_vm(e)
+        region = voice_agent_region(e)
         add_to_groups(groups, "voice-agent:all:anam-avatar-start-failed",
-                      "ai-voice-agent-python", vm, e.get("timestamp", ""), entry_message(e))
+                      "ai-voice-agent-python", region, e.get("timestamp", ""), entry_message(e))
     # Severity floor (P2 when >3/2h) is applied in assign_severity via
     # raise_to so the generic thresholds can still escalate to P1/P0.
     log(f"anam failures: {len(entries)} entries")
@@ -396,7 +378,7 @@ def collect_transcription_delay(groups):
     >= 2 such outliers in the same region/lang within the window)."""
     import ast
     entries = gcloud_logging_read(
-        'resource.type="gce_instance" AND jsonPayload.message=~"TURN_LATENCY EOUMetrics"',
+        f'{VOICE_AGENT_LOG_FILTER} AND jsonPayload.message=~"TURN_LATENCY EOUMetrics"',
         limit=QUERY_LIMIT,
     )
     rows = {}
@@ -447,86 +429,6 @@ def collect_transcription_delay(groups):
             }
     log(f"turn latency: {len(entries)} entries, {len(rows)} turns, "
         f"{len(by_rl)} region/lang groups")
-
-
-def check_lk_health():
-    statuses = {}
-    for vm, url in LK_URLS.items():
-        out = run_cmd(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                       "--connect-timeout", "5", url + "/"], timeout=15)
-        statuses[vm] = int(out) if out and out.strip().isdigit() else 0
-    log(f"lk health: {statuses}")
-    return statuses
-
-
-LK_ZONES = {
-    "lk-eu-west4": "europe-west4-b",
-    "lk-us-central1": "us-central1-a",
-    "lk-asia-south1": "asia-south1-a",
-    "lk-au-southeast1": "australia-southeast1-a",
-}
-
-
-# ssh failure modes that mean "these credentials cannot ssh AT ALL" (the
-# self-healing VM's minimal SA: no compute.instances.get, no ssh keys —
-# JOB-731 stage 3M). Identical for every VM, so the first hit skips the rest.
-SSH_UNAVAILABLE_RE = re.compile(
-    r"compute\.instances\.get|PERMISSION_DENIED|does not have permission|"
-    r"Permission denied \(publickey", re.I)
-
-
-def check_vm_disk(groups):
-    """LK VM disk usage: >70% → P2, >85% → P1 (PR #72 incident).
-
-    Needs ssh — disk % has NO ssh-free source: the LK VMs run no ops agent
-    (no agent.googleapis.com/disk/percent_used series exists) and nothing
-    logs disk usage to Cloud Logging (both verified 2026-07-17); the
-    self-healing VM's SA has no monitoring.viewer either. So the check is
-    best-effort: where credentials cannot ssh it is skipped with ONE
-    informational note (never counted toward hard_fail) instead of failing
-    4x every run.
-    """
-    if os.environ.get("MONITOR_SKIP_VM_DISK") == "1":
-        return
-    now = utcnow_iso()
-    for vm, zone in LK_ZONES.items():
-        cmd = ["gcloud", "compute", "ssh", vm, f"--zone={zone}",
-               f"--project={PROJECT}", "--ssh-flag=-o ConnectTimeout=10",
-               "--command=df / | tail -1 | awk '{print $5}' | tr -d '%'"]
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        except Exception as e:  # noqa: BLE001 — timeout etc: real failure
-            collection_errors.append({"cmd": f"vm disk ssh {vm}", "error": str(e)[:300]})
-            log(f"FAILED: vm disk ssh {vm}: {e}")
-            continue
-        if res.returncode != 0:
-            err = res.stderr.strip()[:300]
-            if SSH_UNAVAILABLE_RE.search(err):
-                collection_errors.append({
-                    "cmd": "vm disk check",
-                    "error": f"ssh unavailable for these credentials ({vm}: "
-                             f"{err[:120]}) — disk checks skipped; needs "
-                             f"ssh-capable creds or MONITOR_SKIP_VM_DISK=1",
-                    "informational": True,
-                })
-                log("vm disk: ssh unavailable in this environment — skipping")
-                return
-            collection_errors.append({"cmd": f"vm disk ssh {vm}", "error": err})
-            log(f"FAILED: vm disk ssh {vm}: {err}")
-            continue
-        out = res.stdout
-        if not out.strip().isdigit():
-            continue
-        used = int(out.strip())
-        log(f"{vm} disk: {used}%")
-        if used > 70:
-            sig = f"lk-vm:{vm}:disk-usage-high"
-            groups[sig] = {
-                "signature": sig, "service": "livekit", "region": vm,
-                "count": 1, "first_seen": now, "last_seen": now,
-                "severity": "P1" if used > 85 else "P2",
-                "sample_message": f"{vm} root disk at {used}% (P2 >70%, P1 >85%)",
-            }
 
 
 def collect_sentry(groups):
@@ -630,7 +532,7 @@ def collect_sentry(groups):
     log(f"sentry: {len(issues)} issues, {kept} after noise + freshness filters")
 
 
-def assign_severity(groups, lk_statuses, stage_counts, audio_timeouts,
+def assign_severity(groups, stage_counts, audio_timeouts,
                     geo_misroutes=0, anam_count=0):
     """Thresholds from agents/claude/monitor.md Шаг 4 + §1.5/§1.6 triage rules."""
     for g in groups.values():
@@ -680,17 +582,6 @@ def assign_severity(groups, lk_statuses, stage_counts, audio_timeouts,
         raise_to("joblander-app:geo:in-users-misrouted", "P1")
     if anam_count > 3:
         raise_to("voice-agent:all:anam-avatar-start-failed", "P2")
-    # LiveKit server down = P0, regardless of log volume
-    now = utcnow_iso()
-    for vm, status in lk_statuses.items():
-        if status != 200:
-            sig = f"lk-server:{vm}:down"
-            groups[sig] = {
-                "signature": sig, "service": "livekit", "region": vm,
-                "count": 1, "first_seen": now, "last_seen": now,
-                "severity": "P0",
-                "sample_message": f"LiveKit server {vm} HTTP {status} (expected 200)",
-            }
 
 
 def load_json(path, default):
@@ -1236,13 +1127,12 @@ def main():
     groups = {}
     collect_cloud_run(groups)
     collect_cloud_functions(groups)
-    collect_lk_docker(groups)
+    collect_voice_agent_errors(groups)
     stage_counts = collect_stage_errors(groups)
     audio_timeouts = collect_audio_timeouts(groups)
     geo_misroutes = collect_geo_misroutes(groups)
     anam_count = collect_anam_failures(groups)
     collect_transcription_delay(groups)
-    lk_statuses = check_lk_health()
     collect_sentry(groups)
 
     # JOB-1010: check that the daily duplicate-free-grant worker ran and
@@ -1251,9 +1141,8 @@ def main():
     # generic count thresholds like any other group.
     check_duplicate_worker(groups)
 
-    assign_severity(groups, lk_statuses, stage_counts, audio_timeouts,
+    assign_severity(groups, stage_counts, audio_timeouts,
                     geo_misroutes, anam_count)
-    check_vm_disk(groups)  # after assign_severity: sets its own severity
     groups = filter_known(groups, STATE_DIR)
     final_groups, summary = diff_with_previous(groups, STATE_DIR)
     # Cooldown gate (JOB-858): query Linear for recently-closed [Monitor] tickets
@@ -1284,9 +1173,12 @@ def main():
             svc: {"status": service_status(svc)}
             for svc in ("joblander-app", "joblander-audio-engine", "email-service")
         }
-        services["livekit-vms"] = {
-            vm: {"http": st, "status": "RUNNING" if st == 200 else "DOWN"}
-            for vm, st in lk_statuses.items()
+        services["ai-voice-agent-python"] = {
+            "status": service_status("ai-voice-agent-python"),
+            "hosting": "cloud-run-worker-pools",
+        }
+        services["livekit"] = {
+            "hosting": "cloud", "status": "MANAGED",
         }
         report = {
             "timestamp": now,

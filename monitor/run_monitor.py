@@ -22,6 +22,18 @@ import urllib.request
 PROJECT = "meet-assistant-6d8ad"
 MONITOR_DIR = Path(__file__).resolve().parent
 ESCALATION_ACTIONS = {"telegram_p0_and_linear", "linear_create_if_no_dup", "linear_ensure_open_issue"}
+# These SFU hosts were intentionally retired on 2026-09-19 for LiveKit Cloud.
+# Remove only their infrastructure alerts, including durable pre-migration work.
+RETIRED_LK_VMS = {"lk-eu-west4", "lk-us-central1", "lk-asia-south1", "lk-au-southeast1"}
+RETIRED_LK_SIGNATURES = {
+    signature for vm in RETIRED_LK_VMS
+    for signature in (f"lk-server:{vm}:down", f"lk-vm:{vm}:disk-usage-high")
+}
+
+
+def retired_lk_page(alert):
+    return any(alert.startswith(f"URGENT P0: LiveKit server {vm} HTTP ")
+               for vm in RETIRED_LK_VMS)
 
 
 def timestamp():
@@ -144,6 +156,8 @@ def prepare_escalations(config, summary):
         pending.pop(suppressed["signature"], None)
     for item in summary["escalations"]:
         pending[item["signature"]] = {**item, "prepared_at": summary["timestamp"]}
+    for signature in RETIRED_LK_SIGNATURES:
+        pending.pop(signature, None)
     write_json(path, pending)
     batch = {**summary, "escalations": list(pending.values())}
     write_json(config.state_dir / "escalation-batch.json", batch)
@@ -205,6 +219,7 @@ def deliver_pending(config, alerts, pager):
     pending = json.loads(path.read_text()) if path.exists() else {}
     for alert in alerts:
         pending.setdefault(hashlib.sha256(alert.encode()).hexdigest(), alert)
+    pending = {key: alert for key, alert in pending.items() if not retired_lk_page(alert)}
     write_json(path, pending)
     sent, failures = [], []
     for key, alert in list(pending.items()):

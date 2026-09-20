@@ -44,6 +44,22 @@ test("usage normalization preserves cache semantics and unknown values", async (
   assert.equal(claudeUsage({ input_tokens: 0, output_tokens: 0 }).input, 0);
 });
 
+test("reused Codex refresh tokens block provider attempts until the auth retry", async () => {
+  const { classifyFailure, updateProvider, availableToAttempt, providerReadiness } = await import("../src/providerState");
+  const { unknownUsage } = await import("../src/providerTypes");
+  const error = "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.";
+  assert.equal(classifyFailure(error), "auth");
+  assert.equal(classifyFailure("refresh_token_reused"), "auth");
+  const now = Date.now();
+  const at = new Date(now).toISOString();
+  const attempt = { id: "auth-reused", provider: "codex" as const, model: "verified", startedAt: at, finishedAt: at, status: "failed" as const, failureKind: classifyFailure(error), error, usage: unknownUsage(), turns: 0, estimatedCostUsd: null, costSource: "unavailable" as const };
+  updateProvider(attempt);
+  assert.equal(availableToAttempt("codex", now), false);
+  assert.equal(providerReadiness(now).providers.find(p => p.provider === "codex")?.failureKind, "auth");
+  updateProvider({ ...attempt, status: "completed", turns: 1 });
+  assert.equal(availableToAttempt("codex", now), true);
+});
+
 test("Codex authentication cannot inherit API keys or dispatcher secrets", async () => {
   const { codexEnv, codexArgs } = await import("../src/codex");
   const env = codexEnv({ HOME: "/home/agent", PATH: "/bin", OPENAI_API_KEY: "forbidden", CODEX_API_KEY: "forbidden", CLAUDE_CODE_OAUTH_TOKEN: "forbidden", TG_BOT_TOKEN: "forbidden" });
