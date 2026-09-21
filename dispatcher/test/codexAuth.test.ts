@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -153,4 +153,25 @@ test("a required tool's 401 cannot permanently block a healthy subscription", as
   assert.equal(state.requiresLogin, undefined);
   assert.ok(state.retryAt);
   assert.equal(stateCanAttempt(state, Date.now() + 86_400_000), true);
+});
+
+test("an unverified fallback is not announced as a confirmed capability outage", async () => {
+  const providers = await import("../src/providerState");
+  const notifications = await import("../src/notify");
+  const { alertProviderReadiness } = await import("../src/healthAlerts");
+  let messages = 0;
+  const send = mock.method(notifications, "sendTelegram", async () => { messages++; return true; });
+  let fallbackStatus: "unknown" | "blocked" = "unknown";
+  const snapshot = mock.method(providers, "providerReadiness", () => ({ ready: false, providers: [
+    { provider: "claude" as const, status: "blocked" as const, ready: false, canAttempt: false },
+    { provider: "codex" as const, status: fallbackStatus, ready: false, canAttempt: fallbackStatus === "unknown" },
+  ] }));
+  try {
+    await alertProviderReadiness();
+    assert.equal(messages, 0);
+    fallbackStatus = "blocked";
+    await alertProviderReadiness();
+    await alertProviderReadiness();
+    assert.equal(messages, 1);
+  } finally { snapshot.mock.restore(); send.mock.restore(); }
 });

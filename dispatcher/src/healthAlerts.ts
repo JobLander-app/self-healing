@@ -71,7 +71,9 @@ export async function alertProviderReadiness(): Promise<void> {
   // Unknown on first boot is not a quota incident. A real availability error
   // makes the operational failure actionable; don't create a repair ticket
   // for routine subscription exhaustion.
-  if (!r.ready && r.providers.some(p => p.status === "blocked")) {
+  // An unverified fallback (e.g. first boot after a credential change) is not
+  // evidence that every provider failed. Readiness stays false until verified.
+  if (!r.ready && r.providers.every(p => p.status === "blocked")) {
     await healthAlert("providers", true, `⚠️ Repair capability unavailable. ${r.providers.map(p => `${p.provider}: ${p.status}${p.retryAt ? `; retry ${p.retryAt}` : ""}`).join(". ")}. VM is alive; provider quota/authentication needs attention.`);
   } else if (r.ready) await healthAlert("providers", false, "✅ Repair capability recovered: a subscription provider completed a real turn successfully.");
 }
