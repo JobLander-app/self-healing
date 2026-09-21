@@ -7,6 +7,7 @@ import * as path from "node:path";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "shl-providers-"));
 process.env.LOG_DIR = path.join(root, "turns");
 process.env.CODEX_BIN = path.join(root, "codex");
+process.env.CODEX_HOME = path.join(root, "auth");
 process.env.CODEX_ENABLED = "true";
 process.env.CODEX_MODEL = "verified-test-model";
 
@@ -44,7 +45,7 @@ test("usage normalization preserves cache semantics and unknown values", async (
   assert.equal(claudeUsage({ input_tokens: 0, output_tokens: 0 }).input, 0);
 });
 
-test("reused Codex refresh tokens block provider attempts until the auth retry", async () => {
+test("reused Codex refresh tokens stay blocked beyond the retry window", async () => {
   const { classifyFailure, updateProvider, availableToAttempt, providerReadiness } = await import("../src/providerState");
   const { unknownUsage } = await import("../src/providerTypes");
   const error = "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.";
@@ -55,6 +56,7 @@ test("reused Codex refresh tokens block provider attempts until the auth retry",
   const attempt = { id: "auth-reused", provider: "codex" as const, model: "verified", startedAt: at, finishedAt: at, status: "failed" as const, failureKind: classifyFailure(error), error, usage: unknownUsage(), turns: 0, estimatedCostUsd: null, costSource: "unavailable" as const };
   updateProvider(attempt);
   assert.equal(availableToAttempt("codex", now), false);
+  assert.equal(availableToAttempt("codex", now + 86_400_000), false);
   assert.equal(providerReadiness(now).providers.find(p => p.provider === "codex")?.failureKind, "auth");
   updateProvider({ ...attempt, status: "completed", turns: 1 });
   assert.equal(availableToAttempt("codex", now), true);

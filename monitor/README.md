@@ -85,3 +85,28 @@ counted separately and never represented as zero tokens or a fabricated bill.
 Validation: `python3 -m unittest discover -s monitor -p 'test_*.py' -v`.
 Unit tests inject collection, delivery and provider execution; they never contact
 production or start an inference session.
+
+## Infrastructure lifecycle
+
+`targets.json` is the reviewed monitoring contract: expected regional worker
+pools, the LiveKit Cloud endpoint used by the app, and explicit retired resource
+scopes with effective dates and evidence. Update this contract in the same
+migration rollout, before removing old resources. Add and verify replacements
+before retiring their predecessors. Never derive expected coverage from the
+set of currently running VMs or from whichever resources emitted recent logs.
+
+Every collection checks the expected worker deployments and the app's actual
+LIVEKIT_URL. It records a policy revision and each observation in the report.
+Missing permissions, missing resources and failed lookups remain UNKNOWN;
+deployment disagreement is DRIFT/NOT_READY. These generate a P2 monitoring
+configuration investigation, never a synthetic HTTP 0 P0. Actual production
+error spikes retain their existing P0/P1 thresholds. Cloud control-plane Ready
+and an endpoint match do not claim successful end-to-end voice calls.
+
+Explicit retirements also filter both durable outboxes, including delivery
+retries after collection failure. Before removal, the original item, reason,
+evidence and policy revision are saved in `retired-outbox.json`. Unknown scopes
+and replacement hosts remain eligible. Invalid policy fails before any removal
+or delivery; pending work is preserved. CI rejects empty voice coverage,
+active/retired overlap, ambiguous retirement prefixes and future retirements.
+Python code does not need edits to retire another resource or change a pool.

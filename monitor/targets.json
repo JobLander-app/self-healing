@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "project": "meet-assistant-6d8ad",
+  "livekit": {
+    "hosting": "cloud",
+    "endpoint": "wss://ai-coach-5ctqnjx6.livekit.cloud",
+    "config_service": "joblander-app",
+    "config_region": "europe-west1"
+  },
+  "voice_agents": [
+    {
+      "name": "voice-agent-eu",
+      "region": "europe-west1"
+    },
+    {
+      "name": "voice-agent-us",
+      "region": "us-central1"
+    },
+    {
+      "name": "voice-agent-in",
+      "region": "asia-south1"
+    }
+  ],
+  "retired_resources": [
+    {
+      "name": "lk-eu-west4",
+      "retired_at": "2026-09-19T00:00:00Z",
+      "reason": "LiveKit Cloud and regional Cloud Run worker pool migration",
+      "evidence": "https://github.com/JobLander-app/self-healing/pull/47",
+      "signature_prefixes": [
+        "lk-server:lk-eu-west4:",
+        "lk-vm:lk-eu-west4:",
+        "voice-agent:lk-eu-west4:"
+      ],
+      "page_prefixes": [
+        "URGENT P0: LiveKit server lk-eu-west4 HTTP ",
+        "URGENT P0: voice-agent:lk-eu-west4:"
+      ]
+    },
+    {
+      "name": "lk-us-central1",
+      "retired_at": "2026-09-19T00:00:00Z",
+      "reason": "LiveKit Cloud and regional Cloud Run worker pool migration",
+      "evidence": "https://github.com/JobLander-app/self-healing/pull/47",
+      "signature_prefixes": [
+        "lk-server:lk-us-central1:",
+        "lk-vm:lk-us-central1:",
+        "voice-agent:lk-us-central1:"
+      ],
+      "page_prefixes": [
+        "URGENT P0: LiveKit server lk-us-central1 HTTP ",
+        "URGENT P0: voice-agent:lk-us-central1:"
+      ]
+    },
+    {
+      "name": "lk-asia-south1",
+      "retired_at": "2026-09-19T00:00:00Z",
+      "reason": "LiveKit Cloud and regional Cloud Run worker pool migration",
+      "evidence": "https://github.com/JobLander-app/self-healing/pull/47",
+      "signature_prefixes": [
+        "lk-server:lk-asia-south1:",
+        "lk-vm:lk-asia-south1:",
+        "voice-agent:lk-asia-south1:"
+      ],
+      "page_prefixes": [
+        "URGENT P0: LiveKit server lk-asia-south1 HTTP ",
+        "URGENT P0: voice-agent:lk-asia-south1:"
+      ]
+    },
+    {
+      "name": "lk-au-southeast1",
+      "retired_at": "2026-09-19T00:00:00Z",
+      "reason": "LiveKit Cloud and regional Cloud Run worker pool migration",
+      "evidence": "https://github.com/JobLander-app/self-healing/pull/47",
+      "signature_prefixes": [
+        "lk-server:lk-au-southeast1:",
+        "lk-vm:lk-au-southeast1:",
+        "voice-agent:lk-au-southeast1:"
+      ],
+      "page_prefixes": [
+        "URGENT P0: LiveKit server lk-au-southeast1 HTTP ",
+        "URGENT P0: voice-agent:lk-au-southeast1:"
+      ]
+    }
+  ]
+}

@@ -41,9 +41,15 @@ CODEX_MODEL=gpt-6-astra
 model changes require another smoke test. The binary path is installation
 dependent; check `command -v codex`.
 
-Authenticate as the service account with `CODEX_HOME` set using `codex login
---device-auth`, or securely provision an authorized CLI auth cache as described
-in the official authentication documentation. The directory must be mode 700
+Authenticate independently on this VM through the shared lock:
+
+```sh
+sudo -u joblander -H env CODEX_HOME=/home/joblander/.codex-shl \
+  python3 dispatcher/scripts/codex-session.py /usr/bin/codex login --device-auth
+```
+
+Do not copy a workstation's auth.json or restore an old credential seed over an
+existing VM home. The directory must be mode 700
 and auth/config files mode 600. Preserve token refreshes in place. Never put
 credentials in git, command arguments, logs, Linear or PR descriptions. The
 runner forces ChatGPT authentication and does not pass API-key variables to
@@ -74,7 +80,36 @@ Separate read-only Codex smokes called the vendored Firebase, Sentry and Linear
 tools successfully. Select the exact `mcp__linear__list_teams` tool; loose
 catalog suffix matching can confuse the local MCP with another connector.
 A successful test is deployment evidence; it does not fabricate a production
-repair or clear production state.
+repair. It publishes real authentication evidence for the same credentials
+through the shared auth state, so the daemon observes recovery without restart.
+
+## Authentication ownership
+
+All dispatcher, monitor and smoke invocations acquire a kernel lock at
+`CODEX_HOME/shl-auth.lock`. Login must use the wrapper above too. Waiting is
+inside the existing watchdog budget; the candidate/accounting guard runs after
+acquisition. The lock remains inherited by the CLI if its supervisor dies.
+Never unlink this lock file: replacing the inode would split ownership.
+
+Only Codex's built-in refresh rotates tokens. The wrapper preserves auth.json
+in place and publishes a private, atomic `shl-auth-state.json` before releasing
+the lock. It contains a SHA-256 credential generation, result and timestamp,
+never tokens, prompts or responses. Each component keeps its own usage ledger.
+This common auth evidence is reread for readiness and scheduling decisions.
+
+A terminal session refresh/revocation failure blocks new Codex launches until
+the credential content changes, even across process restarts and expired retry
+windows. Queued processes recheck under the lock. A changed credential becomes
+eligible but stays unverified until a real successful turn. Required MCP tool
+authentication failures retain their bounded cooldown; they do not permanently
+invalidate the subscription. One durable authentication alert and one verified
+recovery replace repeated session failures. The normal queue poll resumes work
+after login; the health alert loop observes shared state every minute.
+
+No background inference is required solely to refresh tokens: ordinary,
+serialized CLI use owns refresh. Revocation or expiry can still require an
+operator login. This follows the official
+[persistent runner authentication guidance](https://learn.chatgpt.com/docs/auth/ci-cd-auth).
 
 ## Durable usage and provider state
 

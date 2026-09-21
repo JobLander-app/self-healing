@@ -51,6 +51,8 @@ class LiveKitCloudTests(unittest.TestCase):
                 "signature": "lk-server:lk-asia-south1:down", "service": "livekit",
                 "region": "lk-asia-south1", "severity": "P0", "count": 1}]})
             stack.enter_context(patch.object(triage, "STATE_DIR", directory))
+            stack.enter_context(patch.object(triage, "inspect_targets", return_value=[
+                {"name": "worker", "status": "READY"}, {"name": "livekit-config", "status": "MATCH"}]))
             stack.enter_context(patch.object(triage, "gcloud_logging_read", return_value=[]))
             stack.enter_context(patch.object(triage, "collect_sentry"))
             stack.enter_context(patch.object(triage, "check_duplicate_worker"))
@@ -85,7 +87,7 @@ class LiveKitCloudTests(unittest.TestCase):
             retired = "lk-server:lk-asia-south1:down"
             active = "voice-agent:asia-south1:connection-failed"
             pending = {retired: {"signature": retired}, active: {"signature": active}}
-            for vm in runner.RETIRED_LK_VMS:
+            for vm in [r["name"] for r in runner.load_targets()["retired_resources"]]:
                 signature = f"voice-agent:{vm}:connection-failed"
                 pending[signature] = {"signature": signature}
             runner.write_json(config.state_dir / "linear-outbox.json", pending)

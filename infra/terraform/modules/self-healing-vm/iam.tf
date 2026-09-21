@@ -30,6 +30,22 @@ resource "google_project_iam_member" "roles" {
   member  = "serviceAccount:${google_service_account.agent.email}"
 }
 
+# Compare the reviewed monitor contract with deployed Cloud Run configuration.
+# No invoke, update, delete, IAM-policy or secret-value permissions.
+resource "google_project_iam_custom_role" "monitor_topology" {
+  project     = var.project_id
+  role_id     = "selfHealingMonitorTopology"
+  title       = "Self-healing monitoring topology reader"
+  description = "Read service configuration and worker-pool readiness for drift detection."
+  permissions = ["run.services.get", "run.workerpools.get"]
+}
+
+resource "google_project_iam_member" "monitor_topology" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.monitor_topology.name
+  member  = "serviceAccount:${google_service_account.agent.email}"
+}
+
 # Per-secret accessor grants instead of project-wide
 # secretmanager.secretAccessor — the SA can read exactly the secrets the
 # loop needs and nothing else. Includes the Grafana admin password secret
