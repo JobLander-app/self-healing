@@ -99,6 +99,35 @@ test("watchdog kills holder and waiter without launching the waiter; kernel rele
   assert.equal((await runWorker()).attempt.status, "completed");
 });
 
+test("task failures preserve successful shared readiness", async () => {
+  const { providerReadiness } = await import("../src/providerState");
+  credentials("task-failure");
+  fake(success);
+  await runWorker();
+  const before = fs.readFileSync(marker, "utf8");
+  fake("process.stdout.write(JSON.stringify({type:'turn.failed',error:{message:'Unit test failed'}})+'\\n');process.exitCode=1;");
+  assert.equal((await runWorker()).attempt.failureKind, "task");
+  assert.equal(fs.readFileSync(marker, "utf8"), before);
+  assert.equal(providerReadiness().providers.find(p => p.provider === "codex")?.ready, true);
+});
+
+test("queued processes respect newly established cooldowns without extending them", async () => {
+  const { availableToAttempt } = await import("../src/providerState");
+  credentials("queued-cooldown");
+  fs.writeFileSync(executions, "");
+  fake("require('fs').appendFileSync(" + JSON.stringify(executions) + ",'started\\n');" +
+    "setTimeout(()=>{process.stdout.write(JSON.stringify({type:'turn.failed',error:{message:'HTTP 429 rate limit exceeded'}})+'\\n');process.exitCode=1;},100);");
+  const results = await Promise.all([runWorker(), runWorker()]);
+  assert.ok(results.every(r => r.attempt.failureKind === "throttle"));
+  assert.equal(results.filter(r => r.attempt.providerSkipped).length, 1);
+  assert.equal(fs.readFileSync(executions, "utf8"), "started\n");
+  const before = fs.readFileSync(marker, "utf8");
+  assert.equal((await runWorker()).attempt.providerSkipped, true);
+  assert.equal(fs.readFileSync(marker, "utf8"), before);
+  assert.equal(availableToAttempt("codex"), false);
+  assert.equal(availableToAttempt("codex", Date.now() + 86_400_000), true);
+});
+
 test("candidate rejection and corrupt coordination state cannot launch Codex", async () => {
   const { executeCodex } = await import("../src/codex");
   const { availableToAttempt } = await import("../src/providerState");

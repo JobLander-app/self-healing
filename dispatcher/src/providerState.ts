@@ -95,6 +95,7 @@ export function providerOrder(): Provider[] {
   return config.codexEnabled ? ["claude", "codex"] : ["claude"];
 }
 export function stateForAttempt(attempt: ProviderAttempt): ProviderState | null {
+  if (attempt.providerSkipped) return null; // preserve the original cooldown/evidence
   const binding = attempt.provider === "codex" ? { credentialFingerprint: attempt.credentialFingerprint ?? credentialFingerprint() } : {};
   // A required MCP server's 401 is not proof that the Codex session is invalid.
   const requiresLogin = attempt.provider === "codex" && attempt.failureKind === "auth" &&

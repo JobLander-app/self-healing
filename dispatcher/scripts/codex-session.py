@@ -66,10 +66,16 @@ def main():
         if marker.exists() and (not isinstance(saved, dict) or saved.get("status") not in {"unknown", "available", "blocked"}
                                 or not saved.get("credentialFingerprint") or not saved.get("checkedAt")):
             raise ValueError("invalid auth state")
-        if (saved.get("credentialFingerprint") == generation
-                and saved.get("requiresLogin") is True and saved.get("status") == "blocked"):
-            emit("turn.failed", error={"message": "Codex authentication blocked; sign in again on this VM"})
-            code, stderr = 1, b""
+        retry = None
+        try:
+            retry = datetime.datetime.fromisoformat(saved.get("retryAt", "").replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        cooling = retry is not None and retry.tzinfo is not None and retry > datetime.datetime.now(datetime.timezone.utc)
+        if (saved.get("credentialFingerprint") == generation and saved.get("status") == "blocked"
+                and (saved.get("requiresLogin") is True or cooling)):
+            emit("shl.auth_blocked", state=saved, credentialFingerprint=generation)
+            return 1  # no CLI, no state write, no extension of the deadline
         else:
             child = subprocess.Popen([binary, *args], stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, pass_fds=(lock,))
@@ -112,6 +118,8 @@ def main():
                 break
             reply.extend(byte)
         state = json.loads(reply)
+        if state is None:
+            return code if code >= 0 else 1  # retain evidence after a task failure
         if state.get("status") not in ("available", "blocked", "unknown"):
             raise ValueError("invalid provider state")
         save(home, {**state, "checkedAt": finished, "credentialFingerprint": generation})

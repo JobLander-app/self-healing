@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { config, LINEAR_AGENT_CLAIMED_LABEL_ID } from "./config";
-import { classifyFailure, safeError, stateForAttempt } from "./providerState";
+import { classifyFailure, safeError, stateForAttempt, parseProviderState } from "./providerState";
 import { codexSessionScript } from "./codexAuth";
 import type { Duplex } from "node:stream";
 import { unknownUsage, type AttemptResult, type ProviderAttempt, type TokenUsage } from "./providerTypes";
@@ -114,8 +114,23 @@ async function executeCodexTransport(input: CodexInput, launch: { args: string[]
       attempt.credentialFingerprint = ev.credentialFingerprint;
       stderr = ev.stderr || stderr;
       finish(ev.code);
-      const { reason: _private, ...state } = stateForAttempt(attempt) ?? { status: "unknown" };
-      control.end(JSON.stringify(state) + "\n");
+      const next = stateForAttempt(attempt);
+      if (next) {
+        const { reason: _private, ...state } = next;
+        control.end(JSON.stringify(state) + "\n");
+      } else control.end("null\n"); // task failure cannot erase provider evidence
+      return;
+    }
+    if (ev.type === "shl.auth_blocked") {
+      const saved = parseProviderState(ev.state);
+      authFinished = true;
+      attempt.finishedAt = new Date().toISOString();
+      attempt.credentialFingerprint = ev.credentialFingerprint;
+      attempt.providerSkipped = true;
+      attempt.failureKind = saved?.failureKind ?? "unavailable";
+      attempt.error = saved?.requiresLogin ? "Codex authentication blocked; sign in again on this VM"
+        : "Codex provider cooldown remains active";
+      attempt.usage = { input: 0, cachedInput: 0, cacheWrite: 0, output: 0 };
       return;
     }
     if (ev.type === "thread.started") attempt.sessionId = ev.thread_id;

@@ -130,6 +130,7 @@ process.stdout.write(JSON.stringify({type:'turn.failed',error:{message:'usage_li
   let result = await executeCodex({ id: "two", prompt: "probe", model: "verified", entries: {}, signal: new AbortController().signal, onTool: () => {} });
   assert.equal(result.attempt.failureKind, "quota");
   assert.equal(result.attempt.usage.input, null);
+  fs.rmSync(path.join(process.env.CODEX_HOME!, "shl-auth-state.json"), { force: true });
   fs.writeFileSync(process.env.CODEX_BIN!, `#!/usr/bin/env node
 setInterval(()=>{},10000);`, { mode: 0o700 });
   const controller = new AbortController();
@@ -301,6 +302,7 @@ test("Codex malformed and oversized transport data enters provider cooldown", as
   const { updateProvider, availableToAttempt } = await import("../src/providerState");
   assert.ok(codexArgs({}, "m").includes("--ephemeral"));
   for (const payload of ["not JSON", "null", "x".repeat(4_000_100)]) {
+    fs.rmSync(path.join(process.env.CODEX_HOME!, "shl-auth-state.json"), { force: true });
     const fixture = path.join(root, "malformed-payload");
     fs.writeFileSync(fixture, payload);
     fs.writeFileSync(process.env.CODEX_BIN!, `#!/usr/bin/env node\nprocess.stdout.write(require('fs').readFileSync(${JSON.stringify(fixture)}));`, { mode: 0o700 });
