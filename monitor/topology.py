@@ -94,7 +94,7 @@ def inspect_targets(targets, fetch=describe):
     """
     observations = []
     for pool in targets["voice_agents"]:
-        observation = {"name": pool["name"], "region": pool["region"], "status": "UNKNOWN"}
+        observation = {"kind": "worker-pool", "name": pool["name"], "region": pool["region"], "status": "UNKNOWN"}
         try:
             resource = fetch(targets["project"], "worker-pools", pool["name"], pool["region"])
             condition = next((c for c in resource.get("status", {}).get("conditions", []) if c.get("type") == "Ready"), {})
@@ -103,7 +103,7 @@ def inspect_targets(targets, fetch=describe):
             pass
         observations.append(observation)
     cloud = targets["livekit"]
-    observation = {"name": "livekit-config", "region": cloud["config_region"], "status": "UNKNOWN"}
+    observation = {"kind": "livekit-config", "name": "livekit-config", "region": cloud["config_region"], "status": "UNKNOWN"}
     try:
         app = fetch(targets["project"], "services", cloud["config_service"], cloud["config_region"])
         containers = app["spec"]["template"]["spec"]["containers"]
@@ -115,3 +115,10 @@ def inspect_targets(targets, fetch=describe):
         pass
     observations.append(observation)
     return observations
+
+
+def worker_service_status(application_status, observations):
+    states = {o["status"] for o in observations if o.get("kind") == "worker-pool"}
+    if application_status == "DEGRADED" or "NOT_READY" in states:
+        return "DEGRADED"
+    return "UNKNOWN" if "UNKNOWN" in states else application_status

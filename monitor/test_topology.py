@@ -82,6 +82,17 @@ class TopologyTests(unittest.TestCase):
             self.assertIn(f'worker_pool_name="{pool["name"]}" AND resource.labels.location="{pool["region"]}"', query)
         self.assertNotIn("gce_instance", query)
 
+    def test_known_degradation_wins_and_livekit_config_cannot_override_workers(self):
+        unknown = {"kind": "worker-pool", "status": "UNKNOWN"}
+        not_ready = {"kind": "worker-pool", "status": "NOT_READY"}
+        ready = {"kind": "worker-pool", "status": "READY"}
+        for config_status in ["UNKNOWN", "DRIFT", "MATCH"]:
+            config = {"kind": "livekit-config", "status": config_status}
+            self.assertEqual(topology.worker_service_status("DEGRADED", [unknown, config]), "DEGRADED")
+            self.assertEqual(topology.worker_service_status("HEALTHY", [unknown, not_ready, config]), "DEGRADED")
+            self.assertEqual(topology.worker_service_status("HEALTHY", [ready, config]), "HEALTHY")
+            self.assertEqual(topology.worker_service_status("HEALTHY", [unknown, config]), "UNKNOWN")
+
 
 if __name__ == "__main__":
     unittest.main()

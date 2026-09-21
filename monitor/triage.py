@@ -27,7 +27,7 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
-from topology import inspect_targets, load_targets, revision, voice_filter
+from topology import inspect_targets, load_targets, revision, voice_filter, worker_service_status
 
 REGIONS = ["europe-west1", "us-central1", "australia-southeast1", "asia-south1"]
 TARGETS = load_targets()
@@ -1176,9 +1176,7 @@ def main():
             for svc in ("joblander-app", "joblander-audio-engine", "email-service")
         }
         services["ai-voice-agent-python"] = {
-            "status": ("UNKNOWN" if any(t["status"] == "UNKNOWN" for t in topology)
-                       else "DEGRADED" if any(t["status"] not in {"READY", "MATCH"} for t in topology)
-                       else service_status("ai-voice-agent-python")),
+            "status": worker_service_status(service_status("ai-voice-agent-python"), topology),
             "hosting": "cloud-run-worker-pools",
         }
         services["livekit"] = {
