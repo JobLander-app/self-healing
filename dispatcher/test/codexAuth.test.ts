@@ -175,3 +175,22 @@ test("an unverified fallback is not announced as a confirmed capability outage",
     assert.equal(messages, 1);
   } finally { snapshot.mock.restore(); send.mock.restore(); }
 });
+
+test("bare and wrapped terminal OAuth codes suspend later CLI launches", async () => {
+  const { availableToAttempt } = await import("../src/providerState");
+  fs.rmSync(marker, { force: true });
+  for (const message of ["invalid_grant", "Error refreshing token: invalid_grant",
+    "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated"]) {
+    credentials("terminal-" + message);
+    fs.writeFileSync(executions, "");
+    const event = JSON.stringify({ type: "turn.failed", error: { message } });
+    fake("require('fs').appendFileSync(" + JSON.stringify(executions) + ",'started\\n');" +
+      "process.stdout.write(" + JSON.stringify(event + "\n") + ");process.exitCode=1;");
+    assert.equal((await runWorker()).attempt.failureKind, "auth", message);
+    assert.equal(availableToAttempt("codex", Date.now() + 30 * 86_400_000), false, message);
+    const second = await runWorker();
+    assert.equal(second.attempt.failureKind, "auth");
+    assert.equal(second.attempt.providerSkipped, true);
+    assert.equal(fs.readFileSync(executions, "utf8"), "started\n", message);
+  }
+});

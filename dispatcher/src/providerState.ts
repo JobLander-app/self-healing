@@ -52,6 +52,7 @@ export function nextProviderRetry(after = -Infinity): number | null {
   return values.length ? Math.min(...values) : null;
 }
 export function classifyFailure(message: string): FailureKind {
+  if (requiresCodexLogin(message)) return "auth";
   if (isLimitError(message)) return "quota";
   if (isThrottleError(message)) return "throttle";
   if (/unauthenticated|unauthorized|authentication|auth token|oauth|(?:access|refresh) token|refresh_token_reused|token.{0,30}expired|invalid.{0,20}token|not logged in|please (?:run .{0,10})?login|\b401\b/i.test(message)) return "auth";
@@ -99,7 +100,7 @@ export function stateForAttempt(attempt: ProviderAttempt): ProviderState | null 
   const binding = attempt.provider === "codex" ? { credentialFingerprint: attempt.credentialFingerprint ?? credentialFingerprint() } : {};
   // A required MCP server's 401 is not proof that the Codex session is invalid.
   const requiresLogin = attempt.provider === "codex" && attempt.failureKind === "auth" &&
-    /refresh_token_reused|invalid_grant|(?:access|refresh) token.{0,160}(?:could not be refreshed|expired|revoked|invalid|already used)|(?:could not|failed to) refresh.{0,80}(?:token|authentication)|not logged in|authentication blocked; sign in/i.test(attempt.error ?? "");
+    requiresCodexLogin(attempt.error ?? "");
   if (attempt.status === "completed") {
     return { status: "available", checkedAt: attempt.finishedAt, ...binding };
   } else if (attempt.failureKind && ["quota", "throttle", "auth", "unavailable"].includes(attempt.failureKind)) {
@@ -113,6 +114,10 @@ export function stateForAttempt(attempt: ProviderAttempt): ProviderState | null 
     };
   }
   return null;
+}
+/** Use the same terminal-session vocabulary for classification and suspension. */
+export function requiresCodexLogin(message: string): boolean {
+  return /refresh_token_(?:reused|expired|invalidated)|invalid_grant|(?:access|refresh) token.{0,160}(?:could not be refreshed|expired|revoked|invalid|already used)|(?:could not|failed to) refresh.{0,80}(?:token|authentication)|not logged in|authentication blocked; sign in/i.test(message);
 }
 export function updateProvider(attempt: ProviderAttempt): void {
   const all = state();
