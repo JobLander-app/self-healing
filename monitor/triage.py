@@ -27,17 +27,12 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
+from topology import inspect_targets, load_targets, revision, voice_filter, worker_service_status
 
-PROJECT = "meet-assistant-6d8ad"
 REGIONS = ["europe-west1", "us-central1", "australia-southeast1", "asia-south1"]
-# LiveKit SFU moved to Cloud and the self-hosted VMs were retired 2026-09-19.
-# Voice agents now emit structured logs from regional Cloud Run worker pools.
-VOICE_AGENT_LOG_FILTER = (
-    'resource.type="cloud_run_worker_pool" AND '
-    '(resource.labels.worker_pool_name="voice-agent-eu" OR '
-    'resource.labels.worker_pool_name="voice-agent-us" OR '
-    'resource.labels.worker_pool_name="voice-agent-in")'
-)
+TARGETS = load_targets()
+PROJECT = TARGETS["project"]
+VOICE_AGENT_LOG_FILTER = voice_filter(TARGETS)
 WINDOW_HOURS = 2
 STATE_DIR = os.environ.get("MONITOR_STATE_DIR", str(Path.home() / ".local/state/self-healing/monitor"))
 SENTRY_ORG = "joblander-z2"
@@ -1124,6 +1119,14 @@ def utcnow_iso():
 def main():
     os.makedirs(STATE_DIR, exist_ok=True)
     groups = {}
+    topology = inspect_targets(TARGETS)
+    for target in topology:
+        if target["status"] in {"READY", "MATCH"}:
+            continue
+        sig = f'monitor-topology:{target["region"]}:{target["name"]}'
+        groups[sig] = {"signature": sig, "service": "ai-voice-agent-python", "region": target["region"],
+                       "count": 1, "severity": "P2", "first_seen": utcnow_iso(), "last_seen": utcnow_iso(),
+                       "sample_message": f'Monitoring target {target["name"]}: {target["status"]}. Verify targets.json against deployment intent; do not restore retired infrastructure.'}
     collect_cloud_run(groups)
     collect_cloud_functions(groups)
     collect_voice_agent_errors(groups)
@@ -1173,17 +1176,18 @@ def main():
             for svc in ("joblander-app", "joblander-audio-engine", "email-service")
         }
         services["ai-voice-agent-python"] = {
-            "status": service_status("ai-voice-agent-python"),
+            "status": worker_service_status(service_status("ai-voice-agent-python"), topology),
             "hosting": "cloud-run-worker-pools",
         }
         services["livekit"] = {
-            "hosting": "cloud", "status": "MANAGED",
+            "hosting": "cloud", "status": "MANAGED" if topology[-1]["status"] == "MATCH" else topology[-1]["status"],
         }
         report = {
             "timestamp": now,
             "window_hours": WINDOW_HOURS,
             "generated_by": "self-healing/monitor/triage.py",
             "services": services,
+            "monitoring_topology": {"revision": revision(TARGETS), "observations": topology},
             "error_groups": final_groups,
             "summary": summary,
             "collection_errors": collection_errors,

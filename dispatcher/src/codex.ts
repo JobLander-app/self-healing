@@ -3,7 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { config, LINEAR_AGENT_CLAIMED_LABEL_ID } from "./config";
-import { classifyFailure, safeError } from "./providerState";
+import { classifyFailure, safeError, stateForAttempt, parseProviderState } from "./providerState";
+import { codexSessionScript } from "./codexAuth";
+import type { Duplex } from "node:stream";
 import { unknownUsage, type AttemptResult, type ProviderAttempt, type TokenUsage } from "./providerTypes";
 
 const number = (n: unknown): number | null => typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : null;
@@ -22,7 +24,7 @@ export function codexEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Proces
 }
 export function codexArgs(entries: Record<string, string>, model: string): string[] {
   const args = ["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--color", "never", "-m", model,
-    "-c", 'forced_login_method="chatgpt"', "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="medium"'];
+    "-c", 'forced_login_method="chatgpt"', "-c", 'cli_auth_credentials_store="file"', "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="medium"'];
   for (const [name, entry] of Object.entries(entries)) {
     args.push("-c", `mcp_servers.${name}.command="node"`, "-c", `mcp_servers.${name}.args=${JSON.stringify([entry])}`, "-c", `mcp_servers.${name}.required=true`);
   }
@@ -73,18 +75,64 @@ async function executeCodexTransport(input: CodexInput, launch: { args: string[]
   let output = "", stderr = "", buffer = "", failure = "", completed = false, toolsUsed = false, transportFailed = false;
   const issueIds = new Set<string>();
   const tracedItems = new Set<string>();
-  input.beforeStart?.();
-  const child = spawn(config.codexBin, launch.args, { env: launch.env, cwd: launch.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
+  let startError: unknown;
+  let authFinished = false;
+  const child = spawn("python3", [codexSessionScript, config.codexBin, ...launch.args], { env: launch.env, cwd: launch.cwd, stdio: ["pipe", "pipe", "pipe", "pipe"], detached: true });
+  const control = child.stdio[3] as Duplex;
+  control.on("error", () => { /* exit/close handles coordination failure */ });
   const kill = () => { if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* exited */ } } };
   const abort = () => { failure = "watchdog: Codex run aborted"; kill(); };
   input.signal.addEventListener("abort", abort, { once: true });
   if (input.signal.aborted) abort();
+  function finish(code: number | null) {
+    if (code === 0 && completed && !failure && !input.signal.aborted) attempt.status = "completed";
+    else {
+      attempt.status = "failed";
+      attempt.error = safeError(failure || stderr || `Codex exited ${code} without turn.completed`);
+      attempt.failureKind = input.signal.aborted ? "timeout" : transportFailed || (code === 0 && !completed) ? "unavailable" : classifyFailure(attempt.error);
+    }
+  }
   function consume(line: string) {
     if (!line.trim()) return;
     if (line.length > 4_000_000) { transportFailed = true; failure = "Codex JSON event exceeded 4 MB"; kill(); return; }
     let ev: Record<string, any>;
     try { ev = JSON.parse(line); } catch { transportFailed = true; failure = "Codex emitted invalid JSON"; kill(); return; }
     if (!ev || typeof ev !== "object" || Array.isArray(ev) || typeof ev.type !== "string") { transportFailed = true; failure = "Codex emitted invalid event envelope"; kill(); return; }
+    if (ev.type === "shl.auth_locked") {
+      attempt.credentialFingerprint = ev.credentialFingerprint;
+      if (input.signal.aborted) { abort(); return; }
+      try {
+        input.beforeStart?.(); // recheck candidate and accounting AFTER waiting
+        control.write("G");
+        child.stdin.end(input.prompt);
+      } catch (error) { startError = error; kill(); }
+      return;
+    }
+    if (ev.type === "shl.auth_finished") {
+      authFinished = true;
+      attempt.finishedAt = ev.checkedAt;
+      attempt.credentialFingerprint = ev.credentialFingerprint;
+      stderr = ev.stderr || stderr;
+      finish(ev.code);
+      const next = stateForAttempt(attempt);
+      if (next) {
+        const { reason: _private, ...state } = next;
+        control.end(JSON.stringify(state) + "\n");
+      } else control.end("null\n"); // task failure cannot erase provider evidence
+      return;
+    }
+    if (ev.type === "shl.auth_blocked") {
+      const saved = parseProviderState(ev.state);
+      authFinished = true;
+      attempt.finishedAt = new Date().toISOString();
+      attempt.credentialFingerprint = ev.credentialFingerprint;
+      attempt.providerSkipped = true;
+      attempt.failureKind = saved?.failureKind ?? "unavailable";
+      attempt.error = saved?.requiresLogin ? "Codex authentication blocked; sign in again on this VM"
+        : "Codex provider cooldown remains active";
+      attempt.usage = { input: 0, cachedInput: 0, cacheWrite: 0, output: 0 };
+      return;
+    }
     if (ev.type === "thread.started") attempt.sessionId = ev.thread_id;
     const tool = codexTool(ev);
     if (tool) {
@@ -122,17 +170,17 @@ async function executeCodexTransport(input: CodexInput, launch: { args: string[]
     child.on("error", err => { failure = err.message; resolve(null); });
     child.on("exit", () => kill());
     child.on("close", code => resolve(code));
-    child.stdin.end(input.prompt);
   });
   input.signal.removeEventListener("abort", abort);
   // Kill any surviving MCP/shell descendants even on normal CLI exit.
   kill();
+  if (startError) throw startError;
   if (buffer.trim()) consume(buffer);
-  attempt.finishedAt = new Date().toISOString();
-  if (code === 0 && completed && !failure && !input.signal.aborted) attempt.status = "completed";
-  else {
-    attempt.error = safeError(failure || stderr || `Codex exited ${code} without turn.completed`);
-    attempt.failureKind = input.signal.aborted ? "timeout" : transportFailed || (code === 0 && !completed) ? "unavailable" : classifyFailure(attempt.error);
+  if (!attempt.finishedAt) attempt.finishedAt = new Date().toISOString();
+  if (!authFinished || (code !== 0 && attempt.status === "completed")) {
+    // Inference may finish but persisting the shared result can still fail.
+    if (!input.signal.aborted) { transportFailed = true; failure ||= "Codex auth coordination unavailable"; }
+    finish(code);
   }
   return { attempt, output, issueIds: [...issueIds], toolsUsed };
 }

@@ -18,28 +18,28 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+from topology import load_targets, retirement, revision
 
 PROJECT = "meet-assistant-6d8ad"
 MONITOR_DIR = Path(__file__).resolve().parent
 ESCALATION_ACTIONS = {"telegram_p0_and_linear", "linear_create_if_no_dup", "linear_ensure_open_issue"}
-# These SFU hosts were intentionally retired on 2026-09-19 for LiveKit Cloud.
-# Remove their infrastructure and VM log alerts, including pre-migration work.
-RETIRED_LK_VMS = {"lk-eu-west4", "lk-us-central1", "lk-asia-south1", "lk-au-southeast1"}
-RETIRED_LK_SIGNATURES = {
-    signature for vm in RETIRED_LK_VMS
-    for signature in (f"lk-server:{vm}:down", f"lk-vm:{vm}:disk-usage-high")
-}
-
-
-def retired_lk_signature(signature):
-    return signature in RETIRED_LK_SIGNATURES or any(
-        signature.startswith(f"voice-agent:{vm}:") for vm in RETIRED_LK_VMS)
-
-
-def retired_lk_page(alert):
-    return any(alert.startswith((f"URGENT P0: LiveKit server {vm} HTTP ",
-                                 f"URGENT P0: voice-agent:{vm}:"))
-               for vm in RETIRED_LK_VMS)
+def retire_pending(config, pending, kind):
+    targets = load_targets()  # validate policy before retrying old pages too
+    audit_path = config.state_dir / "retired-outbox.json"
+    audit = json.loads(audit_path.read_text()) if audit_path.exists() else {}
+    retained = {}
+    for key, item in pending.items():
+        value = key if kind == "signature_prefixes" else item
+        resource = retirement(value, kind, targets)
+        if resource:
+            audit[f"{kind}:{key}"] = {"at": timestamp(), "item": item, "resource": resource["name"],
+                                       "reason": resource["reason"], "evidence": resource["evidence"],
+                                       "policy_revision": revision(targets)}
+        else:
+            retained[key] = item
+    if retained != pending:
+        write_json(audit_path, audit)  # preserve evidence before removing work
+    return retained
 
 
 def timestamp():
@@ -162,8 +162,7 @@ def prepare_escalations(config, summary):
         pending.pop(suppressed["signature"], None)
     for item in summary["escalations"]:
         pending[item["signature"]] = {**item, "prepared_at": summary["timestamp"]}
-    pending = {signature: item for signature, item in pending.items()
-               if not retired_lk_signature(signature)}
+    pending = retire_pending(config, pending, "signature_prefixes")
     write_json(path, pending)
     batch = {**summary, "escalations": list(pending.values())}
     write_json(config.state_dir / "escalation-batch.json", batch)
@@ -225,7 +224,7 @@ def deliver_pending(config, alerts, pager):
     pending = json.loads(path.read_text()) if path.exists() else {}
     for alert in alerts:
         pending.setdefault(hashlib.sha256(alert.encode()).hexdigest(), alert)
-    pending = {key: alert for key, alert in pending.items() if not retired_lk_page(alert)}
+    pending = retire_pending(config, pending, "page_prefixes")
     write_json(path, pending)
     sent, failures = [], []
     for key, alert in list(pending.items()):

@@ -62,10 +62,18 @@ export async function retryHealthAlerts(send = sendTelegram): Promise<void> {
 }
 export async function alertProviderReadiness(): Promise<void> {
   const r = providerReadiness();
+  const codex = r.providers.find(p => p.provider === "codex");
+  if (codex?.requiresLogin && codex.status === "blocked") {
+    await healthAlert("codex-auth", true, "⚠️ Codex authentication needs a new VM login. Attempts are suspended until credentials change. Use the serialized login in docs/CODEX-FALLBACK.md; do not copy another machine's auth.json.");
+  } else if (codex?.ready) {
+    await healthAlert("codex-auth", false, "✅ Codex authentication recovered: the current VM credentials completed a real turn.");
+  }
   // Unknown on first boot is not a quota incident. A real availability error
   // makes the operational failure actionable; don't create a repair ticket
   // for routine subscription exhaustion.
-  if (!r.ready && r.providers.some(p => p.status === "blocked")) {
+  // An unverified fallback (e.g. first boot after a credential change) is not
+  // evidence that every provider failed. Readiness stays false until verified.
+  if (!r.ready && r.providers.every(p => p.status === "blocked")) {
     await healthAlert("providers", true, `⚠️ Repair capability unavailable. ${r.providers.map(p => `${p.provider}: ${p.status}${p.retryAt ? `; retry ${p.retryAt}` : ""}`).join(". ")}. VM is alive; provider quota/authentication needs attention.`);
   } else if (r.ready) await healthAlert("providers", false, "✅ Repair capability recovered: a subscription provider completed a real turn successfully.");
 }
@@ -83,6 +91,7 @@ export async function alertAccounting(send = sendTelegram): Promise<void> {
 export function startHealthAlertRetry(): NodeJS.Timeout {
   const timer = setInterval(() => {
     void alertAccounting().catch(err => console.error("[health-alert] accounting alert failed:", err));
+    void alertProviderReadiness().catch(err => console.error("[health-alert] provider alert failed:", err));
     void retryHealthAlerts().catch(err => console.error("[health-alert] retry failed:", err));
   }, 60_000);
   timer.unref();

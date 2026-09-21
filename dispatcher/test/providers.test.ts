@@ -7,6 +7,7 @@ import * as path from "node:path";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "shl-providers-"));
 process.env.LOG_DIR = path.join(root, "turns");
 process.env.CODEX_BIN = path.join(root, "codex");
+process.env.CODEX_HOME = path.join(root, "auth");
 process.env.CODEX_ENABLED = "true";
 process.env.CODEX_MODEL = "verified-test-model";
 
@@ -44,7 +45,7 @@ test("usage normalization preserves cache semantics and unknown values", async (
   assert.equal(claudeUsage({ input_tokens: 0, output_tokens: 0 }).input, 0);
 });
 
-test("reused Codex refresh tokens block provider attempts until the auth retry", async () => {
+test("reused Codex refresh tokens stay blocked beyond the retry window", async () => {
   const { classifyFailure, updateProvider, availableToAttempt, providerReadiness } = await import("../src/providerState");
   const { unknownUsage } = await import("../src/providerTypes");
   const error = "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.";
@@ -55,6 +56,7 @@ test("reused Codex refresh tokens block provider attempts until the auth retry",
   const attempt = { id: "auth-reused", provider: "codex" as const, model: "verified", startedAt: at, finishedAt: at, status: "failed" as const, failureKind: classifyFailure(error), error, usage: unknownUsage(), turns: 0, estimatedCostUsd: null, costSource: "unavailable" as const };
   updateProvider(attempt);
   assert.equal(availableToAttempt("codex", now), false);
+  assert.equal(availableToAttempt("codex", now + 86_400_000), false);
   assert.equal(providerReadiness(now).providers.find(p => p.provider === "codex")?.failureKind, "auth");
   updateProvider({ ...attempt, status: "completed", turns: 1 });
   assert.equal(availableToAttempt("codex", now), true);
@@ -128,6 +130,7 @@ process.stdout.write(JSON.stringify({type:'turn.failed',error:{message:'usage_li
   let result = await executeCodex({ id: "two", prompt: "probe", model: "verified", entries: {}, signal: new AbortController().signal, onTool: () => {} });
   assert.equal(result.attempt.failureKind, "quota");
   assert.equal(result.attempt.usage.input, null);
+  fs.rmSync(path.join(process.env.CODEX_HOME!, "shl-auth-state.json"), { force: true });
   fs.writeFileSync(process.env.CODEX_BIN!, `#!/usr/bin/env node
 setInterval(()=>{},10000);`, { mode: 0o700 });
   const controller = new AbortController();
@@ -299,6 +302,7 @@ test("Codex malformed and oversized transport data enters provider cooldown", as
   const { updateProvider, availableToAttempt } = await import("../src/providerState");
   assert.ok(codexArgs({}, "m").includes("--ephemeral"));
   for (const payload of ["not JSON", "null", "x".repeat(4_000_100)]) {
+    fs.rmSync(path.join(process.env.CODEX_HOME!, "shl-auth-state.json"), { force: true });
     const fixture = path.join(root, "malformed-payload");
     fs.writeFileSync(fixture, payload);
     fs.writeFileSync(process.env.CODEX_BIN!, `#!/usr/bin/env node\nprocess.stdout.write(require('fs').readFileSync(${JSON.stringify(fixture)}));`, { mode: 0o700 });

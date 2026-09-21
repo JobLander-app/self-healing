@@ -14,6 +14,8 @@ export interface ProviderAttempt {
   provider: Provider;
   model: string;
   sessionId?: string;
+  credentialFingerprint?: string;
+  providerSkipped?: boolean;
   startedAt: string;
   finishedAt: string;
   status: "completed" | "failed";

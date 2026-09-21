@@ -211,9 +211,10 @@ def migrate_state(config):
     def install_real_monitor_release(self):
         self.git('reset', '-q', '--keep', self.new)
         # Run the real copy-once migration through actual transactional CD.
-        source = SCRIPT.parents[2] / 'monitor/run_monitor.py'
-        self.write(self.repo / 'monitor/run_monitor.py', source.read_text())
-        self.git('add', 'monitor/run_monitor.py')
+        for name in ['run_monitor.py', 'topology.py', 'targets.json']:
+            source = SCRIPT.parents[2] / 'monitor' / name
+            self.write(self.repo / 'monitor' / name, source.read_text())
+        self.git('add', 'monitor')
         self.git('commit', '-qm', 'standalone monitor release')
         self.new = self.git('rev-parse', 'HEAD').strip()
         self.git('push', '-q', 'origin', 'main')
