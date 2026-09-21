@@ -198,8 +198,15 @@ test("bare and wrapped terminal OAuth codes suspend later CLI launches", async (
 });
 
 test("transient refresh failures recover after cooldown without changing credentials", async () => {
-  const { availableToAttempt } = await import("../src/providerState");
-  for (const message of ["failed to refresh authentication: network error",
+  const { availableToAttempt, classifyFailure, requiresCodexLogin } = await import("../src/providerState");
+  const mcpErrors = ["MCP server linear startup failed: invalid_grant",
+    "MCP client for `linear` failed to start: not logged in",
+    "MCP startup failed: handshaking with MCP server failed\nCaused by: OAuth refresh_token_reused"];
+  for (const message of mcpErrors) {
+    assert.equal(classifyFailure(message), "unavailable", message);
+    assert.equal(requiresCodexLogin(message), false, message);
+  }
+  for (const message of [...mcpErrors, "failed to refresh authentication: network error",
     "Your access token could not be refreshed: HTTP 503",
     "access token expired; failed to refresh token: connection reset",
     "refresh token request received invalid response: HTTP 503"]) {

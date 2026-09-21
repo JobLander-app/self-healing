@@ -52,6 +52,7 @@ export function nextProviderRetry(after = -Infinity): number | null {
   return values.length ? Math.min(...values) : null;
 }
 export function classifyFailure(message: string): FailureKind {
+  if (isMcpStartupFailure(message)) return "unavailable";
   if (requiresCodexLogin(message)) return "auth";
   if (isLimitError(message)) return "quota";
   if (isThrottleError(message)) return "throttle";
@@ -98,7 +99,7 @@ export function providerOrder(): Provider[] {
 export function stateForAttempt(attempt: ProviderAttempt): ProviderState | null {
   if (attempt.providerSkipped) return null; // preserve the original cooldown/evidence
   const binding = attempt.provider === "codex" ? { credentialFingerprint: attempt.credentialFingerprint ?? credentialFingerprint() } : {};
-  // A required MCP server's 401 is not proof that the Codex session is invalid.
+  // A required MCP server's credentials are independent of the Codex session.
   const requiresLogin = attempt.provider === "codex" && attempt.failureKind === "auth" &&
     requiresCodexLogin(attempt.error ?? "");
   if (attempt.status === "completed") {
@@ -115,8 +116,12 @@ export function stateForAttempt(attempt: ProviderAttempt): ProviderState | null 
   }
   return null;
 }
+function isMcpStartupFailure(message: string): boolean {
+  return /\bmcp\b[\s\S]{0,200}\b(?:startup|(?:failed|unable) to start|handshak(?:e|ing))\b/i.test(message);
+}
 /** Use the same terminal-session vocabulary for classification and suspension. */
 export function requiresCodexLogin(message: string): boolean {
+  if (isMcpStartupFailure(message)) return false;
   // Access tokens normally expire and generic refresh failures can be network
   // errors. Only confirmed refresh-credential invalidation requires a login.
   return /\b(?:refresh_token_(?:reused|expired|invalidated)|invalid_grant)\b/i.test(message)

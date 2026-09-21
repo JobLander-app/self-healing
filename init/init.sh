@@ -239,7 +239,7 @@ if [ -d "$SH_DIR" ]; then
   fi
   install -m 600 -o $AGENT_USER -g $AGENT_USER "$SH_DIR/deploy/skills/yeet/SKILL.md" "$AGENT_HOME/.agents/skills/yeet/SKILL.md"
   if ! as_agent env CODEX_HOME="$AGENT_HOME/.codex-shl" codex login status >/dev/null 2>&1; then
-    add_todo "Codex subscription login required: sudo -u $AGENT_USER -H env CODEX_HOME=$AGENT_HOME/.codex-shl codex login --device-auth; then verify a read-only exec turn before setting CODEX_ENABLED=true and CODEX_MODEL=gpt-6-astra in dispatcher env secret"
+    add_todo "Codex subscription login required: sudo -u $AGENT_USER -H env CODEX_HOME=$AGENT_HOME/.codex-shl python3 $SH_DIR/dispatcher/scripts/codex-session.py /usr/bin/codex login --device-auth; then verify a read-only exec turn before setting CODEX_ENABLED=true and CODEX_MODEL=gpt-6-astra in dispatcher env secret"
   fi
 
   # dispatcher .env from Secret Manager (never on disk outside this file)
