@@ -97,12 +97,13 @@ the lock. It contains a SHA-256 credential generation, result and timestamp,
 never tokens, prompts or responses. Each component keeps its own usage ledger.
 This common auth evidence is reread for readiness and scheduling decisions.
 
-A terminal session refresh/revocation failure blocks new Codex launches until
+Confirmed refresh-credential invalidation blocks new Codex launches until
 the credential content changes, even across process restarts and expired retry
 windows. Queued processes recheck under the lock. A changed credential becomes
 eligible but stays unverified until a real successful turn. Required MCP tool
 authentication failures retain their bounded cooldown; they do not permanently
-invalidate the subscription. One durable authentication alert and one verified
+invalidate the subscription. Network failures during refresh and ordinary access
+token expiry retain a retry deadline. One durable authentication alert and one verified
 recovery replace repeated session failures. The normal queue poll resumes work
 after login; the health alert loop observes shared state every minute.
 

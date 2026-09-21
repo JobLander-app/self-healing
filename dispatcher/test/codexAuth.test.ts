@@ -180,7 +180,9 @@ test("bare and wrapped terminal OAuth codes suspend later CLI launches", async (
   const { availableToAttempt } = await import("../src/providerState");
   fs.rmSync(marker, { force: true });
   for (const message of ["invalid_grant", "Error refreshing token: invalid_grant",
-    "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated"]) {
+    "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated",
+    "Your refresh token has expired", "Your refresh token was already used",
+    "The refresh token has been revoked", "Invalid refresh token"]) {
     credentials("terminal-" + message);
     fs.writeFileSync(executions, "");
     const event = JSON.stringify({ type: "turn.failed", error: { message } });
@@ -192,5 +194,29 @@ test("bare and wrapped terminal OAuth codes suspend later CLI launches", async (
     assert.equal(second.attempt.failureKind, "auth");
     assert.equal(second.attempt.providerSkipped, true);
     assert.equal(fs.readFileSync(executions, "utf8"), "started\n", message);
+  }
+});
+
+test("transient refresh failures recover after cooldown without changing credentials", async () => {
+  const { availableToAttempt } = await import("../src/providerState");
+  for (const message of ["failed to refresh authentication: network error",
+    "Your access token could not be refreshed: HTTP 503",
+    "access token expired; failed to refresh token: connection reset",
+    "refresh token request received invalid response: HTTP 503"]) {
+    credentials("transient-" + message);
+    const unchangedAuth = fs.readFileSync(auth, "utf8");
+    const event = JSON.stringify({ type: "turn.failed", error: { message } });
+    fake("process.stdout.write(" + JSON.stringify(event + "\n") + ");process.exitCode=1;");
+    await runWorker();
+    const state = JSON.parse(fs.readFileSync(marker, "utf8"));
+    assert.equal(state.requiresLogin, undefined, message);
+    assert.ok(Date.parse(state.retryAt) > Date.now(), message);
+    assert.equal(availableToAttempt("codex", Date.now() + 2 * 3_600_000), true, message);
+    // Advance this isolated fixture's deadline; exercise the actual process gate.
+    state.retryAt = new Date(Date.now() - 1000).toISOString();
+    fs.writeFileSync(marker, JSON.stringify(state));
+    fake(success);
+    assert.equal((await runWorker()).attempt.status, "completed", message);
+    assert.equal(fs.readFileSync(auth, "utf8"), unchangedAuth);
   }
 });

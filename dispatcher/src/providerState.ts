@@ -117,7 +117,12 @@ export function stateForAttempt(attempt: ProviderAttempt): ProviderState | null 
 }
 /** Use the same terminal-session vocabulary for classification and suspension. */
 export function requiresCodexLogin(message: string): boolean {
-  return /refresh_token_(?:reused|expired|invalidated)|invalid_grant|(?:access|refresh) token.{0,160}(?:could not be refreshed|expired|revoked|invalid|already used)|(?:could not|failed to) refresh.{0,80}(?:token|authentication)|not logged in|authentication blocked; sign in/i.test(message);
+  // Access tokens normally expire and generic refresh failures can be network
+  // errors. Only confirmed refresh-credential invalidation requires a login.
+  return /\b(?:refresh_token_(?:reused|expired|invalidated)|invalid_grant)\b/i.test(message)
+    || /\brefresh token(?:\s+(?:has|had|is|was|been|already)){0,5}\s+(?:expired|revoked|invalid(?:ated)?|used|no longer valid)\b/i.test(message)
+    || /\b(?:expired|revoked|invalid(?:ated)?|reused) refresh token\b/i.test(message)
+    || /\bnot logged in\b|authentication blocked; sign in/i.test(message);
 }
 export function updateProvider(attempt: ProviderAttempt): void {
   const all = state();
