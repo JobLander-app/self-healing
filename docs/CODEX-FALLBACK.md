@@ -190,7 +190,8 @@ healthy. A token file's presence is not recovery evidence.
 
 Quota messages with dated UTC resets (including extra-usage exhaustion) retain
 their actual reset deadline plus a two-minute buffer. Unparseable quotas and
-auth/service errors use `PROVIDER_RETRY_MS` (default one hour). A legacy Claude
+auth/service errors use `PROVIDER_RETRY_MS` (default one hour), except terminal
+Codex session failures requiring a new login as described above. A legacy Claude
 `pause.json` is imported without blocking the newly enabled Codex provider. Bare
 429/rate-limit throttling uses `PROVIDER_THROTTLE_RETRY_MS` (default one minute),
 while explicit reset metadata still wins. The resume watcher uses provider
