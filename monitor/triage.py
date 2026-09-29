@@ -163,12 +163,13 @@ _URL_RE = re.compile(r"([a-z][a-z0-9+.-]*://)(?:[^\s/@'\"]*@)?([^\s/?#'\"]+)([^\
                      r"(?:\?[^\s#'\"]*)?(?:#[^\s'\"]*)?", re.I)
 _SECRET_RES = [
     # The whole header value, whatever its scheme (Token, ApiKey, Digest, ...).
-    (re.compile(r"(?i)\b((?:proxy-)?authorization)(\s*[=:]\s*[\"']?)(?:[a-z][\w-]*\s+)?[^\s\"',;&]+"),
+    # The optional quote before the separator covers json.dumps'd objects.
+    (re.compile(r"(?i)\b((?:proxy-)?authorization)([\"']?\s*[=:]\s*[\"']?)(?:[a-z][\w-]*\s+)?[^\s\"',;&]+"),
      r"\1\2<redacted>"),
     (re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+"), "<redacted>"),
-    (re.compile(r"(?i)\b(bearer|basic)\s+[\w.~+/=-]+"), r"\1 <redacted>"),
+    (re.compile(r"(?i)\b(bearer|basic|token|apikey)\s+[\w.~+/=-]+"), r"\1 <redacted>"),
     (re.compile(r"(?i)\b([\w-]*(?:key|token|secret|password|passwd|authorization|signature|sig|credential)s?)"
-                r"(\s*[=:]\s*[\"']?)[^\s\"',;&]+"), r"\1\2<redacted>"),
+                r"([\"']?\s*[=:]\s*[\"']?)[^\s\"',;&]+"), r"\1\2<redacted>"),
 ]
 
 

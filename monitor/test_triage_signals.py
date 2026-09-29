@@ -275,11 +275,18 @@ class SignalTests(unittest.TestCase):
                              ("postgres://admin:hunter2@db.internal:5432/app", ("hunter2",)),
                              ("Authorization: Token ghp_123456 then", ("ghp_123456",)),
                              ("Authorization=ApiKey supersecret; next", ("supersecret",)),
-                             ('proxy-authorization: "Digest abc=1"', ("abc=1",))):
+                             ('proxy-authorization: "Digest abc=1"', ("abc=1",)),
+                             ('{"Authorization": "Token ghp_json1"}', ("ghp_json1",)),
+                             ('{"apiKey": "k-json2", "password": "p-json3"}', ("k-json2", "p-json3"))):
             with self.subTest(raw=raw):
                 redacted = triage.redact_detail(raw)
                 for secret in secrets:
                     self.assertNotIn(secret, redacted)
+        # The object path: an `error` dict without `message` is json.dumps'd first.
+        exported = triage.payload_error({"jsonPayload": {"message": "x", "error": {
+            "code": 401, "headers": {"Authorization": "Token ghp_obj4"}}}})
+        self.assertNotIn("ghp_obj4", exported)
+        self.assertIn('"code": 401', exported)
 
     def test_error_detail_masks_email_and_tolerates_odd_shapes(self):
         for payload, expected in (({"message": "x", "error": "User a.b@example.com missing"}, "User <email> missing"),
