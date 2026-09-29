@@ -239,6 +239,25 @@ class SignalTests(unittest.TestCase):
         groups = self.collect_requests([self.billing_log("Failed to deduct balance atomically")] * 101)
         self.assertEqual(self.escalations(groups)[1][0]["severity"], "P1")
 
+    def test_logged_error_detail_reaches_sample_but_not_signature(self):
+        entry = request_log(jsonPayload={"message": {"message": "Failed to deduct balance atomically", "metadata": {
+            "error": "request to https://firestore.googleapis.com/v1/x:commit failed, reason: socket hang up",
+            "sessionId": "4c26f0c9-1d53-4d1b-ad5e-d022c84d8150"}}})
+        bare = request_log(jsonPayload={"message": {"message": "Failed to deduct balance atomically"}})
+        groups = self.collect_requests([entry, bare])
+        self.assertEqual(list(groups), ["joblander-app:us-central1:failed-to-deduct-balance-atomically"])
+        group = groups["joblander-app:us-central1:failed-to-deduct-balance-atomically"]
+        self.assertEqual(group["count"], 2)
+        self.assertTrue(group["sample_message"].startswith("Failed to deduct balance atomically | error: "))
+        self.assertIn("socket hang up", group["sample_message"])
+
+    def test_error_detail_masks_email_and_tolerates_odd_shapes(self):
+        for payload, expected in (({"message": "x", "error": "User a.b@example.com missing"}, "User <email> missing"),
+                                  ({"message": "x", "metadata": {"error": {"message": "boom"}}}, "boom"),
+                                  ({"message": "x", "error": ""}, None), ("text", None), ({"message": "x"}, None)):
+            with self.subTest(payload=payload):
+                self.assertEqual(triage.payload_error({"jsonPayload": payload}), expected)
+
     def test_real_http_spike_still_pages_p0(self):
         groups = self.collect_requests([request_log() for _ in range(1001)])
         original = copy.deepcopy(groups)

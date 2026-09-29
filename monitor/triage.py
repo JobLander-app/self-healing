@@ -154,6 +154,29 @@ def payload_message(entry):
     return None
 
 
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+
+
+def payload_error(entry):
+    """The structured `error` a logger attached next to the message, if any.
+
+    Evidence only, never part of the signature. Without it a ticket shows just
+    "Failed to deduct balance atomically" and the filer guessed a transaction
+    conflict, while the logged error was `socket hang up` (JOB-1131).
+    """
+    jp = entry.get("jsonPayload")
+    if not isinstance(jp, dict):
+        return None
+    msg = jp.get("message")
+    for holder in ((msg.get("metadata") if isinstance(msg, dict) else None), jp.get("metadata"), jp):
+        detail = holder.get("error") if isinstance(holder, dict) else None
+        if isinstance(detail, dict):
+            detail = detail.get("message") or json.dumps(detail)
+        if detail and str(detail).strip():
+            return EMAIL_RE.sub("<email>", str(detail).strip())[:200]
+    return None
+
+
 def entry_message(entry):
     msg = payload_message(entry)
     if msg is not None:
@@ -255,8 +278,10 @@ def collect_cloud_run(groups):
         else:
             slug = slugify(msg)
         signature = f"{service}:{region}:{slug}"
+        detail = payload_error(e)
+        sample = f"{msg} | error: {detail}" if detail and detail not in msg else msg
         add_to_groups(groups, signature,
-                      service, region, e.get("timestamp", ""), msg)
+                      service, region, e.get("timestamp", ""), sample)
         if request:
             groups[signature].setdefault("request_context", request)
     log(f"cloud run: {len(entries)} error entries")
