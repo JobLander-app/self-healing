@@ -355,8 +355,11 @@ Reach **exactly one** of two terminal outcomes:
 3. `git add <specific files>` (never `git add .`), commit:
    `git commit -m "fix(<area>): <what>"`.
 4. `git push origin fix/JOB-XXX-short-slug`.
-5. `gh pr create --title "[JA] fix: <description>" --body "..."` — body must
-   cite the Monitor signature, the root cause, and how you verified.
+5. `gh pr create --title "fix(<area>): <description> (JOB-XXX)" --body "..."` — body must
+   cite the Monitor signature, the root cause, and how you verified. The title
+   must be a bare conventional commit, with **no `[...]` prefix**: squash-merge
+   uses it as the commit subject, and semantic-release silently skipped a
+   release when a prefix preceded the type (JobLander incident JOB-569).
 6. Wait for **green CI**: `gh pr checks <N> --watch`. **Never merge red CI.**
 7. **Codex review gate — MANDATORY before merge (owner DoD).** A PR is NOT done
    until it has been reviewed by Codex and its substantive findings resolved.
