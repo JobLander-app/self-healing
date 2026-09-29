@@ -81,8 +81,12 @@ if [ -n "$DIRTY" ]; then
   # The marker is written only after confirmed delivery (the notifier exits
   # non-zero unless Telegram returns a message id), so a failed send retries
   # on the next tick instead of going silent again.
+  # The file list is capped well under Telegram's 4096-char limit; an
+  # oversized text is rejected and would never be delivered.
+  DIRTY_COUNT="$(grep -c . <<<"$DIRTY")"
+  DIRTY_LIST="$(tr '\n' ' ' <<<"$DIRTY" | cut -c1-1500)"
   if [ "$(cat "$BLOCKED_MARKER" 2>/dev/null || true)" != "$REMOTE" ] && [ -x "$NOTIFY" ] &&
-    as_agent "$NOTIFY" "CD BLOCKED: ${REMOTE:0:8} not deployed, tracked changes in $SH_DIR: $(tr '\n' ' ' <<<"$DIRTY")" >/dev/null 2>&1; then
+    as_agent "$NOTIFY" "CD BLOCKED: ${REMOTE:0:8} not deployed, $DIRTY_COUNT tracked change(s) in $SH_DIR: $DIRTY_LIST" >/dev/null 2>&1; then
     install -d -m 700 "$(dirname "$BLOCKED_MARKER")"
     printf '%s\n' "$REMOTE" >"$BLOCKED_MARKER"
   fi

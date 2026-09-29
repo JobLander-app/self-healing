@@ -325,6 +325,27 @@ def migrate_state(config):
         self.assertEqual(len(notified.read_text().splitlines()), 2)
         self.assertFalse((self.root / 'systemctl.log').exists())
 
+    def test_blocked_notification_fits_telegram_limit(self):
+        notified = self.root / 'notified.log'
+        self.mock('notify', f'#!/bin/sh\nprintf "%s" "$1" > {notified}\n')
+        files = [self.repo / ('deeply/nested/' + 'x' * 60) / f'file{i}' for i in range(120)]
+        for file in files:
+            self.write(file, 'v1\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'many files')
+        running = self.git('rev-parse', 'HEAD').strip()
+        self.write(self.repo / 'version', 'newest\n')
+        self.git('commit', '-qam', 'release')
+        self.git('push', '-q', '-f', 'origin', 'main')
+        self.git('reset', '-q', '--keep', running)
+        for file in files:
+            self.write(file, 'hot-patched\n')
+        result = self.deploy(DEPLOY_NOTIFY_SCRIPT=str(self.bin / 'notify'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = notified.read_text()
+        self.assertLess(len(text), 4096)
+        self.assertIn('120 tracked change(s)', text)
+
     def test_failed_blocked_notification_is_retried_next_tick(self):
         attempts = self.root / 'attempts.log'
         self.mock('notify', f'#!/bin/sh\nprintf "x\\n" >> {attempts}\n[ "${{NOTIFY_FAIL:-}}" != 1 ]\n')
