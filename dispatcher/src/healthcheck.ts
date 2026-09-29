@@ -298,14 +298,33 @@ async function probeSentry(): Promise<string> {
   // 6 s headroom.  (JOB-878: inner 15 s HTTP timeout fired while the outer
   // 20 s budget still had headroom — both values raised together to eliminate
   // the mismatch.)
+  //
+  // 429 retry (JOB-1119): the hourly monitor's collect_sentry() and the
+  // 6-hourly healthcheck probe overlap at :00 UTC — both use the same Sentry
+  // token and the monitor's 7d/100 query can exhaust the rate-limit budget.
+  // A 429 clears within seconds; retry once after SENTRY_429_RETRY_MS before
+  // reporting "sentry down". Token is already cached, so the retry only pays
+  // for spawn + handshake + HTTP fetch (budget unchanged at 28 s).
+  const SENTRY_429_RETRY_MS = 5_000;
   await resolveSentryToken();
-  const { detail } = await probeMcp({
+  const probeOnce = () => probeMcp({
     entry: SENTRY_MCP_ENTRY,
     smokeTool: "sentry_list_issues",
     smokeArgs: { statsPeriod: "24h", limit: 1 },
     budgetMs: 28_000,
   });
-  return detail;
+  try {
+    const { detail } = await probeOnce();
+    return detail;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("429") && msg.includes("Too Many Requests")) {
+      await new Promise<void>((resolve) => setTimeout(resolve, SENTRY_429_RETRY_MS));
+      const { detail } = await probeOnce(); // throws → reported as down if still failing
+      return detail;
+    }
+    throw err;
+  }
 }
 
 async function probeGcloud(): Promise<string> {
