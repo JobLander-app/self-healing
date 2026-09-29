@@ -301,6 +301,30 @@ def migrate_state(config):
         self.assertEqual((self.repo / 'watcher/source').read_text(), 'uncommitted owner work\n')
         self.assertFalse((self.root / 'systemctl.log').exists())
 
+    def test_dirty_checkout_notifies_once_per_blocked_release(self):
+        notified = self.root / 'notified.log'
+        self.mock('notify', f'#!/bin/sh\nprintf "%s\\n" "$1" >> {notified}\n')
+        env = {'DEPLOY_NOTIFY_SCRIPT': str(self.bin / 'notify')}
+        self.write(self.repo / 'watcher/source', 'hot-patched on the host\n')
+        for _ in range(3):
+            self.assertEqual(self.deploy(**env).returncode, 0)
+        lines = notified.read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn(f'CD BLOCKED: {self.new[:8]}', lines[0])
+        self.assertIn('watcher/source', lines[0])
+        self.assertEqual((self.repo / 'watcher/source').read_text(), 'hot-patched on the host\n')
+        # A newer blocked release is a new fact and is reported again.
+        self.git('stash', '-q')
+        self.git('checkout', '-q', self.new)
+        self.write(self.repo / 'version', 'newer\n')
+        self.git('commit', '-qam', 'newer')
+        self.git('push', '-q', 'origin', 'HEAD:main')
+        self.git('checkout', '-q', 'main')
+        self.git('stash', 'pop', '-q')
+        self.assertEqual(self.deploy(**env).returncode, 0)
+        self.assertEqual(len(notified.read_text().splitlines()), 2)
+        self.assertFalse((self.root / 'systemctl.log').exists())
+
     def assert_stopped_dispatcher_can_receive_fix(self, active, sub, tasks):
         result = self.deploy(MOCK_ACTIVE_STATE=active, MOCK_SUB_STATE=sub,
                              MOCK_MAIN_PID='0', MOCK_TASKS=tasks, MOCK_STATUS_UNREACHABLE='1')

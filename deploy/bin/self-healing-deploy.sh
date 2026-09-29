@@ -72,8 +72,17 @@ REMOTE="$(git_agent rev-parse origin/main)"
 [ "$LOCAL" != "$REMOTE" ] || exit 0
 # Even a harmless local edit belongs to its author. --keep below is a second
 # protection against a conflict appearing between this check and activation.
-if [ -n "$(git_agent status --porcelain --untracked-files=no)" ]; then
+DIRTY="$(git_agent status --porcelain --untracked-files=no)"
+if [ -n "$DIRTY" ]; then
   log "deferring: tracked checkout changes need reconciliation"
+  # Only a human can reconcile, so say so once per blocked release. Silent,
+  # this held every release for 17 h on 2026-09-29 (a hot-patched file).
+  BLOCKED_MARKER="$(dirname "$TRANSACTION_FILE")/blocked-notified"
+  if [ "$(cat "$BLOCKED_MARKER" 2>/dev/null || true)" != "$REMOTE" ]; then
+    notify "CD BLOCKED: ${REMOTE:0:8} not deployed, tracked changes in $SH_DIR: $(tr '\n' ' ' <<<"$DIRTY")"
+    install -d -m 700 "$(dirname "$BLOCKED_MARKER")"
+    printf '%s\n' "$REMOTE" >"$BLOCKED_MARKER"
+  fi
   exit 0
 fi
 
