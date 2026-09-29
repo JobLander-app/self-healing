@@ -154,6 +154,52 @@ def payload_message(entry):
     return None
 
 
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+DETAIL_MAX = 200
+SAMPLE_MAX = 300
+# The structured error leaves Cloud Logging (triage-summary.json, the filing
+# prompt, Linear), so anything credential-shaped is removed before it does.
+_URL_RE = re.compile(r"([a-z][a-z0-9+.-]*://)(?:[^\s/@'\"]*@)?([^\s/?#'\"]+)([^\s?#'\"]*)"
+                     r"(?:\?[^\s#'\"]*)?(?:#[^\s'\"]*)?", re.I)
+_SECRET_RES = [
+    # The whole header value, whatever its scheme (Token, ApiKey, Digest, ...).
+    # The optional quote before the separator covers json.dumps'd objects.
+    (re.compile(r"(?i)\b((?:proxy-)?authorization)([\"']?\s*[=:]\s*[\"']?)(?:[a-z][\w-]*\s+)?[^\s\"',;&]+"),
+     r"\1\2<redacted>"),
+    (re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+"), "<redacted>"),
+    (re.compile(r"(?i)\b(bearer|basic|token|apikey)\s+[\w.~+/=-]+"), r"\1 <redacted>"),
+    (re.compile(r"(?i)\b([\w-]*(?:key|token|secret|password|passwd|authorization|signature|sig|credential)s?)"
+                r"([\"']?\s*[=:]\s*[\"']?)[^\s\"',;&]+"), r"\1\2<redacted>"),
+]
+
+
+def redact_detail(text):
+    text = _URL_RE.sub(lambda m: m.group(1) + m.group(2) + m.group(3), text)
+    for rx, repl in _SECRET_RES:
+        text = rx.sub(repl, text)
+    return EMAIL_RE.sub("<email>", text)
+
+
+def payload_error(entry):
+    """The structured `error` a logger attached next to the message, if any.
+
+    Evidence only, never part of the signature. Without it a ticket shows just
+    "Failed to deduct balance atomically" and the filer guessed a transaction
+    conflict, while the logged error was `socket hang up` (JOB-1131).
+    """
+    jp = entry.get("jsonPayload")
+    if not isinstance(jp, dict):
+        return None
+    msg = jp.get("message")
+    for holder in ((msg.get("metadata") if isinstance(msg, dict) else None), jp.get("metadata"), jp):
+        detail = holder.get("error") if isinstance(holder, dict) else None
+        if isinstance(detail, dict):
+            detail = detail.get("message") or json.dumps(detail)
+        if detail and str(detail).strip():
+            return redact_detail(str(detail).strip())[:DETAIL_MAX]
+    return None
+
+
 def entry_message(entry):
     msg = payload_message(entry)
     if msg is not None:
@@ -255,8 +301,17 @@ def collect_cloud_run(groups):
         else:
             slug = slugify(msg)
         signature = f"{service}:{region}:{slug}"
+        detail = payload_error(e)
+        sample = msg
+        if detail and detail not in msg:
+            # Reserve room so a long message cannot truncate the evidence away.
+            suffix = f" | error: {detail}"
+            sample = msg.strip()[:SAMPLE_MAX - len(suffix)] + suffix
         add_to_groups(groups, signature,
-                      service, region, e.get("timestamp", ""), msg)
+                      service, region, e.get("timestamp", ""), sample)
+        if sample is not msg and " | error: " not in groups[signature]["sample_message"]:
+            # The first entry of the group may have been a bare one.
+            groups[signature]["sample_message"] = sample
         if request:
             groups[signature].setdefault("request_context", request)
     log(f"cloud run: {len(entries)} error entries")

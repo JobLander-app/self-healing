@@ -239,6 +239,62 @@ class SignalTests(unittest.TestCase):
         groups = self.collect_requests([self.billing_log("Failed to deduct balance atomically")] * 101)
         self.assertEqual(self.escalations(groups)[1][0]["severity"], "P1")
 
+    def test_logged_error_detail_reaches_sample_but_not_signature(self):
+        entry = request_log(jsonPayload={"message": {"message": "Failed to deduct balance atomically", "metadata": {
+            "error": "request to https://firestore.googleapis.com/v1/x:commit failed, reason: socket hang up",
+            "sessionId": "4c26f0c9-1d53-4d1b-ad5e-d022c84d8150"}}})
+        bare = request_log(jsonPayload={"message": {"message": "Failed to deduct balance atomically"}})
+        groups = self.collect_requests([entry, bare])
+        self.assertEqual(list(groups), ["joblander-app:us-central1:failed-to-deduct-balance-atomically"])
+        group = groups["joblander-app:us-central1:failed-to-deduct-balance-atomically"]
+        self.assertEqual(group["count"], 2)
+        self.assertTrue(group["sample_message"].startswith("Failed to deduct balance atomically | error: "))
+        self.assertIn("socket hang up", group["sample_message"])
+
+    def test_bare_first_entry_is_upgraded_and_long_message_keeps_the_detail(self):
+        bare = request_log(jsonPayload={"message": {"message": "Failed to deduct balance atomically"}})
+        rich = request_log(jsonPayload={"message": {"message": "Failed to deduct balance atomically",
+                                                    "metadata": {"error": "socket hang up"}}})
+        group = next(iter(self.collect_requests([bare, rich]).values()))
+        self.assertEqual(group["sample_message"], "Failed to deduct balance atomically | error: socket hang up")
+        long = request_log(jsonPayload={"message": "E" * 400, "error": "socket hang up"})
+        sample = next(iter(self.collect_requests([long]).values()))["sample_message"]
+        self.assertLessEqual(len(sample), triage.SAMPLE_MAX)
+        self.assertTrue(sample.endswith(" | error: socket hang up"))
+
+    def test_error_detail_redacts_credentials(self):
+        detail = triage.payload_error({"jsonPayload": {"message": "x", "error": (
+            "request to https://user:pw@api.example.com/v1/items?key=AIzaSECRET&x=1#frag failed; "
+            "Authorization: Bearer abc.def-ghi api_key=sk_live_123 token: \"t0k\" "
+            "jwt eyJhbGciOi.eyJzdWIiOi.c2lnbmF0dXJl")}})
+        for secret in ("user:pw", "AIzaSECRET", "abc.def-ghi", "sk_live_123", "t0k", "eyJhbGciOi"):
+            self.assertNotIn(secret, detail)
+        self.assertIn("https://api.example.com/v1/items", detail)
+        self.assertIn("failed; Authorization: <redacted>", detail)
+        for raw, secrets in (("HTTPS://user:pw@localhost/path?foo=session123#fragment", ("user:pw", "session123", "fragment")),
+                             ("postgres://admin:hunter2@db.internal:5432/app", ("hunter2",)),
+                             ("Authorization: Token ghp_123456 then", ("ghp_123456",)),
+                             ("Authorization=ApiKey supersecret; next", ("supersecret",)),
+                             ('proxy-authorization: "Digest abc=1"', ("abc=1",)),
+                             ('{"Authorization": "Token ghp_json1"}', ("ghp_json1",)),
+                             ('{"apiKey": "k-json2", "password": "p-json3"}', ("k-json2", "p-json3"))):
+            with self.subTest(raw=raw):
+                redacted = triage.redact_detail(raw)
+                for secret in secrets:
+                    self.assertNotIn(secret, redacted)
+        # The object path: an `error` dict without `message` is json.dumps'd first.
+        exported = triage.payload_error({"jsonPayload": {"message": "x", "error": {
+            "code": 401, "headers": {"Authorization": "Token ghp_obj4"}}}})
+        self.assertNotIn("ghp_obj4", exported)
+        self.assertIn('"code": 401', exported)
+
+    def test_error_detail_masks_email_and_tolerates_odd_shapes(self):
+        for payload, expected in (({"message": "x", "error": "User a.b@example.com missing"}, "User <email> missing"),
+                                  ({"message": "x", "metadata": {"error": {"message": "boom"}}}, "boom"),
+                                  ({"message": "x", "error": ""}, None), ("text", None), ({"message": "x"}, None)):
+            with self.subTest(payload=payload):
+                self.assertEqual(triage.payload_error({"jsonPayload": payload}), expected)
+
     def test_real_http_spike_still_pages_p0(self):
         groups = self.collect_requests([request_log() for _ in range(1001)])
         original = copy.deepcopy(groups)
