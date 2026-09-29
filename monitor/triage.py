@@ -71,6 +71,15 @@ LINEAR_API_URL = "https://api.linear.app/graphql"
 _LINEAR_PRIORITY_TO_SEV = {1: "P0", 2: "P1", 3: "P2", 4: "P3", 0: "P3"}
 _SEV_RANK = {"P0": 3, "P1": 2, "P2": 1, "P3": 0}
 
+# Audio-engine errors on the paid-minute ledger (backend
+# src/machines/session/session.machine.ts). Slugs as produced by slugify().
+BILLING_SERVICE = "joblander-audio-engine"
+BILLING_FAILURE_SLUGS = frozenset({
+    "failed-to-deduct-balance-atomically",
+    "failed-to-record-balance-transaction",
+    "failed-to-persist-final-meeting-balance",
+})
+
 collection_errors = []
 
 
@@ -576,6 +585,16 @@ def assign_severity(groups, stage_counts, audio_timeouts,
         raise_to("joblander-app:geo:in-users-misrouted", "P1")
     if anam_count > 3:
         raise_to("voice-agent:all:anam-avatar-start-failed", "P2")
+    # Billing-ledger failures: every occurrence is a paid minute lost or a ledger
+    # row left wrong, so the count thresholds do not apply. They happen once per
+    # affected session — a few a day — which kept them at P3/report_only forever:
+    # "Failed to deduct balance atomically" was collected 17 times (26–29.09,
+    # asia-south1/us-central1) and never filed, while the backend paged the
+    # owner in Telegram for each one (JOB-1114).
+    for sig, g in groups.items():
+        if (g.get("service") == BILLING_SERVICE
+                and sig.rsplit(":", 1)[-1] in BILLING_FAILURE_SLUGS):
+            raise_to(sig, "P2")
 
 
 def load_json(path, default):

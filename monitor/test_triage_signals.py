@@ -191,6 +191,39 @@ class SignalTests(unittest.TestCase):
                 self.assertEqual(triage.entry_message({"jsonPayload": payload}), json.dumps(payload))
                 self.assertTrue(all(g.get("request_context") for g in groups.values()))
 
+    def billing_log(self, message, region="asia-south1", service="joblander-audio-engine"):
+        # Shape of the real 2026-09-29T16:34:42Z entry: winston nests the message.
+        return {
+            "resource": {"labels": {"service_name": service, "location": region}},
+            "severity": "ERROR", "timestamp": "2026-09-29T16:34:42Z",
+            "jsonPayload": {"message": {"message": message, "metadata": {
+                "error": "request to https://firestore.googleapis.com/v1/projects/p/databases/(default)"
+                         "/documents:commit failed, reason: socket hang up",
+                "minutesToDeduct": 1, "sessionId": "4c26f0c9-1d53-4d1b-ad5e-d022c84d8150"}}},
+        }
+
+    def test_job1114_single_billing_failure_is_filed(self):
+        for message in ("Failed to deduct balance atomically", "Failed to record balance transaction",
+                        "Failed to persist final meeting balance"):
+            with self.subTest(message=message):
+                groups = self.collect_requests([self.billing_log(message)])
+                pages, items = self.escalations(groups)
+                self.assertEqual(pages, [])
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["severity"], "P2")
+                self.assertEqual(items[0]["action"], "linear_create_if_no_dup")
+
+    def test_billing_floor_is_scoped_to_the_audio_engine_ledger(self):
+        groups = self.collect_requests([
+            self.billing_log("Failed to deduct balance atomically", service="joblander-app"),
+            self.billing_log("Failed to deduct balance atomically later"),
+        ])
+        self.assertTrue(all(item["action"] == "report_only" for item in self.escalations(groups)[1]))
+
+    def test_billing_floor_never_lowers_a_spike(self):
+        groups = self.collect_requests([self.billing_log("Failed to deduct balance atomically")] * 101)
+        self.assertEqual(self.escalations(groups)[1][0]["severity"], "P1")
+
     def test_real_http_spike_still_pages_p0(self):
         groups = self.collect_requests([request_log() for _ in range(1001)])
         original = copy.deepcopy(groups)
