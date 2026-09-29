@@ -159,8 +159,12 @@ DETAIL_MAX = 200
 SAMPLE_MAX = 300
 # The structured error leaves Cloud Logging (triage-summary.json, the filing
 # prompt, Linear), so anything credential-shaped is removed before it does.
-_URL_RE = re.compile(r"(https?://)(?:[^\s/@'\"]*@)?([^\s/?#'\"]+)([^\s?#'\"]*)(?:\?[^\s#'\"]*)?(?:#[^\s'\"]*)?")
+_URL_RE = re.compile(r"([a-z][a-z0-9+.-]*://)(?:[^\s/@'\"]*@)?([^\s/?#'\"]+)([^\s?#'\"]*)"
+                     r"(?:\?[^\s#'\"]*)?(?:#[^\s'\"]*)?", re.I)
 _SECRET_RES = [
+    # The whole header value, whatever its scheme (Token, ApiKey, Digest, ...).
+    (re.compile(r"(?i)\b((?:proxy-)?authorization)(\s*[=:]\s*[\"']?)(?:[a-z][\w-]*\s+)?[^\s\"',;&]+"),
+     r"\1\2<redacted>"),
     (re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+"), "<redacted>"),
     (re.compile(r"(?i)\b(bearer|basic)\s+[\w.~+/=-]+"), r"\1 <redacted>"),
     (re.compile(r"(?i)\b([\w-]*(?:key|token|secret|password|passwd|authorization|signature|sig|credential)s?)"

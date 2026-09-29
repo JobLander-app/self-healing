@@ -271,6 +271,15 @@ class SignalTests(unittest.TestCase):
             self.assertNotIn(secret, detail)
         self.assertIn("https://api.example.com/v1/items", detail)
         self.assertIn("failed; Authorization: <redacted>", detail)
+        for raw, secrets in (("HTTPS://user:pw@localhost/path?foo=session123#fragment", ("user:pw", "session123", "fragment")),
+                             ("postgres://admin:hunter2@db.internal:5432/app", ("hunter2",)),
+                             ("Authorization: Token ghp_123456 then", ("ghp_123456",)),
+                             ("Authorization=ApiKey supersecret; next", ("supersecret",)),
+                             ('proxy-authorization: "Digest abc=1"', ("abc=1",))):
+            with self.subTest(raw=raw):
+                redacted = triage.redact_detail(raw)
+                for secret in secrets:
+                    self.assertNotIn(secret, redacted)
 
     def test_error_detail_masks_email_and_tolerates_odd_shapes(self):
         for payload, expected in (({"message": "x", "error": "User a.b@example.com missing"}, "User <email> missing"),
