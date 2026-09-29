@@ -376,6 +376,17 @@ Reach **exactly one** of two terminal outcomes:
      reject it. "Didn't find any major issues" → proceed.
    - Only when **CI is green AND Codex has reviewed AND no unresolved P1/P2
      finding remains** may you proceed to merge.
+   - **At most 3 `@codex review` rounds per PR (owner rule).** Count the
+     `@codex review` comments already on the PR, including ones from earlier
+     runs of yours on a reclaimed ticket, before posting another. If findings
+     keep coming on the same area, the scope is wrong, not the patch: shrink the
+     change to the minimal fix the observed signal needs (drop the speculative
+     parts) instead of stacking guards. If a P1/P2 is still open after round 3,
+     do not merge and do not request a fourth round: set **`backlogged`** with
+     the open findings and the minimal-scope proposal. *(backend#399 /
+     JOB-1131, 2026-09-29: five rounds over tick retries that no production
+     failure needed, because all six failures were on the final minute. Each
+     round cost a 40-minute run.)*
 8. **Self-verify the fix actually closes the signature.** This is mandatory:
    - For cross-system contracts (IDs, enums, query params, metadata keys):
      re-read **both** sides and confirm they match byte-for-byte.
