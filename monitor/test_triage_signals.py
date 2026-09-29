@@ -251,6 +251,27 @@ class SignalTests(unittest.TestCase):
         self.assertTrue(group["sample_message"].startswith("Failed to deduct balance atomically | error: "))
         self.assertIn("socket hang up", group["sample_message"])
 
+    def test_bare_first_entry_is_upgraded_and_long_message_keeps_the_detail(self):
+        bare = request_log(jsonPayload={"message": {"message": "Failed to deduct balance atomically"}})
+        rich = request_log(jsonPayload={"message": {"message": "Failed to deduct balance atomically",
+                                                    "metadata": {"error": "socket hang up"}}})
+        group = next(iter(self.collect_requests([bare, rich]).values()))
+        self.assertEqual(group["sample_message"], "Failed to deduct balance atomically | error: socket hang up")
+        long = request_log(jsonPayload={"message": "E" * 400, "error": "socket hang up"})
+        sample = next(iter(self.collect_requests([long]).values()))["sample_message"]
+        self.assertLessEqual(len(sample), triage.SAMPLE_MAX)
+        self.assertTrue(sample.endswith(" | error: socket hang up"))
+
+    def test_error_detail_redacts_credentials(self):
+        detail = triage.payload_error({"jsonPayload": {"message": "x", "error": (
+            "request to https://user:pw@api.example.com/v1/items?key=AIzaSECRET&x=1#frag failed; "
+            "Authorization: Bearer abc.def-ghi api_key=sk_live_123 token: \"t0k\" "
+            "jwt eyJhbGciOi.eyJzdWIiOi.c2lnbmF0dXJl")}})
+        for secret in ("user:pw", "AIzaSECRET", "abc.def-ghi", "sk_live_123", "t0k", "eyJhbGciOi"):
+            self.assertNotIn(secret, detail)
+        self.assertIn("https://api.example.com/v1/items", detail)
+        self.assertIn("failed; Authorization: <redacted>", detail)
+
     def test_error_detail_masks_email_and_tolerates_odd_shapes(self):
         for payload, expected in (({"message": "x", "error": "User a.b@example.com missing"}, "User <email> missing"),
                                   ({"message": "x", "metadata": {"error": {"message": "boom"}}}, "boom"),

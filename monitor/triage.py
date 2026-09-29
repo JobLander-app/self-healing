@@ -155,6 +155,24 @@ def payload_message(entry):
 
 
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+DETAIL_MAX = 200
+SAMPLE_MAX = 300
+# The structured error leaves Cloud Logging (triage-summary.json, the filing
+# prompt, Linear), so anything credential-shaped is removed before it does.
+_URL_RE = re.compile(r"(https?://)(?:[^\s/@'\"]*@)?([^\s/?#'\"]+)([^\s?#'\"]*)(?:\?[^\s#'\"]*)?(?:#[^\s'\"]*)?")
+_SECRET_RES = [
+    (re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+"), "<redacted>"),
+    (re.compile(r"(?i)\b(bearer|basic)\s+[\w.~+/=-]+"), r"\1 <redacted>"),
+    (re.compile(r"(?i)\b([\w-]*(?:key|token|secret|password|passwd|authorization|signature|sig|credential)s?)"
+                r"(\s*[=:]\s*[\"']?)[^\s\"',;&]+"), r"\1\2<redacted>"),
+]
+
+
+def redact_detail(text):
+    text = _URL_RE.sub(lambda m: m.group(1) + m.group(2) + m.group(3), text)
+    for rx, repl in _SECRET_RES:
+        text = rx.sub(repl, text)
+    return EMAIL_RE.sub("<email>", text)
 
 
 def payload_error(entry):
@@ -173,7 +191,7 @@ def payload_error(entry):
         if isinstance(detail, dict):
             detail = detail.get("message") or json.dumps(detail)
         if detail and str(detail).strip():
-            return EMAIL_RE.sub("<email>", str(detail).strip())[:200]
+            return redact_detail(str(detail).strip())[:DETAIL_MAX]
     return None
 
 
@@ -279,9 +297,16 @@ def collect_cloud_run(groups):
             slug = slugify(msg)
         signature = f"{service}:{region}:{slug}"
         detail = payload_error(e)
-        sample = f"{msg} | error: {detail}" if detail and detail not in msg else msg
+        sample = msg
+        if detail and detail not in msg:
+            # Reserve room so a long message cannot truncate the evidence away.
+            suffix = f" | error: {detail}"
+            sample = msg.strip()[:SAMPLE_MAX - len(suffix)] + suffix
         add_to_groups(groups, signature,
                       service, region, e.get("timestamp", ""), sample)
+        if sample is not msg and " | error: " not in groups[signature]["sample_message"]:
+            # The first entry of the group may have been a bare one.
+            groups[signature]["sample_message"] = sample
         if request:
             groups[signature].setdefault("request_context", request)
     log(f"cloud run: {len(entries)} error entries")
