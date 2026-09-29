@@ -78,8 +78,11 @@ if [ -n "$DIRTY" ]; then
   # Only a human can reconcile, so say so once per blocked release. Silent,
   # this held every release for 17 h on 2026-09-29 (a hot-patched file).
   BLOCKED_MARKER="$(dirname "$TRANSACTION_FILE")/blocked-notified"
-  if [ "$(cat "$BLOCKED_MARKER" 2>/dev/null || true)" != "$REMOTE" ]; then
-    notify "CD BLOCKED: ${REMOTE:0:8} not deployed, tracked changes in $SH_DIR: $(tr '\n' ' ' <<<"$DIRTY")"
+  # The marker is written only after confirmed delivery (the notifier exits
+  # non-zero unless Telegram returns a message id), so a failed send retries
+  # on the next tick instead of going silent again.
+  if [ "$(cat "$BLOCKED_MARKER" 2>/dev/null || true)" != "$REMOTE" ] && [ -x "$NOTIFY" ] &&
+    as_agent "$NOTIFY" "CD BLOCKED: ${REMOTE:0:8} not deployed, tracked changes in $SH_DIR: $(tr '\n' ' ' <<<"$DIRTY")" >/dev/null 2>&1; then
     install -d -m 700 "$(dirname "$BLOCKED_MARKER")"
     printf '%s\n' "$REMOTE" >"$BLOCKED_MARKER"
   fi

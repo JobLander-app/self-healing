@@ -325,6 +325,20 @@ def migrate_state(config):
         self.assertEqual(len(notified.read_text().splitlines()), 2)
         self.assertFalse((self.root / 'systemctl.log').exists())
 
+    def test_failed_blocked_notification_is_retried_next_tick(self):
+        attempts = self.root / 'attempts.log'
+        self.mock('notify', f'#!/bin/sh\nprintf "x\\n" >> {attempts}\n[ "${{NOTIFY_FAIL:-}}" != 1 ]\n')
+        self.write(self.repo / 'watcher/source', 'hot-patched on the host\n')
+        env = {'DEPLOY_NOTIFY_SCRIPT': str(self.bin / 'notify')}
+        for _ in range(2):
+            self.assertEqual(self.deploy(NOTIFY_FAIL='1', **env).returncode, 0)
+        self.assertFalse((self.root / 'registry/blocked-notified').exists())
+        self.assertEqual(self.deploy(**env).returncode, 0)
+        self.assertEqual(self.deploy(**env).returncode, 0)
+        self.assertEqual(len(attempts.read_text().splitlines()), 3)
+        missing = self.deploy(DEPLOY_NOTIFY_SCRIPT='/nonexistent/notify')
+        self.assertEqual(missing.returncode, 0, missing.stderr)
+
     def assert_stopped_dispatcher_can_receive_fix(self, active, sub, tasks):
         result = self.deploy(MOCK_ACTIVE_STATE=active, MOCK_SUB_STATE=sub,
                              MOCK_MAIN_PID='0', MOCK_TASKS=tasks, MOCK_STATUS_UNREACHABLE='1')
