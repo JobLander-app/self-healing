@@ -72,8 +72,24 @@ REMOTE="$(git_agent rev-parse origin/main)"
 [ "$LOCAL" != "$REMOTE" ] || exit 0
 # Even a harmless local edit belongs to its author. --keep below is a second
 # protection against a conflict appearing between this check and activation.
-if [ -n "$(git_agent status --porcelain --untracked-files=no)" ]; then
+DIRTY="$(git_agent status --porcelain --untracked-files=no)"
+if [ -n "$DIRTY" ]; then
   log "deferring: tracked checkout changes need reconciliation"
+  # Only a human can reconcile, so say so once per blocked release. Silent,
+  # this held every release for 17 h on 2026-09-29 (a hot-patched file).
+  BLOCKED_MARKER="$(dirname "$TRANSACTION_FILE")/blocked-notified"
+  # The marker is written only after confirmed delivery (the notifier exits
+  # non-zero unless Telegram returns a message id), so a failed send retries
+  # on the next tick instead of going silent again.
+  # The file list is capped well under Telegram's 4096-char limit; an
+  # oversized text is rejected and would never be delivered.
+  DIRTY_COUNT="$(grep -c . <<<"$DIRTY")"
+  DIRTY_LIST="$(tr '\n' ' ' <<<"$DIRTY" | cut -c1-1500)"
+  if [ "$(cat "$BLOCKED_MARKER" 2>/dev/null || true)" != "$REMOTE" ] && [ -x "$NOTIFY" ] &&
+    as_agent "$NOTIFY" "CD BLOCKED: ${REMOTE:0:8} not deployed, $DIRTY_COUNT tracked change(s) in $SH_DIR: $DIRTY_LIST" >/dev/null 2>&1; then
+    install -d -m 700 "$(dirname "$BLOCKED_MARKER")"
+    printf '%s\n' "$REMOTE" >"$BLOCKED_MARKER"
+  fi
   exit 0
 fi
 

@@ -301,6 +301,65 @@ def migrate_state(config):
         self.assertEqual((self.repo / 'watcher/source').read_text(), 'uncommitted owner work\n')
         self.assertFalse((self.root / 'systemctl.log').exists())
 
+    def test_dirty_checkout_notifies_once_per_blocked_release(self):
+        notified = self.root / 'notified.log'
+        self.mock('notify', f'#!/bin/sh\nprintf "%s\\n" "$1" >> {notified}\n')
+        env = {'DEPLOY_NOTIFY_SCRIPT': str(self.bin / 'notify')}
+        self.write(self.repo / 'watcher/source', 'hot-patched on the host\n')
+        for _ in range(3):
+            self.assertEqual(self.deploy(**env).returncode, 0)
+        lines = notified.read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn(f'CD BLOCKED: {self.new[:8]}', lines[0])
+        self.assertIn('watcher/source', lines[0])
+        self.assertEqual((self.repo / 'watcher/source').read_text(), 'hot-patched on the host\n')
+        # A newer blocked release is a new fact and is reported again.
+        self.git('stash', '-q')
+        self.git('checkout', '-q', self.new)
+        self.write(self.repo / 'version', 'newer\n')
+        self.git('commit', '-qam', 'newer')
+        self.git('push', '-q', 'origin', 'HEAD:main')
+        self.git('checkout', '-q', 'main')
+        self.git('stash', 'pop', '-q')
+        self.assertEqual(self.deploy(**env).returncode, 0)
+        self.assertEqual(len(notified.read_text().splitlines()), 2)
+        self.assertFalse((self.root / 'systemctl.log').exists())
+
+    def test_blocked_notification_fits_telegram_limit(self):
+        notified = self.root / 'notified.log'
+        self.mock('notify', f'#!/bin/sh\nprintf "%s" "$1" > {notified}\n')
+        files = [self.repo / ('deeply/nested/' + 'x' * 60) / f'file{i}' for i in range(120)]
+        for file in files:
+            self.write(file, 'v1\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'many files')
+        running = self.git('rev-parse', 'HEAD').strip()
+        self.write(self.repo / 'version', 'newest\n')
+        self.git('commit', '-qam', 'release')
+        self.git('push', '-q', '-f', 'origin', 'main')
+        self.git('reset', '-q', '--keep', running)
+        for file in files:
+            self.write(file, 'hot-patched\n')
+        result = self.deploy(DEPLOY_NOTIFY_SCRIPT=str(self.bin / 'notify'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = notified.read_text()
+        self.assertLess(len(text), 4096)
+        self.assertIn('120 tracked change(s)', text)
+
+    def test_failed_blocked_notification_is_retried_next_tick(self):
+        attempts = self.root / 'attempts.log'
+        self.mock('notify', f'#!/bin/sh\nprintf "x\\n" >> {attempts}\n[ "${{NOTIFY_FAIL:-}}" != 1 ]\n')
+        self.write(self.repo / 'watcher/source', 'hot-patched on the host\n')
+        env = {'DEPLOY_NOTIFY_SCRIPT': str(self.bin / 'notify')}
+        for _ in range(2):
+            self.assertEqual(self.deploy(NOTIFY_FAIL='1', **env).returncode, 0)
+        self.assertFalse((self.root / 'registry/blocked-notified').exists())
+        self.assertEqual(self.deploy(**env).returncode, 0)
+        self.assertEqual(self.deploy(**env).returncode, 0)
+        self.assertEqual(len(attempts.read_text().splitlines()), 3)
+        missing = self.deploy(DEPLOY_NOTIFY_SCRIPT='/nonexistent/notify')
+        self.assertEqual(missing.returncode, 0, missing.stderr)
+
     def assert_stopped_dispatcher_can_receive_fix(self, active, sub, tasks):
         result = self.deploy(MOCK_ACTIVE_STATE=active, MOCK_SUB_STATE=sub,
                              MOCK_MAIN_PID='0', MOCK_TASKS=tasks, MOCK_STATUS_UNREACHABLE='1')
