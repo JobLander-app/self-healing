@@ -595,6 +595,7 @@ def assign_severity(groups, stage_counts, audio_timeouts,
         if (g.get("service") == BILLING_SERVICE
                 and sig.rsplit(":", 1)[-1] in BILLING_FAILURE_SLUGS):
             raise_to(sig, "P2")
+            g["billing_floor"] = True
 
 
 def load_json(path, default):
@@ -920,6 +921,12 @@ def build_escalations(final_groups, cooldowns=None):
         elif sev == "P1" and status == "recurring":
             item["action"] = "linear_ensure_open_issue"
         elif sev == "P2" and status == "new":
+            item["action"] = "linear_create_if_no_dup"
+        elif sev == "P2" and g.get("billing_floor") and not g.get("linear_issue"):
+            # A billing failure already in the previous report (e.g. as the
+            # former P3, or a filing that did not land) is `recurring`, not
+            # `new`; without this it stays report_only until it ages out of
+            # the window unfiled. The session dedups against open issues.
             item["action"] = "linear_create_if_no_dup"
         else:
             item["action"] = "report_only"

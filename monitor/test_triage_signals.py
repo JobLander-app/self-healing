@@ -220,6 +220,21 @@ class SignalTests(unittest.TestCase):
         ])
         self.assertTrue(all(item["action"] == "report_only" for item in self.escalations(groups)[1]))
 
+    def test_billing_failure_seen_before_as_p3_is_still_filed(self):
+        sig = "joblander-audio-engine:asia-south1:failed-to-deduct-balance-atomically"
+        for prior_issue, expected in ((None, "linear_create_if_no_dup"), ("JOB-1114", "report_only")):
+            with self.subTest(prior_issue=prior_issue):
+                groups = self.collect_requests([self.billing_log("Failed to deduct balance atomically")])
+                triage.assign_severity(groups, {}, 0)
+                with tempfile.TemporaryDirectory() as state:
+                    with open(f"{state}/latest-report.json", "w") as f:
+                        json.dump({"error_groups": [{"signature": sig, "count": 1, "severity": "P3",
+                                                     "diff_status": "new", "linear_issue": prior_issue}]}, f)
+                    final, _ = triage.diff_with_previous(groups, state)
+                item = triage.build_escalations(final)[1][0]
+                self.assertEqual(item["diff_status"], "recurring")
+                self.assertEqual(item["action"], expected)
+
     def test_billing_floor_never_lowers_a_spike(self):
         groups = self.collect_requests([self.billing_log("Failed to deduct balance atomically")] * 101)
         self.assertEqual(self.escalations(groups)[1][0]["severity"], "P1")
