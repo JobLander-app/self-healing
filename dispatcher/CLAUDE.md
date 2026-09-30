@@ -376,9 +376,12 @@ Reach **exactly one** of two terminal outcomes:
      reject it. "Didn't find any major issues" → proceed.
    - Only when **CI is green AND Codex has reviewed AND no unresolved P1/P2
      finding remains** may you proceed to merge.
-   - **At most 3 `@codex review` rounds per PR (owner rule).** Count the
-     `@codex review` comments already on the PR, including ones from earlier
-     runs of yours on a reclaimed ticket, before posting another. If findings
+   - **At most 3 Codex review rounds per PR (owner rule).** A round is a Codex
+     verdict, not a request: count the reviews posted by
+     `chatgpt-codex-connector` (`gh api repos/<owner>/<repo>/pulls/<N>/reviews`),
+     plus a 👍 reaction it left for a clean pass. Automatic reviews count too,
+     as do rounds from earlier runs of yours on a reclaimed ticket. Check the
+     count before you post `@codex review` again. If findings
      keep coming on the same area, the scope is wrong, not the patch: shrink the
      change to the minimal fix the observed signal needs (drop the speculative
      parts) instead of stacking guards. If a P1/P2 is still open after round 3,
