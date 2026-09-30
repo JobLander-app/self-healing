@@ -376,6 +376,24 @@ Reach **exactly one** of two terminal outcomes:
      reject it. "Didn't find any major issues" → proceed.
    - Only when **CI is green AND Codex has reviewed AND no unresolved P1/P2
      finding remains** may you proceed to merge.
+   - **At most 3 Codex review rounds per PR (owner rule).** A round is a Codex
+     verdict, not a request: count the reviews posted by
+     `chatgpt-codex-connector` (`gh api repos/<owner>/<repo>/pulls/<N>/reviews`),
+     plus a 👍 reaction it left for a clean pass. Automatic reviews count too,
+     as do rounds from earlier runs of yours on a reclaimed ticket. Check the
+     count before you post `@codex review` again. If findings
+     keep coming on the same area, the scope is wrong, not the patch: shrink the
+     change to the minimal fix the observed signal needs (drop the speculative
+     parts) instead of stacking guards. If round 3 reports any real P1/P2, even
+     one you can fix, a fix no Codex round can validate is not mergeable: do
+     not merge and do not request a fourth round. Do not push the fix to the PR
+     branch either: some repos run Codex on every push (`joblander.app` has),
+     which would start the fourth round anyway. Keep the fix on a separate
+     branch, then set **`backlogged`** with the findings, that branch and
+     commit, and the minimal-scope proposal. *(backend#399 /
+     JOB-1131, 2026-09-29: five rounds over tick retries that no production
+     failure needed, because all six failures were on the final minute. Each
+     round cost a 40-minute run.)*
 8. **Self-verify the fix actually closes the signature.** This is mandatory:
    - For cross-system contracts (IDs, enums, query params, metadata keys):
      re-read **both** sides and confirm they match byte-for-byte.
