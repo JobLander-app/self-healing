@@ -384,9 +384,11 @@ Reach **exactly one** of two terminal outcomes:
      count before you post `@codex review` again. If findings
      keep coming on the same area, the scope is wrong, not the patch: shrink the
      change to the minimal fix the observed signal needs (drop the speculative
-     parts) instead of stacking guards. If a P1/P2 is still open after round 3,
-     do not merge and do not request a fourth round: set **`backlogged`** with
-     the open findings and the minimal-scope proposal. *(backend#399 /
+     parts) instead of stacking guards. If round 3 reports any real P1/P2, even
+     one you can fix, a fix no Codex round can validate is not mergeable: do
+     not merge and do not request a fourth round. Push the fix if you have it,
+     then set **`backlogged`** with the findings, the fix commit and the
+     minimal-scope proposal. *(backend#399 /
      JOB-1131, 2026-09-29: five rounds over tick retries that no production
      failure needed, because all six failures were on the final minute. Each
      round cost a 40-minute run.)*
