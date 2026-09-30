@@ -386,9 +386,11 @@ Reach **exactly one** of two terminal outcomes:
      change to the minimal fix the observed signal needs (drop the speculative
      parts) instead of stacking guards. If round 3 reports any real P1/P2, even
      one you can fix, a fix no Codex round can validate is not mergeable: do
-     not merge and do not request a fourth round. Push the fix if you have it,
-     then set **`backlogged`** with the findings, the fix commit and the
-     minimal-scope proposal. *(backend#399 /
+     not merge and do not request a fourth round. Do not push the fix to the PR
+     branch either: some repos run Codex on every push (`joblander.app` has),
+     which would start the fourth round anyway. Keep the fix on a separate
+     branch, then set **`backlogged`** with the findings, that branch and
+     commit, and the minimal-scope proposal. *(backend#399 /
      JOB-1131, 2026-09-29: five rounds over tick retries that no production
      failure needed, because all six failures were on the final minute. Each
      round cost a 40-minute run.)*
