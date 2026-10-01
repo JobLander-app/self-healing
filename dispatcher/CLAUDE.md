@@ -361,8 +361,9 @@ Reach **exactly one** of two terminal outcomes:
    uses it as the commit subject, and semantic-release silently skipped a
    release when a prefix preceded the type (JobLander incident JOB-569).
 6. Wait for **green CI** with a bounded poll (see Time budget), not a single
-   blocking `gh pr checks <N> --watch`. Post `@codex review` (gate 7) right
-   after the push, so Codex runs in parallel with CI. **Never merge red CI.**
+   blocking `gh pr checks <N> --watch`. Get the Codex review (gate 7) started
+   right after the push, so Codex runs in parallel with CI. **Never merge red
+   CI.**
 7. **Codex review gate — MANDATORY before merge (owner DoD).** A PR is NOT done
    until it has been reviewed by Codex and its substantive findings resolved.
    - Trigger the review if it isn't auto-triggered: post a PR comment
@@ -574,8 +575,11 @@ waiting:
   `grep` to 2 minutes.*
 - **Run Prettier/lint on the changed files before you push.** *JOB-1109 lost
   a full CI cycle to Prettier.*
-- **Post `@codex review` right after you push**, in parallel with CI, not
-  after CI.
+- **Start the Codex review right after you push**, in parallel with CI, not
+  after CI. If the repo already reviews automatically on that event (PR open,
+  or every push on `joblander.app`), wait for that review instead: a manual
+  `@codex review` on top of it is a duplicate that still counts toward the
+  3-round cap.
 - **Wait for CI with a bounded poll:** `gh pr checks <N>` in a loop with an
   explicit deadline, not a single blocking `--watch`. Read Codex findings
   while CI runs.
