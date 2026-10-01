@@ -25,6 +25,7 @@ CLOSED = "2026-10-01T09:00:00.000Z"          # Done 3h ago, inside the 6h cooldo
 PR = "https://github.com/JobLander-app/backend/pull/399"
 SIG = "joblander-audio-engine:europe-west1:failed-to-deduct-balance-atomically"
 SENTRY_SIG = "sentry:joblander-app:signup:typeerror"
+REV = "joblander-audio-engine-00285-nl6"
 
 
 def _ms(iso):
@@ -37,7 +38,7 @@ def _group(sig=SIG, last_seen="2026-10-01T11:30:00.123456789Z", sev="P2", status
         "signature": sig, "service": service, "region": region, "count": 12,
         "first_seen": "2026-10-01T10:00:00Z", "last_seen": last_seen,
         "severity": sev, "diff_status": status, "sample_message": "Failed to deduct balance atomically",
-        "linear_issue": "JOB-1131",
+        "linear_issue": "JOB-1131", "last_revision": REV,
     }
 
 
@@ -71,8 +72,24 @@ class _Feed:
         return urllib.parse.parse_qs(urllib.parse.urlsplit(self.urls[i]).query)
 
 
-def _run(groups, cooldowns, feed):
-    with patch("triage.datetime") as mock_dt, patch("urllib.request.urlopen", feed):
+PRE = "joblander-audio-engine-00284-abc"   # the newest revision seen before the merge
+
+
+class _Revisions:
+    """Fake pre_merge_revision: returns a fixed revision name (or None)."""
+
+    def __init__(self, pre=None):
+        self.pre, self.calls = pre, []
+
+    def __call__(self, service, region, merged_at, now_dt):
+        self.calls.append((service, region, merged_at))
+        return self.pre
+
+
+def _run(groups, cooldowns, feed, revisions=None):
+    revisions = revisions if revisions is not None else _Revisions()
+    with patch("triage.datetime") as mock_dt, patch("urllib.request.urlopen", feed), \
+            patch.object(triage, "pre_merge_revision", revisions):
         mock_dt.datetime.now.return_value = NOW
         mock_dt.datetime.fromisoformat.side_effect = datetime.datetime.fromisoformat
         mock_dt.timezone.utc = datetime.timezone.utc
@@ -82,87 +99,150 @@ def _run(groups, cooldowns, feed):
 
 
 class TestFixDidNotHold(unittest.TestCase):
+    """Cloud Run log signals: judged by the revision that logged the error."""
 
-    def test_recurrence_after_deploy_is_refiled(self):
-        feed = _Feed([_deploy("2026-10-01T09:14:08Z")])
-        [item] = _run([_group()], _cooldown(), feed)
+    def test_error_on_a_post_merge_revision_is_refiled(self):
+        revs = _Revisions(PRE)
+        feed = _Feed()
+        [item] = _run([_group()], _cooldown(), feed, revs)
         self.assertEqual(item["action"], "linear_create_if_no_dup",
                          "a recurring P2 would otherwise be report_only")
         override = item["cooldown_override"]
         self.assertEqual(override["reason"], "recurred-after-fix")
         self.assertEqual(override["prior_issue"], "JOB-1131")
         self.assertEqual(override["fixed_by_pr"], PR)
-        self.assertEqual(override["fix_live_at"], "2026-10-01T09:14:08Z")
-        self.assertTrue(override["fix_live_source"].startswith("change-feed"))
+        self.assertEqual(override["fix_live_at"], "2026-10-01T09:00:00Z")
+        self.assertEqual(override["fix_live_source"], f"revision:{REV}>{PRE}")
         self.assertEqual(
             item["fix_did_not_hold"],
-            f"fix did not hold: JOB-1131 ({PR}) deployed 2026-10-01T09:14:08Z, "
-            "signature seen again at 2026-10-01T11:30:00.123456789Z")
+            f"fix did not hold: JOB-1131 ({PR}) merged 2026-10-01T09:00:00Z, signature seen "
+            f"again at 2026-10-01T11:30:00.123456789Z on revision {REV}, newer than {PRE} "
+            "which served before the merge")
         self.assertTrue(item["suggested_title"].startswith("[Monitor] "))
         self.assertIn("fix did not hold (JOB-1131)", item["suggested_title"])
-        params = feed.params()
-        self.assertEqual(params["kind"], ["run_deploy"])
-        self.assertEqual(params["entity"], ["service:joblander-audio-engine"])
-        self.assertEqual(params["since"], [str(_ms(CLOSED))])
+        [(service, region, since)] = revs.calls
+        self.assertEqual((service, region), ("joblander-audio-engine", "europe-west1"))
+        self.assertEqual(since, triage._parse_ts(CLOSED))
+        self.assertEqual(feed.urls, [], "Cloud Run log signals do not use the deploy feed")
+
+    def test_the_first_post_merge_error_is_enough(self):
+        # A one-off billing failure on the new revision must count on its own,
+        # even right after the merge.
+        [item] = _run([_group(last_seen="2026-10-01T09:00:01Z")], _cooldown(), _Feed(), _Revisions(PRE))
+        self.assertEqual(item["cooldown_override"]["reason"], "recurred-after-fix")
 
     def test_p1_improved_is_refiled_too(self):
-        feed = _Feed([_deploy("2026-10-01T09:14:08Z")])
-        [item] = _run([_group(sev="P1", status="improved")], _cooldown(prior="P1"), feed)
+        [item] = _run([_group(sev="P1", status="improved")], _cooldown(prior="P1"), _Feed(),
+                      _Revisions(PRE))
         self.assertEqual(item["action"], "linear_create_if_no_dup")
         self.assertEqual(item["cooldown_override"]["reason"], "recurred-after-fix")
 
     def test_p3_recurrence_stays_report_only(self):
-        feed = _Feed([_deploy("2026-10-01T09:14:08Z")])
-        [item] = _run([_group(sev="P3")], _cooldown(), feed)
+        [item] = _run([_group(sev="P3")], _cooldown(), _Feed(), _Revisions(PRE))
         self.assertEqual(item["action"], "report_only")
         self.assertEqual(item["cooldown_override"]["reason"], "recurred-after-fix")
 
-    def test_deploy_between_merge_and_closure_counts(self):
-        # The dispatcher merges first and marks Done after: a fast deploy at 08:58
-        # lands before completedAt (09:00) but after the merge (08:50).
-        feed = _Feed([_deploy("2026-10-01T08:58:00Z")])
-        [item] = _run([_group()], _cooldown(merged="2026-10-01T08:50:00Z"), feed)
-        self.assertEqual(item["cooldown_override"]["fix_live_at"], "2026-10-01T08:58:00Z")
-        self.assertEqual(feed.params()["since"], [str(_ms("2026-10-01T08:50:00Z"))])
-        # Without mergedAt the lookup starts at the closure and misses it.
-        [kept] = _run([_group()], _cooldown(), _Feed([_deploy("2026-10-01T08:58:00Z")]))
-        self.assertEqual(kept["action"], "cooldown_suppressed")
+    def test_error_on_a_pre_merge_revision_keeps_the_cooldown(self):
+        # The old revision keeps serving until traffic switches (backend deploys
+        # with --no-traffic first), or after a rollback: its errors are expected.
+        for pre in (REV, "joblander-audio-engine-00286-zzz"):
+            with self.subTest(pre=pre):
+                [item] = _run([_group()], _cooldown(), _Feed(), _Revisions(pre))
+                self.assertEqual(item["action"], "cooldown_suppressed")
+                self.assertNotIn("cooldown_override", item)
 
-    def test_recurrence_only_before_deploy_stays_suppressed(self):
-        # The old revision keeps erroring until the deploy lands; that is expected.
-        feed = _Feed([_deploy("2026-10-01T11:45:00Z")])
-        [item] = _run([_group(last_seen="2026-10-01T11:30:00Z")], _cooldown(), feed)
-        self.assertEqual(item["action"], "cooldown_suppressed")
-        self.assertNotIn("cooldown_override", item)
+    def test_lookup_starts_at_the_merge(self):
+        # The dispatcher merges first (08:50) and marks Done after (09:00).
+        revs = _Revisions(PRE)
+        [item] = _run([_group()], _cooldown(merged="2026-10-01T08:50:00Z"), _Feed(), revs)
+        self.assertEqual(item["cooldown_override"]["fix_live_at"], "2026-10-01T08:50:00Z")
+        self.assertEqual(revs.calls[0][2], triage._parse_ts("2026-10-01T08:50:00Z"))
+
+    def test_unknown_pre_merge_state_or_missing_revision_keeps_the_cooldown(self):
+        for pre in (None, "not-a-revision-name"):
+            with self.subTest(pre=pre):
+                [item] = _run([_group()], _cooldown(), _Feed(), _Revisions(pre))
+                self.assertEqual(item["action"], "cooldown_suppressed")
+        group = _group()
+        del group["last_revision"]
+        revs = _Revisions(PRE)
+        [norev] = _run([group], _cooldown(), _Feed(), revs)
+        self.assertEqual(norev["action"], "cooldown_suppressed")
+        self.assertEqual(revs.calls, [])
 
     def test_done_without_pr_stays_suppressed(self):
-        feed = _Feed([_deploy("2026-10-01T09:14:08Z")])
-        [item] = _run([_group()], _cooldown(pr=None), feed)
+        revs = _Revisions(PRE)
+        [item] = _run([_group()], _cooldown(pr=None), _Feed(), revs)
         self.assertEqual(item["action"], "cooldown_suppressed")
-        self.assertEqual(feed.urls, [], "no fix → no deploy lookup")
+        self.assertEqual(revs.calls, [], "no fix → no revision lookup")
 
     def test_canceled_stays_suppressed_even_with_a_pr(self):
-        feed = _Feed([_deploy("2026-10-01T09:14:08Z")])
-        [item] = _run([_group()], _cooldown(state="canceled"), feed)
+        revs = _Revisions(PRE)
+        [item] = _run([_group()], _cooldown(state="canceled"), _Feed(), revs)
         self.assertEqual(item["action"], "cooldown_suppressed")
         self.assertEqual(item["cooldown"]["limit_h"], triage.COOLDOWN_HOURS_CANCELED)
 
-    def test_feed_unavailable_keeps_the_cooldown(self):
-        # No deploy evidence: the event may still come from the old revision.
-        for error in (URLError("connection refused"),
-                      HTTPError("http://127.0.0.1:4200/changes", 503, "degraded", {}, None)):
-            with self.subTest(error=type(error).__name__):
-                [item] = _run([_group()], _cooldown(), _Feed(error=error))
+    def test_synthetic_region_aggregate_uses_the_deploy_feed(self):
+        # The geo misroute group is Cloud Run-derived but spans regions
+        # ("geo-routing") and carries no revision: judged by the feed, which
+        # needs every production region deployed.
+        sig = "joblander-app:geo:in-users-misrouted"
+        group = _group(sig=sig, service="joblander-app", region="geo-routing",
+                       last_seen="2026-10-01T11:00:00Z", sev="P1")
+        del group["last_revision"]
+        feed = _Feed([_deploy("2026-10-01T09:20:00Z", service="joblander-app", region=r)
+                      for r in triage.REGIONS])
+        revs = _Revisions()
+        [item] = _run([group], _cooldown(sig=sig, prior="P1"), feed, revs)
+        self.assertEqual(item["cooldown_override"]["reason"], "recurred-after-fix")
+        self.assertTrue(item["cooldown_override"]["fix_live_source"].endswith(":all-regions"))
+        self.assertEqual(revs.calls, [])
+
+    def test_sentry_feed_unavailable_or_empty_keeps_the_cooldown(self):
+        group = _group(sig=SENTRY_SIG, service="joblander-app", region="frontend",
+                       last_seen="2026-10-01T11:00:00Z")
+        for feed in (_Feed(error=URLError("connection refused")),
+                     _Feed(error=HTTPError("http://127.0.0.1:4200/changes", 503, "degraded", {}, None)),
+                     _Feed([])):
+            with self.subTest(feed=feed.error or "empty"):
+                [item] = _run([group], _cooldown(sig=SENTRY_SIG), feed)
                 self.assertEqual(item["action"], "cooldown_suppressed")
-                self.assertNotIn("cooldown_override", item)
                 self.assertNotIn("fix_did_not_hold", item)
 
-    def test_feed_without_a_deploy_keeps_the_cooldown(self):
-        # A healthy feed with no deploy since the closure is positive evidence the
-        # fix is not live yet (delayed, failed, never started).
-        [item] = _run([_group()], _cooldown(), _Feed([]))
-        self.assertEqual(item["action"], "cooldown_suppressed")
-        self.assertNotIn("cooldown_override", item)
+
+class TestPreMergeRevision(unittest.TestCase):
+
+    def _entry(self, rev):
+        return {"timestamp": "2026-10-01T08:00:00Z", "resource": {"labels": {"revision_name": rev}}}
+
+    def test_highest_sequence_seen_before_the_merge_wins(self):
+        # A rollback brought 00220 back after 00228 had run: 00228 is the frontier.
+        merged = datetime.datetime(2026, 10, 1, 9, 0, tzinfo=datetime.timezone.utc)
+        system = json.dumps([self._entry("joblander-app-00220-9b2"),
+                             self._entry("joblander-app-00228-mdd"),
+                             self._entry("joblander-app-00227-f52")])
+        newest = json.dumps([self._entry("joblander-app-00220-9b2")])
+        with patch.object(triage, "run_cmd", side_effect=[system, newest]) as run:
+            pre = triage.pre_merge_revision("joblander-app", "us-central1", merged, NOW)
+        self.assertEqual(pre, "joblander-app-00228-mdd")
+        first, second = (c[0][0] for c in run.call_args_list)
+        self.assertIn('logName:"varlog%2Fsystem"', first[3])
+        self.assertIn('timestamp<"2026-10-01T09:00:00Z"', first[3])
+        self.assertIn('timestamp>="2026-09-29T09:00:00Z"', first[3])
+        self.assertIn('resource.labels.location="us-central1"', first[3])
+        self.assertIn("--limit=1", second)
+
+    def test_no_entries_or_bad_output_is_none(self):
+        merged = datetime.datetime(2026, 10, 1, 9, 0, tzinfo=datetime.timezone.utc)
+        for outs in ((None, None), ("", "[]"), ("not json", "[]")):
+            with self.subTest(outs=outs), patch.object(triage, "run_cmd", side_effect=list(outs)):
+                self.assertIsNone(triage.pre_merge_revision("s", "r", merged, NOW))
+
+    def test_revision_seq(self):
+        self.assertEqual(triage.revision_seq("joblander-audio-engine-00285-nl6"), 285)
+        self.assertEqual(triage.revision_seq("joblander-app-00344-dnv"), 344)
+        for bad in (None, "", "joblander-app", "joblander-app-285-nl6"):
+            self.assertIsNone(triage.revision_seq(bad))
 
     def test_sentry_signature_maps_to_the_app_service(self):
         feed = _Feed([_deploy("2026-10-01T09:20:00Z", service="joblander-app", region=r)
