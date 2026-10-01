@@ -234,9 +234,19 @@ class TestPreMergeRevision(unittest.TestCase):
 
     def test_no_entries_or_bad_output_is_none(self):
         merged = datetime.datetime(2026, 10, 1, 9, 0, tzinfo=datetime.timezone.utc)
-        for outs in ((None, None), ("", "[]"), ("not json", "[]")):
+        for outs in ((None, None), ("", "[]"), ("not json", "[]"), ('{"a": 1}', "[]")):
             with self.subTest(outs=outs), patch.object(triage, "run_cmd", side_effect=list(outs)):
                 self.assertIsNone(triage.pre_merge_revision("s", "r", merged, NOW))
+
+    def test_either_query_failing_fails_the_whole_lookup(self):
+        # A partial view could miss a newer pre-merge revision and make it look
+        # post-merge: one failed query means the pre-merge state is unknown.
+        merged = datetime.datetime(2026, 10, 1, 9, 0, tzinfo=datetime.timezone.utc)
+        ok = json.dumps([self._entry("joblander-audio-engine-00284-d9x")])
+        for outs in ((None, ok), (ok, None)):
+            with self.subTest(outs=outs), patch.object(triage, "run_cmd", side_effect=list(outs)):
+                self.assertIsNone(triage.pre_merge_revision("joblander-audio-engine", "asia-south1",
+                                                            merged, NOW))
 
     def test_revision_seq(self):
         self.assertEqual(triage.revision_seq("joblander-audio-engine-00285-nl6"), 285)

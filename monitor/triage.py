@@ -949,11 +949,17 @@ def pre_merge_revision(service, region, merged_at, now_dt):
             f"--project={PROJECT}", f"--limit={limit}", "--order=desc",
             f"--freshness={hours}h", "--format=json",
         ], optional=True)
+        if out is None:
+            # A failed query is not an empty one: with only the other query's
+            # partial view, a revision missing from it could look post-merge.
+            return None
         try:
-            entries = json.loads(out) if out else []
+            entries = json.loads(out) if out.strip() else []
         except json.JSONDecodeError:
             return None
-        for e in entries if isinstance(entries, list) else []:
+        if not isinstance(entries, list):
+            return None
+        for e in entries:
             name = ((e.get("resource") or {}).get("labels") or {}).get("revision_name")
             if revision_seq(name) is not None:
                 names.add(name)
