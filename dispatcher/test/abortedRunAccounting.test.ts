@@ -136,6 +136,12 @@ test("failure alert names the ticket and separates the stats", () => {
     "⚠️ run FAILED — Startup error: x. 0s, 0 turns");
 });
 
+test("a fixed run reports the merge, not a confirmed production deploy", () => {
+  const line = session.buildRunNotification({ ...base, outcome: "fixed", prUrl: "https://github.com/JobLander-app/backend/pull/399", summary: "ok" });
+  assert.equal(line, "🚀 merged: JOB-1138 FIXED — https://github.com/JobLander-app/backend/pull/399 merged, deploy pending. ok. estimated $2.83, 2400s");
+  assert.doesNotMatch(line!, /in prod/);
+});
+
 test("a watchdog-aborted session is attributed to its selected ticket with streamed cost", async () => {
   const NOW = Date.now();
   const candidate = { id: "issue-1", identifier: "JOB-1138", createdAt: new Date(NOW - 3_600_000).toISOString(), updatedAt: new Date(NOW - 60_000).toISOString(), reclaim: false };

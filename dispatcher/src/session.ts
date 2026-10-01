@@ -260,7 +260,8 @@ function newTurnId(): string {
  *
  * Three visible outcomes, keyed off the structured RunSummary fields only
  * (no free-text parsing beyond what the run already structured):
- *   🚀 in prod   — fixed+merged (auto-merge → Cloud Build deploys main).
+ *   🚀 merged    — fixed+merged; deploy pending (auto-merge → Cloud Build
+ *                  deploys main; the run does not wait for it).
  *   ✅ investigated — closed without a prod code change (not-a-bug/stale/
  *                    fixed-elsewhere).
  *   ⚠️ needs eyes — dead-end (backlogged) / error / timeout / unknown.
@@ -293,7 +294,9 @@ export function buildRunNotification(s: RunSummary): string | null {
   switch (s.outcome) {
     case "fixed": {
       const pr = s.prUrl ? `${s.prUrl} merged` : "merged";
-      line = `🚀 in prod: ${ticket} FIXED — ${pr}, deploy pipeline running. ${summary}. ${cost}, ${s.durationSec}s`;
+      // The run ends at merge (CLAUDE.md Step 4a.11): the deploy has not been
+      // confirmed, so never say "in prod". The monitor re-files on recurrence.
+      line = `🚀 merged: ${ticket} FIXED — ${pr}, deploy pending. ${summary}. ${cost}, ${s.durationSec}s`;
       break;
     }
     case "not-a-bug":
@@ -552,7 +555,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
 
   // Lifecycle observability (JOB-731, supersedes the 2026-06-08 "no Telegram"
   // policy): one Telegram per run that actually did work — "acted upon" /
-  // "in prod". no-work / no-ticket runs stay silent (see buildRunNotification).
+  // "merged". no-work / no-ticket runs stay silent (see buildRunNotification).
   // Fail-soft: sendTelegram already swallows its own errors, and we belt-and-
   // suspenders around it so a TG failure can NEVER throw into the poll loop.
   await alertAccounting().catch(err => console.error("[session] accounting alert failed:", err));

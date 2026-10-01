@@ -46,8 +46,9 @@ monitor, dispatcher) is the reusable engine.
 | **Watchdog** (off-box) | the only layer that is not on the VM: reads heartbeat age from Cloud Logging every 5 min, pages Telegram, and resets the instance on its own — budgeted, and never on a signal it has never seen (2026-08-26) | `watchdog/` | Cloud Scheduler → Cloud Functions gen2, `europe-west1` |
 
 The watcher files a ticket → the dispatcher picks it up → the fix merges → Cloud
-Build deploys. A closed loop from "output died" to "fix in prod", with the owner
-watching in Telegram but not in the critical path.
+Build deploys. A closed loop from "output died" to "fix merged", with the owner
+watching in Telegram but not in the critical path; if the signature recurs
+after the deploy, the monitor re-files it.
 
 
 ### Applying infrastructure
@@ -174,7 +175,7 @@ affects the loop.
 |---|---|---|
 | P0 page | `URGENT P0 [output-watch]: /health/output = … Regions: … <url>` | watcher, on 3 consecutive bad samples |
 | Ticket created | `🎫 {IDENTIFIER} created — self-healing engaged` | watcher, right after a successful Linear create |
-| Acted upon / in prod | `🚀 in prod: {ticket} FIXED — {PR} merged, deploy pipeline running. … ${cost}, {n}s` · `✅ {ticket}: investigated — not a bug. … ${cost}` · `⚠️ {ticket}: {outcome}. …` (DRY_RUN prefixed `[DRY_RUN] `) | dispatcher, at the end of a run that picked a ticket (`no-work` stays silent) |
+| Acted upon / merged | `🚀 merged: {ticket} FIXED — {PR} merged, deploy pending. … ${cost}, {n}s` · `✅ {ticket}: investigated — not a bug. … ${cost}` · `⚠️ {ticket}: {outcome}. …` (DRY_RUN prefixed `[DRY_RUN] `) | dispatcher, at the end of a run that picked a ticket (`no-work` stays silent) |
 | Recovered | `RECOVERED: /health/output = … Product output flowing again.` | watcher, when the detector clears after a page |
 | Self-heal | `⚠️ self-heal: dependency <dep> DOWN — …. Filing repair ticket.` | dispatcher healthcheck, on a dep failure |
 

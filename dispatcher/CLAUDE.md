@@ -160,7 +160,10 @@ label is the ONLY thing that distinguishes them.
 **Release the label at the end.** When you reach a terminal outcome (`fixed`,
 `not-a-bug`, `stale`, `fixed-elsewhere`, `intentional`) or hand the ticket back
 (`backlogged`), remove `agent-claimed` in the same `update_issue` that sets the
-final state — again by passing the remaining label ids, minus this one.
+final state — again by passing the remaining label ids, minus this one. The one
+exception is a merged fix whose post-deploy check is still pending (Step 4a.11b):
+there the label stays on purpose, so the stale-claim reclaim brings the ticket
+back for verification.
 
 Neither case breaks pickup if you forget: terminal states are excluded by the
 state filter, and `Backlog` is selected without consulting this label. What a
@@ -360,7 +363,10 @@ Reach **exactly one** of two terminal outcomes:
    must be a bare conventional commit, with **no `[...]` prefix**: squash-merge
    uses it as the commit subject, and semantic-release silently skipped a
    release when a prefix preceded the type (JobLander incident JOB-569).
-6. Wait for **green CI**: `gh pr checks <N> --watch`. **Never merge red CI.**
+6. Wait for **green CI** with a bounded poll (see Time budget), not a single
+   blocking `gh pr checks <N> --watch`. Get the Codex review (gate 7) started
+   right after the push, so Codex runs in parallel with CI. **Never merge red
+   CI.**
 7. **Codex review gate — MANDATORY before merge (owner DoD).** A PR is NOT done
    until it has been reviewed by Codex and its substantive findings resolved.
    - Trigger the review if it isn't auto-triggered: post a PR comment
@@ -394,44 +400,60 @@ Reach **exactly one** of two terminal outcomes:
      JOB-1131, 2026-09-29: five rounds over tick retries that no production
      failure needed, because all six failures were on the final minute. Each
      round cost a 40-minute run.)*
-8. **Self-verify the fix actually closes the signature.** This is mandatory:
+8. **Self-verify the fix actually closes the signature — before you merge.**
+   This is mandatory:
    - For cross-system contracts (IDs, enums, query params, metadata keys):
      re-read **both** sides and confirm they match byte-for-byte.
    - For behaviour changes (greetings, prompts, parsing, response shapes):
-     run a **real local e2e** that exercises the changed path. Static checks
-     (typecheck/lint) are the floor, not proof.
-   - **CAUSALITY, NOT COINCIDENCE — the errors going quiet is not evidence.**
-     "Silent since I merged" is the single easiest way for you to be wrong,
-     because *someone else's* change is the competing explanation and it is
-     often the true one. Before you may claim `fixed`, establish all three:
-     1. **Your revision is actually live.** Merged ≠ deployed. Get the
-        currently-serving revision and its create time (`gcloud run services
-        describe <svc> --region=<r> --project=meet-assistant-6d8ad
-        --format='value(status.latestReadyRevisionName)'`, then the revision's
-        createTime), or the equivalent for the target surface. A merge that has
-        not rolled out proves nothing about the logs.
-     2. **The signature stopped AFTER your revision went live** — not before.
-        If it fell silent *before* your deploy, your change did not cause it.
-     3. **No competing change explains it.** `git log --since="<your PR
-        opened>" origin/main -- <implicated paths>` and check merged PRs in the
-        window. If another commit touched the same failure path, you must rule
-        it out explicitly or close **`fixed-elsewhere`** crediting it.
-     Fail any of the three ⇒ you may NOT report `fixed`. Report
-     `fixed-elsewhere` (credit the real cause) or `stale`, and if you already
-     merged, say so plainly in the Linear comment.
+     run a **real local e2e** that exercises the changed path, or the targeted
+     tests of that path. Static checks (typecheck/lint) are the floor, not
+     proof.
+   - **No competing change explains it.** `git log --since="<your PR opened>"
+     origin/main -- <implicated paths>` and check merged PRs in the window.
+     If another commit already fixed the same failure path, do **not** merge:
+     close **`fixed-elsewhere`** crediting it. If it only touched the path,
+     rule it out explicitly in the PR body.
+   - **You do not wait for a deploy.** Never poll Cloud Run (or any other
+     target) for a new revision inside the run, and never try to judge whether
+     the signature went silent after your merge. Post-deploy verification
+     happens after the run: for monitor-covered signatures the monitor re-files
+     the signature if it recurs after the fix's deploy, naming the prior ticket;
+     for every other origin a later reclaim run verifies it (Step 11b).
 
-     *This rule exists because of JOB-838/843 (2026-07-27). PR #120 was
-     auto-merged at 11:13 on a root-cause hypothesis that was simply wrong. The
-     errors went quiet, self-verify accepted that as proof, and the ticket was
-     closed `fixed`. The actual fix was the owner's PR #121 at 11:55, which
+     *The causality rule exists because of JOB-838/843 (2026-07-27). PR #120
+     was auto-merged at 11:13 on a root-cause hypothesis that was simply wrong.
+     The errors went quiet, self-verify accepted that as proof, and the ticket
+     was closed `fixed`. The actual fix was the owner's PR #121 at 11:55, which
      routed India STT to a different region and reverted #120's change. The
      loop had shipped an incorrect change to production autonomously and did
-     not notice for five hours.*
-9. **Pre-merge freshness guard.** `main` may have moved while you worked:
-   `git -C <scratch> pull --rebase origin main` (resolve or rebuild the fix if it
-   conflicts), and re-run your Step-8 signature self-verify against the rebased
-   tree. If the cause has since disappeared or the area was rewritten underneath
-   you, do **not** merge — close `fixed-elsewhere`/`stale` instead.
+     not notice for five hours. "Silent since the merge" is still not
+     evidence, which is why silence is now judged by the monitor after the
+     deploy, not by you.*
+
+     *Waiting for the deploy inside the run is why it moved out: JOB-1063
+     (joblander.app#321), JOB-1109 (#329) and JOB-1131 (backend#399) were
+     each merged and then killed by the 40-minute watchdog while polling for
+     the new revision. Each ticket was left without its closing comment and
+     with a stale `agent-claimed`, and since the merge had already moved it to
+     Done, no later run came back to it.*
+9. **Pre-merge freshness guard.** `main` may have moved while you worked.
+   `git -C <scratch> fetch origin main`, then check
+   `gh pr view <N> --json mergeStateStatus` and
+   `git -C <scratch> diff $(git -C <scratch> merge-base HEAD origin/main)..origin/main -- <implicated paths>`.
+   - **`CLEAN` and the diff is empty** → merge as-is. Do **not** rebase: every
+     push restarts the full CI (11–13 min on `backend`).
+   - **Conflicts (`DIRTY`), `BEHIND` on a repo that requires up-to-date
+     branches, or main changed the implicated paths** → rebase onto
+     `origin/main` (resolve or rebuild the fix if it conflicts), force-push,
+     re-run your gate-8 self-verify against the rebased tree, and wait for CI
+     again. If the cause has since disappeared or the area was rewritten
+     underneath you, do **not** merge — close `fixed-elsewhere`/`stale`
+     instead.
+   - Any other state (`BLOCKED`, `UNSTABLE`, `UNKNOWN`) means a gate is not
+     met yet: find out which one before you do anything else.
+
+   *JOB-1109 (09-28) and JOB-1131 (09-29 21:10) each lost ~7–12 min to a
+   post-rebase CI cycle on changes unrelated to the fix.*
 10. `[Monitor]`-origin auto-merge **is authorized** by the Self-Healing Loop in
    the root JobLander CLAUDE.md — this is the single sanctioned exception to
    "merge is human-only". Merge ONLY after gates 6+7+8+9 pass: `gh pr merge <N> --merge`.
@@ -450,8 +472,48 @@ Reach **exactly one** of two terminal outcomes:
    (`self-healing-deploy.timer`), so a bad change to the deployer is the one
    failure that also removes your ability to ship the fix for it. Open the PR,
    post your evidence, leave it for the owner, and report `backlogged`.
-11. Linear: `update_issue` → **`Done`**; `create_comment` with the PR URL, the
-    root cause, what you verified, and the Codex review verdict.
+11. **Hand the ticket off in the same run, right after `gh pr merge` succeeds.**
+    The run ends at the merge. First confirm `gh pr view <N> --json
+    state,mergedAt` shows `MERGED` (a merge queue only enqueues the PR; until
+    it is merged, do not touch the ticket). Then the path depends on who will
+    verify the fix after the deploy:
+
+    **11a. Monitor-covered signatures** — a Cloud Run log signature
+    `<service>:<region>:<slug>` (the prefix is the Cloud Run service) or a
+    Sentry signature `sentry:<service>:…`. The monitor re-files these if they
+    recur after the deploy. In this order:
+    1. `create_comment` with the PR URL, the root cause, what you verified
+       before the merge, the Codex review verdict, and the line
+       "Post-deploy verification: the monitor re-files this signature if it
+       recurs after the deploy".
+    2. `update_issue` → **`Done`**, with `agent-claimed` removed (pass the
+       remaining label ids).
+    3. Emit `[DISPATCH_RESULT]` with outcome `fixed` and the PR URL, and end
+       the run.
+
+    **11b. Every other origin** — the watcher's `/health/output` incident
+    (`[output-watch]`; the watcher pages once and does not file again while
+    the detector stays dead), `voice-agent:`, `cloud-function:`,
+    `duplicate-worker:`, `monitor-topology:` signals, and `[SelfHeal]`
+    healthcheck tickets. Nothing outside the run re-checks these, so the
+    ticket must not be left Done on a merge alone. In this order:
+    1. `create_comment` with the same content as 11a, but the line
+       "Post-deploy verification pending: a reclaim run verifies this after
+       the deploy".
+    2. `update_issue` → **`In Progress`**, keeping `agent-claimed` (the GitHub
+       integration moves the ticket to Done on merge; this undoes it).
+    3. Emit `[DISPATCH_RESULT]` with outcome `fixed`, the PR URL, and a note
+       saying verification is pending; end the run.
+
+    After the stale-claim window the ticket is reclaimed. That run finds the
+    merged PR and the "verification pending" comment (Time budget: look for
+    earlier work first) and does ONLY the post-deploy check: the fix's
+    revision or deploy is live, and the signal is clear after it (watcher:
+    `/health/output` healthy / RECOVERED sent; other signals: the signature
+    absent since the new revision). Clear → comment the evidence, **Done**,
+    remove `agent-claimed`, outcome `fixed`. Not live yet → comment and end
+    again, leaving the claim. Live but still failing → the fix did not hold:
+    continue as a new fix in this run.
 
 ### (b) Not a real bug → prove it, resolve, suppress recurrence
 
@@ -532,6 +594,36 @@ For client-side errors, transient blips, already-fixed-in-`main`, expected
 This (b) path is a **legitimate autonomous decision**. Do NOT park a noise
 ticket "for a human to confirm" — proving and closing it IS the job.
 
+## Time budget
+
+The run has a hard wall-clock limit (`MAX_RUN_MS`, currently 40 min). The
+watchdog kills a run that exceeds it, and a killed run leaves the ticket
+claimed and prints no `[DISPATCH_RESULT]`. Spend the budget on the fix, not on
+waiting:
+
+- **Never run a repo's full test suite or full typecheck locally.** Run only
+  the targeted test files for the changed path and let CI run the rest. Full
+  jest OOMs on this VM.
+- **Never leave a background job running.** Stop it (TaskStop, or `kill
+  <pid>`) before you move on.
+  *JOB-1068 (09-25) spent 30 min on a full local jest suite plus two full
+  `tsc` runs left in the background and never stopped; the load slowed even
+  `grep` to 2 minutes.*
+- **Run Prettier/lint on the changed files before you push.** *JOB-1109 lost
+  a full CI cycle to Prettier.*
+- **Start the Codex review right after you push**, in parallel with CI, not
+  after CI. If the repo already reviews automatically on that event (PR open,
+  or every push on `joblander.app`), wait for that review instead: a manual
+  `@codex review` on top of it is a duplicate that still counts toward the
+  3-round cap.
+- **Wait for CI with a bounded poll:** `gh pr checks <N>` in a loop with an
+  explicit deadline, not a single blocking `--watch`. Read Codex findings
+  while CI runs.
+- **On a reclaimed ticket, look for your earlier work first.**
+  `gh pr list --state all --search JOB-XXX` and `git ls-remote origin` for a
+  `fix/JOB-XXX-*` branch; if one exists, continue from it instead of
+  re-investigating. *JOB-1131's 20:20 run spent 9 min re-deriving PR #399.*
+
 ## Quality Rails (your own discipline — there are no human gates)
 
 - **Never merge red CI.** Wait for green or fix until green.
@@ -570,7 +662,8 @@ Always finish with exactly one line:
 ```
 [DISPATCH_RESULT] {"outcome":"fixed|not-a-bug|stale|fixed-elsewhere|intentional|backlogged|no-work","issue":"JOB-XXX or null","repo":"<repo or null>","pr":"<PR url or null>","note":"one-sentence summary"}
 ```
-Outcomes: `fixed` (real bug fixed + merged → Done) · `not-a-bug` (proven
+Outcomes: `fixed` (real bug fixed + merged → Done; or → In Progress with
+post-deploy verification pending, Step 4a.11b) · `not-a-bug` (proven
 noise/client-side → Done/Canceled) · `stale` (no longer reproducible in the
 fresh window → Canceled, see Step 3.5) · `fixed-elsewhere` (was real but already
 resolved by a later commit/deploy → Done, cite it) · `intentional` (the anomaly
