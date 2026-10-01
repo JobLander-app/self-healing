@@ -168,3 +168,29 @@ test("a watchdog-aborted session is attributed to its selected ticket with strea
   assert.match(notifications[0], /^⚠️ JOB-1138: run FAILED — session error: watchdog: run exceeded MAX_RUN_MS \(\d+m\) and was aborted\. \$0\.02, \d+s, 1 turns$/);
   assert.equal(summaries.length, 1);
 });
+
+test("a run that claimed a different ticket is attributed to that ticket, not the selected one", async () => {
+  const { LINEAR_AGENT_CLAIMED_LABEL_ID } = require("../src/config") as typeof import("../src/config");
+  const NOW = Date.now();
+  const candidate = { id: "issue-1", identifier: "JOB-1138", createdAt: new Date(NOW - 3_600_000).toISOString(), updatedAt: new Date(NOW - 60_000).toISOString(), reclaim: false };
+  const notifications: string[] = [];
+  mock.method(accounting, "accountingStatus", () => ({ healthy: true }));
+  mock.method(alerts, "alertAccounting", async () => {});
+  mock.method(alerts, "alertProviderReadiness", async () => {});
+  mock.method(providers, "providerOrder", () => ["claude", "codex"]);
+  mock.method(providers, "availableToAttempt", () => true);
+  mock.method(providers, "updateProvider", () => {});
+  mock.method(notify, "sendTelegram", async (message: string) => { notifications.push(message); });
+  for (const name of ["traceEvent", "recordAttemptStarted", "recordAttempt", "recordRun"] as const) mock.method(trace, name, () => {});
+  mock.method(claude, "executeClaude", (input: Parameters<typeof claude.executeClaude>[0]) => realExecuteClaude(input, (async function* () {
+    yield { type: "assistant", session_id: "s1", parent_tool_use_id: null, message: { id: "m1", model: "claude-sonnet-4-6", usage: u(1, 1),
+      content: [{ type: "tool_use", id: "toolu_1", name: "mcp__linear__update_issue", input: { id: "JOB-9999", labelIds: [LINEAR_AGENT_CLAIMED_LABEL_ID] } }] } };
+    yield RESULT;
+  }) as any));
+
+  const summary = await session.runDispatchSession("cron", candidate);
+  assert.equal(summary.outcome, "error");
+  assert.match(summary.summary, /claimed outside the exact selected candidate/);
+  assert.equal(summary.issueId, "JOB-9999");
+  assert.match(notifications[0], /^⚠️ JOB-9999: run FAILED/);
+});

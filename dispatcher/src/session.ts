@@ -433,6 +433,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   let numTurns = 0;
   let sessionError: string | null = null;
   let eligibilityError: CandidateEligibilityError | null = null;
+  let claimedOutsideCandidate: string[] = [];
 
   // Watchdog. config.claudeMaxTurns bounds the turn COUNT but not wall-clock
   // time. A single hung turn would block the `for await` forever and leave
@@ -483,6 +484,8 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     });
     output = result.output;
     sessionError = timedOut && result.error?.startsWith("watchdog:") ? watchdogError : result.error;
+    const allowed: readonly string[] = [candidate.id, candidate.identifier];
+    claimedOutsideCandidate = [...new Set(result.results.flatMap(r => r.issueIds).filter(id => !allowed.includes(id)))];
   } catch (err) {
     if (err instanceof CandidateEligibilityError) eligibilityError = err;
     sessionError = timedOut
@@ -524,8 +527,12 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     // never printed [DISPATCH_RESULT] (watchdog abort, crash). Without this
     // the failure alert named no ticket. issueId is display-only (feed and
     // Telegram); it is never read back as a claim. "no-work" means the agent
-    // declined the ticket, so it stays unattributed.
-    issueId: parsed.issue ?? (attempts.length && outcome !== "no-work" ? candidate.identifier : undefined),
+    // declined the ticket, so it stays unattributed. A provider that claimed a
+    // DIFFERENT ticket is named by what it actually mutated, never the
+    // candidate: pointing the alert at the selected ticket would hide the one
+    // that may have been changed.
+    issueId: parsed.issue ?? (claimedOutsideCandidate.length ? claimedOutsideCandidate.join(", ")
+      : attempts.length && outcome !== "no-work" ? candidate.identifier : undefined),
     repo: parsed.repo,
     prUrl,
     costUsd,
