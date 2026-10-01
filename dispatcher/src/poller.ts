@@ -137,7 +137,7 @@ export async function pollOnce(reason: string): Promise<{ ran: boolean; note: st
     console.log("[poller] pre-check: no eligible monitor tickets created within 7 days — skipped");
     return { ran: false, note: "precheck-skip" };
   }
-  if (candidate) console.log(`[poller] selected ${candidate.identifier} (createdAt=${candidate.createdAt}, reclaim=${candidate.reclaim})`);
+  if (candidate) console.log(`[poller] selected ${candidate.identifier} (createdAt=${candidate.createdAt}, reclaim=${candidate.reclaim}, verify=${candidate.verify === true})`);
   // Recheck concurrency/deployment after the awaited queue read.
   if (isBusy()) return { ran: false, note: "busy" };
   if (isDeploymentInProgress()) return { ran: false, note: "deploying" };
