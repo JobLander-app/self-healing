@@ -236,6 +236,60 @@ test("entitiesFromResourceName: Cloud Run v1 namespaces shape → service (no re
   assert.deepEqual(ents, [{ type: "service", id: "joblander-audio-engine" }]);
 });
 
+test("gcpAuditExtract: v1 namespaces ReplaceService takes its region from resource labels", () => {
+  // Shape of the prod rows (2026-10-01): no region in resourceName, location label set.
+  const entry: GcpAuditLogEntry = {
+    insertId: "run-v1-ns",
+    timestamp: "2026-10-01T14:08:46.160835Z",
+    protoPayload: {
+      methodName: "google.cloud.run.v1.Services.ReplaceService",
+      resourceName: "namespaces/meet-assistant-6d8ad/services/joblander-audio-engine",
+      authenticationInfo: { principalEmail: "cloud-build@meet-assistant-6d8ad.iam.gserviceaccount.com" },
+    },
+    resource: { labels: { location: "asia-south1", service_name: "joblander-audio-engine" } },
+  };
+  const { event, entities } = gcpAuditExtract({ entry });
+  assert.equal(event.kind, "run_deploy");
+  assert.deepEqual(entities, [
+    { type: "service", id: "joblander-audio-engine" },
+    { type: "region", id: "asia-south1" },
+  ]);
+});
+
+test("gcpAuditExtract: a region already in resourceName is not duplicated by the label", () => {
+  const entry: GcpAuditLogEntry = {
+    insertId: "run-v2-dup",
+    timestamp: "2026-10-01T14:08:46Z",
+    protoPayload: {
+      methodName: "google.cloud.run.v2.Services.UpdateService",
+      resourceName: "projects/p/locations/europe-west1/services/joblander-app",
+    },
+    resource: { labels: { location: "europe-west1" } },
+  };
+  assert.deepEqual(gcpAuditExtract({ entry }).entities, [
+    { type: "service", id: "joblander-app" },
+    { type: "region", id: "europe-west1" },
+  ]);
+});
+
+test("gcpAuditExtract: Cloud Run SetIamPolicy is an IAM change, not a deploy", () => {
+  const entry: GcpAuditLogEntry = {
+    insertId: "run-iam",
+    timestamp: "2026-10-01T14:14:12.950315Z",
+    protoPayload: {
+      methodName: "google.cloud.run.v1.Services.SetIamPolicy",
+      resourceName: "projects/meet-assistant-6d8ad/locations/asia-south1/services/joblander-audio-engine",
+    },
+    resource: { labels: { location: "asia-south1" } },
+  };
+  const { event, entities } = gcpAuditExtract({ entry });
+  assert.equal(event.kind, "iam_change");
+  assert.deepEqual(entities, [
+    { type: "service", id: "joblander-audio-engine" },
+    { type: "region", id: "asia-south1" },
+  ]);
+});
+
 test("gcpAuditExtract: resource-scoped setIamPolicy → iam_change (lowercase method)", () => {
   const entry: GcpAuditLogEntry = {
     insertId: "iam-1",

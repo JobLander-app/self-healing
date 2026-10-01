@@ -53,6 +53,12 @@ fresh cooldown decisions also remove suppressed items from this pending queue.
 were already applied by the collector; do not reverse them or process records
 outside the `escalations` array.
 
+An entry with `fix_did_not_hold` is a signal whose prior ticket was closed Done by
+a merged PR and that came back after the fix deployed. Its prior ticket (and any
+Done `linear_issue`) is not a duplicate: create the new issue with the supplied
+`suggested_title`, and make `fix_did_not_hold` verbatim the first line of
+`## Problem (WHY)`.
+
 Use vendored `mcp__linear__*` tools for Linear. Resolve the JobLander team, workflow
 state, and label UUIDs with those tools rather than guessing. New issues use
 `To Do` (resolve its actual id), `monitor`, `Bug`, and the matching `repo:` label.

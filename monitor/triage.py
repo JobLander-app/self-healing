@@ -63,6 +63,21 @@ SENTRY_FRESH_HOURS = int(os.environ.get("SENTRY_FRESH_HOURS", "12"))
 COOLDOWN_HOURS_CANCELED = int(os.environ.get("COOLDOWN_HOURS_CANCELED", "12"))
 COOLDOWN_HOURS_DONE = int(os.environ.get("COOLDOWN_HOURS_DONE", "6"))
 
+# Post-deploy verification of a merged fix. The dispatcher ends its run at the
+# merge, so this hourly triage is what notices a fix that did not hold: a Done
+# ticket with a merged GitHub PR whose signature is seen again AFTER the fix
+# went live bypasses the Done cooldown and is re-filed. A Done ticket without a
+# merged PR (not-a-bug, fixed-elsewhere, stale) keeps the cooldown untouched.
+#
+# The fix-live time is the first Cloud Run deploy of the signature's service
+# after the ticket closed, read from the local change-ingest feed (the same
+# CHANGE_FEED_URL the dispatcher uses). Without a feed answer it is assumed to
+# be the closure plus FIX_DEPLOY_GRACE_MINUTES.
+FIX_DEPLOY_GRACE_MINUTES = int(os.environ.get("FIX_DEPLOY_GRACE_MINUTES", "30"))
+CHANGE_FEED_URL = os.environ.get("CHANGE_FEED_URL", "http://127.0.0.1:4200").rstrip("/")
+_GITHUB_PR_URL_RE = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/\d+/?$")
+_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
 LINEAR_API_URL = "https://api.linear.app/graphql"
 
 # Linear priority → triage severity (monitor sets priority 1→P0, 2→P1, 3→P2).
@@ -730,6 +745,166 @@ def _iso_or_min(value):
         return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
 
 
+def _parse_ts(value):
+    """Parse an ISO-8601 timestamp into an aware UTC datetime, or None.
+
+    The VM runs Python 3.10, whose fromisoformat() rejects a trailing "Z" and
+    any fraction that is not exactly 3 or 6 digits, while Cloud Logging stamps
+    entries with nanoseconds. Normalize the fraction to 6 digits first.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    text = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), text, count=1)
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+def _iso_z(dt):
+    return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def merged_pr_url(attachments):
+    """URL of the merged GitHub pull request linked to a Linear issue, or None.
+
+    Linear's GitHub integration attaches linked PRs as Attachment rows whose
+    `url` is the PR and whose `metadata` carries `status` ("merged") and
+    `mergedAt` (verified live on JOB-1109, JOB-1131, JOB-1138, 2026-10-01). An
+    open or closed-unmerged PR fixed nothing, so it does not count. With several
+    merged PRs the most recently merged one is reported.
+    """
+    best, best_at = None, None
+    nodes = attachments.get("nodes") if isinstance(attachments, dict) else None
+    for node in nodes if isinstance(nodes, list) else []:
+        if not isinstance(node, dict):
+            continue
+        url = str(node.get("url") or "").strip()
+        meta = node.get("metadata")
+        if not _GITHUB_PR_URL_RE.match(url) or not isinstance(meta, dict):
+            continue
+        if meta.get("status") != "merged" and not meta.get("mergedAt"):
+            continue
+        merged_at = _parse_ts(meta.get("mergedAt")) or _EPOCH
+        if best is None or merged_at > best_at:
+            best, best_at = url, merged_at
+    return best
+
+
+def deploy_service(signature):
+    """The Cloud Run service a signature belongs to: its first segment, except
+    Sentry (`sentry:<service>:...`) where the service is the second."""
+    parts = str(signature).split(":")
+    if parts[0] == "sentry" and len(parts) > 1:
+        return parts[1]
+    return parts[0]
+
+
+def fix_live_time(signature, region, closed_at, now_dt):
+    """When the fix for a closed ticket went live: (datetime, source).
+
+    The first `run_deploy` row of the signature's service at or after the
+    closure, from change-ingest `GET /changes` (rows: `kind`, `ts` epoch ms,
+    `entities` [{type, id}], region as a `region` entity when the audit entry
+    named one). A deploy in the signature's own region is preferred, then one
+    with no region recorded, then any. If the feed is unreachable, unhealthy
+    (503) or holds no such deploy, the closure plus FIX_DEPLOY_GRACE_MINUTES is
+    used instead, and the source says so.
+    """
+    service = deploy_service(signature)
+    grace = (closed_at + datetime.timedelta(minutes=FIX_DEPLOY_GRACE_MINUTES),
+             f"grace:completedAt+{FIX_DEPLOY_GRACE_MINUTES}m")
+    since_ms = int((closed_at - _EPOCH).total_seconds() * 1000)
+    until_ms = int((now_dt - _EPOCH).total_seconds() * 1000)
+    query = urllib.parse.urlencode([
+        ("since", since_ms), ("until", until_ms), ("kind", "run_deploy"),
+        ("entity", f"service:{service}"), ("limit", 200),
+    ])
+    try:
+        with urllib.request.urlopen(f"{CHANGE_FEED_URL}/changes?{query}", timeout=5) as resp:
+            rows = json.loads(resp.read().decode())
+    except Exception as e:  # noqa: BLE001 — the grace fallback covers any feed failure
+        log(f"fix-check: change feed unavailable for {signature} ({str(e)[:120]}) "
+            f"— using {grace[1]}")
+        return grace
+    deploys = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or row.get("kind") != "run_deploy":
+            continue
+        ts = row.get("ts")
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or ts < since_ms:
+            continue
+        entities = [e for e in row.get("entities") or [] if isinstance(e, dict)]
+        if not any(e.get("type") == "service" and e.get("id") == service for e in entities):
+            continue
+        regions = {e.get("id") for e in entities if e.get("type") == "region"}
+        deploys.append((ts, regions))
+    if not deploys:
+        log(f"fix-check: no {service} deploy in the change feed since the closure "
+            f"for {signature} — using {grace[1]}")
+        return grace
+    deploys.sort(key=lambda d: d[0])
+    regional = [d for d in deploys if region and region in d[1]]
+    if regional:
+        ts, source = regional[0][0], f"change-feed:run_deploy:{service}:{region}"
+    else:
+        unregioned = [d for d in deploys if not d[1]]
+        ts = (unregioned or deploys)[0][0]
+        source = f"change-feed:run_deploy:{service}"
+    live = _EPOCH + datetime.timedelta(milliseconds=ts)
+    log(f"fix-check: {signature} fix live at {_iso_z(live)} ({source})")
+    return live, source
+
+
+def recurred_after_fix(group, cooldown, closed_at, now_dt):
+    """The cooldown override for a fix that did not hold, or None.
+
+    Applies only to a Done ticket with a merged PR whose signature was last
+    seen after the fix went live. Recurrence before the deploy is expected (the
+    old revision is still serving) and keeps the cooldown. Any error returns
+    None, which keeps today's behavior: the cooldown applies.
+    """
+    try:
+        pr = cooldown.get("fixed_by_pr")
+        if cooldown.get("state_type") != "completed" or not pr:
+            return None
+        last_seen = _parse_ts(group.get("last_seen"))
+        if last_seen is None:
+            return None
+        live_at, source = fix_live_time(group.get("signature", ""), group.get("region"),
+                                        closed_at, now_dt)
+        if last_seen <= live_at:
+            log(f"fix-check: {group.get('signature')} last seen {_iso_z(last_seen)}, "
+                f"before the fix went live {_iso_z(live_at)} — cooldown kept")
+            return None
+        return {
+            "prior_issue": cooldown.get("issue", ""),
+            "reason": "recurred-after-fix",
+            "fixed_by_pr": pr,
+            "fix_live_at": _iso_z(live_at),
+            "fix_live_source": source,
+        }
+    except Exception as e:  # noqa: BLE001 — fail open: the cooldown still applies
+        log(f"fix-check: error for {group.get('signature')} (cooldown kept): {str(e)[:200]}")
+        return None
+
+
+def fix_did_not_hold_text(override, last_seen):
+    """The sentence the re-filed ticket must carry (title + Problem section)."""
+    when = (f"deployed {override['fix_live_at']}"
+            if override["fix_live_source"].startswith("change-feed")
+            else f"assumed live {override['fix_live_at']} (no deploy found in the change "
+                 f"feed; ticket completion + {FIX_DEPLOY_GRACE_MINUTES}m)")
+    return (f"fix did not hold: {override['prior_issue']} ({override['fixed_by_pr']}) "
+            f"{when}, signature seen again at {last_seen}")
+
+
 def collect_closed_signature_cooldowns():
     """Query Linear for recently-closed [Monitor] tickets and extract their signatures.
 
@@ -753,7 +928,11 @@ def collect_closed_signature_cooldowns():
         log("cooldown: linear-api-key unavailable — skipping cooldown gate (fail open)")
         return {}
 
-    # Look back far enough to cover both cooldown windows.
+    # Look back far enough to cover both cooldown windows. This also bounds the
+    # fix-did-not-hold check: a fixed ticket is only seen here for 13h, and the
+    # override only matters inside the 6h Done cooldown anyway. That is enough
+    # because the monitor runs hourly and a merged fix deploys within ~15 min.
+    # Do not widen it for the fix check.
     lookback_hours = max(COOLDOWN_HOURS_CANCELED, COOLDOWN_HOURS_DONE) + 1
     since = (datetime.datetime.now(datetime.timezone.utc)
              - datetime.timedelta(hours=lookback_hours)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -786,6 +965,7 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
       completedAt
       canceledAt
       description
+      attachments(first: 20) { nodes { url metadata } }
     }
   }
 }
@@ -867,6 +1047,9 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
             # if current severity is strictly worse, the cooldown is bypassed.
             "prior_severity": _LINEAR_PRIORITY_TO_SEV.get(
                 node.get("priority", 0), "P3"),
+            # A merged GitHub PR linked to the ticket: it was closed by a fix,
+            # so a recurrence after that fix deployed must not stay silent.
+            "fixed_by_pr": merged_pr_url(node.get("attachments")),
         }
     log(f"cooldown: {len(nodes)} recently-closed [Monitor] tickets, "
         f"{len(cooldowns)} distinct signatures")
@@ -903,6 +1086,9 @@ def build_escalations(final_groups, cooldowns=None):
         # prior Linear ticket was recently closed (Canceled within
         # COOLDOWN_HOURS_CANCELED, Done within COOLDOWN_HOURS_DONE), suppress
         # re-filing so the dispatcher's adjudication isn't reversed an hour later.
+        # Exception: a Done ticket fixed by a merged PR whose signature is seen
+        # again after that fix deployed — the fix did not hold, so re-file.
+        refile_after_fix = False
         if sev != "P0":
             cd = cooldowns.get(g.get("signature", ""))
             if cd:
@@ -921,12 +1107,31 @@ def build_escalations(final_groups, cooldowns=None):
                         # etc.), the cooldown is bypassed — a genuine escalation
                         # must never be silenced.
                         prior_sev = cd.get("prior_severity", "P3")
-                        if _SEV_RANK.get(sev, 0) > _SEV_RANK.get(prior_sev, 0):
+                        fix_override = recurred_after_fix(g, cd, closed_at, now_dt)
+                        if fix_override:
+                            text = fix_did_not_hold_text(fix_override, g.get("last_seen"))
+                            log(f"cooldown: OVERRIDE for {g['signature']} — {text} "
+                                f"(source {fix_override['fix_live_source']})")
+                            item["cooldown_override"] = {
+                                **fix_override,
+                                "prior_severity": prior_sev,
+                                "current_severity": sev,
+                            }
+                            item["fix_did_not_hold"] = text
+                            # Keep the [Monitor] prefix: the cooldown query
+                            # selects tickets by it.
+                            item["suggested_title"] = (
+                                f"{item['suggested_title']} — fix did not hold "
+                                f"({fix_override['prior_issue']})")
+                            refile_after_fix = True
+                            # Fall through to normal escalation path.
+                        elif _SEV_RANK.get(sev, 0) > _SEV_RANK.get(prior_sev, 0):
                             log(f"cooldown: OVERRIDE for {g['signature']} — "
                                 f"severity escalated {prior_sev}→{sev} "
                                 f"(prior {cd['issue']} {state_type} {age_h:.1f}h ago)")
                             item["cooldown_override"] = {
                                 "prior_issue": cd["issue"],
+                                "reason": "severity-escalated",
                                 "prior_severity": prior_sev,
                                 "current_severity": sev,
                             }
@@ -975,6 +1180,13 @@ def build_escalations(final_groups, cooldowns=None):
             item["action"] = "linear_create_if_no_dup"
         elif sev == "P1" and status == "recurring":
             item["action"] = "linear_ensure_open_issue"
+        elif refile_after_fix and sev in ("P1", "P2"):
+            # A recurrence right after the deploy is usually still in the
+            # previous report (pre-fix events share the 2h window), so its
+            # diff_status is `recurring`/`improved`, which would otherwise be
+            # report_only. The prior ticket is Done, so this files a new one.
+            # P3 stays report_only, as for any other P3 signal.
+            item["action"] = "linear_create_if_no_dup"
         elif sev == "P2" and status == "new":
             item["action"] = "linear_create_if_no_dup"
         elif sev == "P2" and g.get("billing_floor") and not g.get("linear_issue"):

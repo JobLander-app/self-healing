@@ -41,8 +41,12 @@ export function regionFromZone(zone: string): string {
 function auditKind(methodName: string): string {
   if (methodName.endsWith("compute.instances.delete")) return "instance_delete";
   if (methodName.endsWith("compute.instances.insert")) return "instance_create";
-  if (methodName.includes("run.v2.Services") || methodName.includes("run.v1.Services")) return "run_deploy";
+  // IAM before Cloud Run: `google.cloud.run.v1.Services.SetIamPolicy` is an IAM
+  // change, not a deploy. Classified as run_deploy it looked like a second,
+  // later deploy of the service right after every real one (the monitor's
+  // fix-live check reads the first run_deploy after a fix).
   if (methodName.toLowerCase().includes("setiampolicy") || methodName.includes("iam.admin")) return "iam_change";
+  if (methodName.includes("run.v2.Services") || methodName.includes("run.v1.Services")) return "run_deploy";
   return "audit_event";
 }
 
@@ -92,6 +96,19 @@ export function gcpAuditExtract({ entry }: { entry: GcpAuditLogEntry }): Extract
   const ts = entry.timestamp ? Date.parse(entry.timestamp) : Number.NaN;
 
   const entities = entitiesFromResourceName(resourceName);
+  // The v1 `namespaces/<project>/services/<name>` shape carries no region, but
+  // the audit entry's resource labels do (`location`, verified on prod
+  // ReplaceService rows 2026-10-01). Without it a deploy cannot be matched to
+  // the region it went live in.
+  const location = entry.resource?.labels?.location?.trim();
+  if (
+    location &&
+    location !== "global" &&
+    entities.some((e) => e.type === "service") &&
+    !entities.some((e) => e.type === "region")
+  ) {
+    entities.push({ type: "region", id: location });
+  }
 
   return {
     event: {

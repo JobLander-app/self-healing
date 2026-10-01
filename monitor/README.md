@@ -25,6 +25,17 @@ Deploy activation also waits for that lock. Do not add a second cron.
    revision and trace evidence. Request signatures distinguish statuses and routes
    but stay stable across revisions; URL credentials, query and fragment are omitted.
    Real HTTP 5xx events still count toward the existing escalation thresholds.
+   A recently closed [Monitor] ticket puts its signature in cooldown (Done 6h,
+   Canceled 12h). The dispatcher ends its run at the merge, so this is also where
+   a failed fix is noticed: when the Done ticket has a merged GitHub PR attached in
+   Linear and the signature's `last_seen` is after the fix went live, the cooldown
+   is bypassed (`cooldown_override.reason = "recurred-after-fix"`) and a P1/P2 is
+   re-filed with "fix did not hold" in its title and first line. Fix-live time is
+   the first `run_deploy` of the signature's service (Sentry: `joblander-app`)
+   after the closure in the change-ingest feed (`CHANGE_FEED_URL`), preferring the
+   signature's region; without one it is completion + `FIX_DEPLOY_GRACE_MINUTES`
+   (30). Done without a merged PR, Canceled, and recurrence before the deploy keep
+   the cooldown; any lookup failure keeps it too.
 2. Persist prepared P0 pages to `p0-outbox.json`, deliver verbatim through Telegram,
    and remove only acknowledged deliveries. Failed deliveries retry next launch,
    even if the next collection fails. A crash after delivery can repeat a page;
