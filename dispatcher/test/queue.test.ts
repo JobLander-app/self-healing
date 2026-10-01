@@ -54,6 +54,8 @@ test("a Done ticket that still carries a stale agent-claimed label is selected f
   assert.equal(selected.reclaim, false);
   assert.match(candidateInstruction(selected), /post-deploy check is pending/);
   assert.match(candidateInstruction(selected), /ONLY the post-deploy check/);
+  // A not-yet-live exit must restore Done + label so the next pick is again verify mode.
+  assert.match(candidateInstruction(selected), /not live yet → comment, set the state back to Done and KEEP agent-claimed/);
   // Not yet stale: the run that set it may still be closing it.
   assert.equal(isQueueCandidate({ ...done, updatedAt: "2026-09-09T12:05:00Z" }, CUTOFF), false);
   // Without the label a Done ticket is terminal; Canceled never qualifies.

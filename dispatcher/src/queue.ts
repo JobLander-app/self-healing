@@ -148,8 +148,10 @@ export function candidateInstruction(candidate?: SelectedCandidate, dryRun = fal
     (candidate.verify
       ? `This ticket is ${VERIFY_STATE} but still carries "${AGENT_CLAIMED_LABEL}": a merged fix whose post-deploy check is pending ` +
         "(constitution Step 4a.11b), or a run that merged and was killed before closing. Find the merged PR, then do ONLY the " +
-        "post-deploy check: fix live and signal clear → evidence comment, Done, remove agent-claimed; not live yet → comment " +
-        "and keep the label; live and still failing → the fix did not hold, continue as a new fix. "
+        `post-deploy check: fix live and signal clear → evidence comment, ${VERIFY_STATE}, remove agent-claimed; ` +
+        `not live yet → comment, set the state back to ${VERIFY_STATE} and KEEP agent-claimed (that pair is what brings the ` +
+        "ticket back in verification mode; never leave it In Progress, or the next run treats it as unfinished work and may " +
+        "fix it again); live and still failing → the fix did not hold, continue as a new fix. "
       : "") +
     "A human-held In Progress ticket without that label is protected.";
 }
