@@ -31,9 +31,11 @@ Deploy activation also waits for that lock. Do not add a second cron.
    Linear and the signature's `last_seen` is after the fix went live, the cooldown
    is bypassed (`cooldown_override.reason = "recurred-after-fix"`) and a P1/P2 is
    re-filed with "fix did not hold" in its title and first line. For a Cloud Run
-   log signal the evidence is the revision that logged the latest error: it must
-   have first logged after the merge (an older revision is still the old code,
-   e.g. while a `--no-traffic` deploy waits for its traffic switch). For Sentry,
+   log signal from one real region the evidence is the revision that logged the
+   latest error: its sequence number (`svc-00285-xyz`) must be higher than every
+   revision seen running in that region in the 48h before the merge (an older
+   one is still the old code, e.g. while a `--no-traffic` deploy waits for its
+   traffic switch, or after a rollback); its first error then counts. For Sentry,
    which has no revision, the fix-live time is
    the first `run_deploy` of the signature's service (Sentry: `joblander-app`)
    since the PR's `mergedAt` (the dispatcher merges before it closes the ticket),

@@ -908,38 +908,56 @@ def fix_live_time(service, signature, region, closed_at, now_dt):
 REVISION_LOOKBACK_HOURS = 48
 
 
-def revision_started_at(service, region, revision, merged_at, now_dt):
-    """First log time of a Cloud Run revision, looking back from before the merge.
+_REVISION_SEQ_RE = re.compile(r"-(\d{5})-[a-z0-9]+$")
 
-    Reads the revision's oldest log entry from REVISION_LOOKBACK_HOURS before
-    the merge. A timestamp before the merge means the revision was already
-    running pre-merge: it carries the OLD code. None on any failure (the
-    caller keeps the cooldown).
 
-    This, not the deploy feed, is the evidence for Cloud Run log signals: an
-    error logged BY a revision proves that revision served it. A backend build
-    first deploys with --no-traffic and switches traffic minutes later, so "the
-    first deploy after the merge" is not when the new code started serving.
+def revision_seq(name):
+    """Cloud Run's per-service revision sequence number (`svc-00285-nl6` → 285),
+    or None. Cloud Run numbers a service's revisions in creation order."""
+    m = _REVISION_SEQ_RE.search(str(name or ""))
+    return int(m.group(1)) if m else None
+
+
+def pre_merge_revision(service, region, merged_at, now_dt):
+    """The newest revision (highest sequence) seen running before the merge, or None.
+
+    Reads the REVISION_LOOKBACK_HOURS before the merge in this service+region:
+    the revisions named in Cloud Run system logs (instance starts) plus the
+    newest log entry of any kind. The highest sequence among them is the old
+    code's frontier; a rollback that brought an older revision back does not
+    lower it. None (no entry, unreadable output) means the pre-merge state is
+    unknown and the caller keeps the cooldown.
+
+    Revision identity, not the deploy feed, is the evidence for Cloud Run log
+    signals: an error logged BY a revision proves that revision served it. A
+    backend build first deploys with --no-traffic and switches traffic minutes
+    later, so "the first deploy after the merge" is not when the new code
+    started serving. Comparing creation order (the sequence number) instead of
+    a revision's first log time also covers a low-traffic revision that
+    scaled to zero and logged nothing in the window.
     """
     floor = merged_at - datetime.timedelta(hours=REVISION_LOOKBACK_HOURS)
     hours = int((now_dt - floor).total_seconds() // 3600) + 1
-    out = run_cmd([
-        "gcloud", "logging", "read",
-        ('resource.type="cloud_run_revision" '
-         f'AND resource.labels.service_name="{service}" '
-         f'AND resource.labels.location="{region}" '
-         f'AND resource.labels.revision_name="{revision}" '
-         f'AND timestamp>="{_iso_z(floor)}"'),
-        f"--project={PROJECT}", "--limit=1", "--order=asc",
-        f"--freshness={hours}h", "--format=json",
-    ], optional=True)
-    try:
-        entries = json.loads(out) if out else []
-    except json.JSONDecodeError:
-        return None
-    if not entries:
-        return None
-    return _parse_ts(entries[0].get("timestamp"))
+    base = ('resource.type="cloud_run_revision" '
+            f'AND resource.labels.service_name="{service}" '
+            f'AND resource.labels.location="{region}" '
+            f'AND timestamp>="{_iso_z(floor)}" AND timestamp<"{_iso_z(merged_at)}"')
+    names = set()
+    for extra, limit in ((' AND logName:"varlog%2Fsystem"', 1000), ("", 1)):
+        out = run_cmd([
+            "gcloud", "logging", "read", base + extra,
+            f"--project={PROJECT}", f"--limit={limit}", "--order=desc",
+            f"--freshness={hours}h", "--format=json",
+        ], optional=True)
+        try:
+            entries = json.loads(out) if out else []
+        except json.JSONDecodeError:
+            return None
+        for e in entries if isinstance(entries, list) else []:
+            name = ((e.get("resource") or {}).get("labels") or {}).get("revision_name")
+            if revision_seq(name) is not None:
+                names.add(name)
+    return max(names, key=revision_seq) if names else None
 
 
 def recurred_after_fix(group, cooldown, closed_at, now_dt):
@@ -977,15 +995,19 @@ def recurred_after_fix(group, cooldown, closed_at, now_dt):
             if not revision:
                 log(f"fix-check: {signature} has no revision on its latest event — cooldown kept")
                 return None
-            started = revision_started_at(service, group.get("region"), revision, since, now_dt)
-            if started is None:
-                log(f"fix-check: could not date revision {revision} for {signature} — cooldown kept")
+            pre = pre_merge_revision(service, region, since, now_dt)
+            seq, pre_seq = revision_seq(revision), revision_seq(pre)
+            if seq is None or pre_seq is None:
+                log(f"fix-check: cannot order revision {revision} against the pre-merge "
+                    f"revision ({pre}) for {signature} — cooldown kept")
                 return None
-            if started <= since:
-                log(f"fix-check: {signature} last seen on {revision}, running since "
-                    f"{_iso_z(started)}, before the merge — old code, cooldown kept")
+            if seq <= pre_seq:
+                log(f"fix-check: {signature} last seen on {revision}, not newer than "
+                    f"{pre} which served before the merge — old code, cooldown kept")
                 return None
-            live_at, source = started, f"revision:{revision}"
+            # The erroring revision was created after the one serving at the
+            # merge, so the merge is the live bound: its first error counts.
+            live_at, source = since, f"revision:{revision}>{pre}"
         else:
             live = fix_live_time(service, signature, group.get("region"), since, now_dt)
             if live is None:
@@ -1012,8 +1034,9 @@ def fix_did_not_hold_text(override, last_seen):
     source = override.get("fix_live_source", "")
     head = f"fix did not hold: {override['prior_issue']} ({override['fixed_by_pr']})"
     if source.startswith("revision:"):
-        return (f"{head} merged, signature seen again at {last_seen} on revision "
-                f"{source.split(':', 1)[1]}, which started {override['fix_live_at']}, after the merge")
+        new_rev, _, old_rev = source.split(":", 1)[1].partition(">")
+        return (f"{head} merged {override['fix_live_at']}, signature seen again at {last_seen} "
+                f"on revision {new_rev}, newer than {old_rev} which served before the merge")
     return f"{head} deployed {override['fix_live_at']}, signature seen again at {last_seen}"
 
 
