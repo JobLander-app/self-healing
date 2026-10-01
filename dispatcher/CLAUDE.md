@@ -160,7 +160,10 @@ label is the ONLY thing that distinguishes them.
 **Release the label at the end.** When you reach a terminal outcome (`fixed`,
 `not-a-bug`, `stale`, `fixed-elsewhere`, `intentional`) or hand the ticket back
 (`backlogged`), remove `agent-claimed` in the same `update_issue` that sets the
-final state — again by passing the remaining label ids, minus this one.
+final state — again by passing the remaining label ids, minus this one. The one
+exception is a merged fix whose post-deploy check is still pending (Step 4a.11b):
+there the label stays on purpose, so the stale-claim reclaim brings the ticket
+back for verification.
 
 Neither case breaks pickup if you forget: terminal states are excluded by the
 state filter, and `Backlog` is selected without consulting this label. What a
@@ -413,8 +416,9 @@ Reach **exactly one** of two terminal outcomes:
    - **You do not wait for a deploy.** Never poll Cloud Run (or any other
      target) for a new revision inside the run, and never try to judge whether
      the signature went silent after your merge. Post-deploy verification
-     belongs to the monitor: it re-files the signature if it recurs after the
-     fix's deploy, naming the prior ticket.
+     happens after the run: for monitor-covered signatures the monitor re-files
+     the signature if it recurs after the fix's deploy, naming the prior ticket;
+     for every other origin a later reclaim run verifies it (Step 11b).
 
      *The causality rule exists because of JOB-838/843 (2026-07-27). PR #120
      was auto-merged at 11:13 on a root-cause hypothesis that was simply wrong.
@@ -468,10 +472,16 @@ Reach **exactly one** of two terminal outcomes:
    (`self-healing-deploy.timer`), so a bad change to the deployer is the one
    failure that also removes your ability to ship the fix for it. Open the PR,
    post your evidence, leave it for the owner, and report `backlogged`.
-11. **Close the ticket in the same run, right after `gh pr merge` succeeds.**
-    The run ends at the merge, so do this immediately, in this order:
-    0. Confirm `gh pr view <N> --json state,mergedAt` shows `MERGED`. A merge
-       queue only enqueues the PR; until it is merged, do not close anything.
+11. **Hand the ticket off in the same run, right after `gh pr merge` succeeds.**
+    The run ends at the merge. First confirm `gh pr view <N> --json
+    state,mergedAt` shows `MERGED` (a merge queue only enqueues the PR; until
+    it is merged, do not touch the ticket). Then the path depends on who will
+    verify the fix after the deploy:
+
+    **11a. Monitor-covered signatures** — a Cloud Run log signature
+    `<service>:<region>:<slug>` (the prefix is the Cloud Run service) or a
+    Sentry signature `sentry:<service>:…`. The monitor re-files these if they
+    recur after the deploy. In this order:
     1. `create_comment` with the PR URL, the root cause, what you verified
        before the merge, the Codex review verdict, and the line
        "Post-deploy verification: the monitor re-files this signature if it
@@ -480,6 +490,30 @@ Reach **exactly one** of two terminal outcomes:
        remaining label ids).
     3. Emit `[DISPATCH_RESULT]` with outcome `fixed` and the PR URL, and end
        the run.
+
+    **11b. Every other origin** — the watcher's `/health/output` incident
+    (`[output-watch]`; the watcher pages once and does not file again while
+    the detector stays dead), `voice-agent:`, `cloud-function:`,
+    `duplicate-worker:`, `monitor-topology:` signals, and `[SelfHeal]`
+    healthcheck tickets. Nothing outside the run re-checks these, so the
+    ticket must not be left Done on a merge alone. In this order:
+    1. `create_comment` with the same content as 11a, but the line
+       "Post-deploy verification pending: a reclaim run verifies this after
+       the deploy".
+    2. `update_issue` → **`In Progress`**, keeping `agent-claimed` (the GitHub
+       integration moves the ticket to Done on merge; this undoes it).
+    3. Emit `[DISPATCH_RESULT]` with outcome `fixed`, the PR URL, and a note
+       saying verification is pending; end the run.
+
+    After the stale-claim window the ticket is reclaimed. That run finds the
+    merged PR and the "verification pending" comment (Time budget: look for
+    earlier work first) and does ONLY the post-deploy check: the fix's
+    revision or deploy is live, and the signal is clear after it (watcher:
+    `/health/output` healthy / RECOVERED sent; other signals: the signature
+    absent since the new revision). Clear → comment the evidence, **Done**,
+    remove `agent-claimed`, outcome `fixed`. Not live yet → comment and end
+    again, leaving the claim. Live but still failing → the fix did not hold:
+    continue as a new fix in this run.
 
 ### (b) Not a real bug → prove it, resolve, suppress recurrence
 
@@ -628,7 +662,8 @@ Always finish with exactly one line:
 ```
 [DISPATCH_RESULT] {"outcome":"fixed|not-a-bug|stale|fixed-elsewhere|intentional|backlogged|no-work","issue":"JOB-XXX or null","repo":"<repo or null>","pr":"<PR url or null>","note":"one-sentence summary"}
 ```
-Outcomes: `fixed` (real bug fixed + merged → Done) · `not-a-bug` (proven
+Outcomes: `fixed` (real bug fixed + merged → Done; or → In Progress with
+post-deploy verification pending, Step 4a.11b) · `not-a-bug` (proven
 noise/client-side → Done/Canceled) · `stale` (no longer reproducible in the
 fresh window → Canceled, see Step 3.5) · `fixed-elsewhere` (was real but already
 resolved by a later commit/deploy → Done, cite it) · `intentional` (the anomaly
