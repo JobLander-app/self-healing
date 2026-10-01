@@ -174,7 +174,7 @@ affects the loop.
 |---|---|---|
 | P0 page | `URGENT P0 [output-watch]: /health/output = … Regions: … <url>` | watcher, on 3 consecutive bad samples |
 | Ticket created | `🎫 {IDENTIFIER} created — self-healing engaged` | watcher, right after a successful Linear create |
-| Acted upon / in prod | `🚀 in prod: {ticket} FIXED — {PR} merged, deploy pipeline running. … ${cost}, {n}s` · `✅ {ticket}: investigated — not a bug. … ${cost}` · `⚠️ {ticket}: {outcome}. …` (DRY_RUN prefixed `[DRY_RUN] `) | dispatcher, at the end of a run that picked a ticket (`no-work` stays silent) |
+| Acted upon / merged | `🚀 merged: {ticket} FIXED — {PR} merged, deploy pending. … ${cost}, {n}s` · `✅ {ticket}: investigated — not a bug. … ${cost}` · `⚠️ {ticket}: {outcome}. …` (DRY_RUN prefixed `[DRY_RUN] `) | dispatcher, at the end of a run that picked a ticket (`no-work` stays silent) |
 | Recovered | `RECOVERED: /health/output = … Product output flowing again.` | watcher, when the detector clears after a page |
 | Self-heal | `⚠️ self-heal: dependency <dep> DOWN — …. Filing repair ticket.` | dispatcher healthcheck, on a dep failure |
 
