@@ -24,6 +24,8 @@ export interface GcpAuditLogEntry {
     methodName?: string;
     resourceName?: string;
     authenticationInfo?: { principalEmail?: string };
+    /** google.rpc.Status of the call; absent or code 0 means it succeeded. */
+    status?: { code?: number; message?: string };
   };
   resource?: {
     labels?: Record<string, string>;
@@ -37,8 +39,8 @@ export function regionFromZone(zone: string): string {
   return m ? m[1] : zone;
 }
 
-/** Map an audit methodName to a fine-grained `kind`. */
-function auditKind(methodName: string): string {
+/** Map an audit methodName (and the call's status) to a fine-grained `kind`. */
+function auditKind(methodName: string, statusCode: number): string {
   if (methodName.endsWith("compute.instances.delete")) return "instance_delete";
   if (methodName.endsWith("compute.instances.insert")) return "instance_create";
   // IAM before Cloud Run: `google.cloud.run.v1.Services.SetIamPolicy` is an IAM
@@ -46,7 +48,15 @@ function auditKind(methodName: string): string {
   // later deploy of the service right after every real one (the monitor's
   // fix-live check reads the first run_deploy after a fix).
   if (methodName.toLowerCase().includes("setiampolicy") || methodName.includes("iam.admin")) return "iam_change";
-  if (methodName.includes("run.v2.Services") || methodName.includes("run.v1.Services")) return "run_deploy";
+  if (methodName.includes("run.v2.Services") || methodName.includes("run.v1.Services")) {
+    // Only a SUCCESSFUL create/update/replace puts a new revision out; the
+    // monitor reads the first run_deploy after a fix as "the fix went live", so a
+    // failed call or a delete must not look like one.
+    if (statusCode !== 0) return "run_deploy_failed";
+    if (/\.(CreateService|UpdateService|ReplaceService)$/.test(methodName)) return "run_deploy";
+    if (methodName.endsWith(".DeleteService")) return "run_delete";
+    return "audit_event";
+  }
   return "audit_event";
 }
 
@@ -114,7 +124,7 @@ export function gcpAuditExtract({ entry }: { entry: GcpAuditLogEntry }): Extract
     event: {
       id: `audit:${insertId}`,
       source: "gcp_audit",
-      kind: auditKind(methodName),
+      kind: auditKind(methodName, proto.status?.code ?? 0),
       ts: Number.isNaN(ts) ? 0 : ts,
       actor: proto.authenticationInfo?.principalEmail ?? null,
       title: `${methodName} ${resourceName}`.trim(),

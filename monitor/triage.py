@@ -76,6 +76,7 @@ COOLDOWN_HOURS_DONE = int(os.environ.get("COOLDOWN_HOURS_DONE", "6"))
 # revision (deploy delayed, failed, never started), so "fix did not hold" would
 # be an unproven claim and the cooldown is kept.
 CHANGE_FEED_URL = os.environ.get("CHANGE_FEED_URL", "http://127.0.0.1:4200").rstrip("/")
+_GCP_REGION_RE = re.compile(r"^[a-z]+(?:-[a-z]+)+\d+$")
 _GITHUB_PR_URL_RE = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/\d+/?$")
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
@@ -824,10 +825,15 @@ def fix_live_time(service, signature, region, closed_at, now_dt):
     The first `run_deploy` row of the signature's service at or after the
     closure, from change-ingest `GET /changes` (rows: `kind`, `ts` epoch ms,
     `entities` [{type, id}], region as a `region` entity when the audit entry
-    named one). A deploy in the signature's own region is preferred, then one
-    with no region recorded, then any. If the feed is unreachable, unhealthy
-    (503) or holds no such deploy, there is no evidence the fix is live:
-    returns None and the caller keeps the cooldown.
+    named one). Services roll out region by region, so for a signature in a
+    real GCP region only a deploy recorded in THAT region counts: another region
+    going live, or a row with no region, says nothing about the one that
+    errored. A synthetic region (Sentry's "frontend") cannot be pinned to one
+    deployment, so the fix counts as live only once every region seen deploying
+    after the closure has done so: the latest of those first deploys. If the
+    feed is unreachable, unhealthy (503) or holds no qualifying deploy, there
+    is no evidence the fix is live: returns None and the caller keeps the
+    cooldown.
     """
     since_ms = int((closed_at - _EPOCH).total_seconds() * 1000)
     until_ms = int((now_dt - _EPOCH).total_seconds() * 1000)
@@ -859,13 +865,21 @@ def fix_live_time(service, signature, region, closed_at, now_dt):
             f"for {signature} — fix not confirmed live, cooldown kept")
         return None
     deploys.sort(key=lambda d: d[0])
-    regional = [d for d in deploys if region and region in d[1]]
-    if regional:
-        ts, source = regional[0][0], f"change-feed:run_deploy:{service}:{region}"
+    if region and _GCP_REGION_RE.match(region):
+        matching = [d for d in deploys if region in d[1]]
+        if not matching:
+            log(f"fix-check: no {service} deploy recorded in {region} since the closure for "
+                f"{signature} — that region may still serve the old revision, cooldown kept")
+            return None
+        ts = matching[0][0]
+        source = f"change-feed:run_deploy:{service}:{region}"
     else:
-        unregioned = [d for d in deploys if not d[1]]
-        ts = (unregioned or deploys)[0][0]
-        source = f"change-feed:run_deploy:{service}"
+        first_per_region = {}
+        for d_ts, d_regions in deploys:
+            for r in d_regions or {""}:
+                first_per_region.setdefault(r, d_ts)
+        ts = max(first_per_region.values())
+        source = f"change-feed:run_deploy:{service}:all-regions"
     live = _EPOCH + datetime.timedelta(milliseconds=ts)
     log(f"fix-check: {signature} fix live at {_iso_z(live)} ({source})")
     return live, source

@@ -290,6 +290,31 @@ test("gcpAuditExtract: Cloud Run SetIamPolicy is an IAM change, not a deploy", (
   ]);
 });
 
+test("gcpAuditExtract: a failed Cloud Run update is not a deploy", () => {
+  // A non-zero google.rpc.Status means no new revision went out; the monitor
+  // reads the first run_deploy after a fix as "the fix went live".
+  const entry: GcpAuditLogEntry = {
+    insertId: "run-failed",
+    timestamp: "2026-10-01T14:08:46Z",
+    protoPayload: {
+      methodName: "google.cloud.run.v1.Services.ReplaceService",
+      resourceName: "namespaces/meet-assistant-6d8ad/services/joblander-audio-engine",
+      status: { code: 3, message: "Revision template is invalid" },
+    },
+    resource: { labels: { location: "asia-south1" } },
+  };
+  assert.equal(gcpAuditExtract({ entry }).event.kind, "run_deploy_failed");
+});
+
+test("gcpAuditExtract: only create/update/replace count as a deploy", () => {
+  const kind = (methodName: string) => gcpAuditExtract({ entry: { insertId: methodName, timestamp: "2026-10-01T14:00:00Z",
+    protoPayload: { methodName, resourceName: "projects/p/locations/europe-west1/services/joblander-app" } } }).event.kind;
+  assert.equal(kind("google.cloud.run.v2.Services.CreateService"), "run_deploy");
+  assert.equal(kind("google.cloud.run.v1.Services.ReplaceService"), "run_deploy");
+  assert.equal(kind("google.cloud.run.v2.Services.DeleteService"), "run_delete");
+  assert.equal(kind("google.cloud.run.v1.Services.SetIamPolicy"), "iam_change");
+});
+
 test("gcpAuditExtract: resource-scoped setIamPolicy → iam_change (lowercase method)", () => {
   const entry: GcpAuditLogEntry = {
     insertId: "iam-1",

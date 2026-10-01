@@ -31,7 +31,7 @@ export interface ChangeEvent {
   /** source-prefixed, stable, idempotent PK: `gh:owner/repo#12`, `audit:<insertId>`, `linear:JOB-710`. */
   id: string;
   source: string;
-  /** fine-grained: pr_merged | instance_delete | run_deploy | iam_change | issue_status … */
+  /** fine-grained: pr_merged | instance_delete | run_deploy (successful create/update/replace) | run_deploy_failed | run_delete | iam_change | issue_status … */
   kind: string;
   /** epoch ms, EFFECTIVE time in prod — the axis correlation ranges over. */
   ts: number;

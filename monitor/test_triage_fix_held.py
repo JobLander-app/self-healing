@@ -46,7 +46,7 @@ def _cooldown(sig=SIG, state="completed", pr=PR, closed=CLOSED, prior="P2"):
                   "prior_severity": prior, "fixed_by_pr": pr}}
 
 
-def _deploy(ts_iso, service="joblander-audio-engine", region=None):
+def _deploy(ts_iso, service="joblander-audio-engine", region="europe-west1"):
     entities = [{"type": "service", "id": service}]
     if region:
         entities.insert(0, {"type": "region", "id": region})
@@ -195,21 +195,40 @@ class TestFixDidNotHold(unittest.TestCase):
                 self.assertNotIn("cooldown_override", item)
                 self.assertEqual(feed.urls, [])
 
-    def test_deploy_in_the_signature_region_is_preferred(self):
+    def test_only_a_deploy_in_the_signature_region_counts(self):
         rows = [_deploy("2026-10-01T09:10:00Z", region="us-central1"),
                 _deploy("2026-10-01T09:20:00Z", region="europe-west1"),
-                _deploy("2026-10-01T09:05:00Z")]
+                _deploy("2026-10-01T09:05:00Z", region=None)]
         svc = "joblander-audio-engine"
         with patch("urllib.request.urlopen", _Feed(rows)):
             live, source = triage.fix_live_time(svc, SIG, "europe-west1",
                                                 NOW.replace(hour=9, minute=0), NOW)
         self.assertEqual(live, NOW.replace(hour=9, minute=20))
         self.assertTrue(source.endswith(":europe-west1"))
-        # Without a regional row, a row with no region beats another region's.
-        with patch("urllib.request.urlopen", _Feed(rows[::2])):
-            live, _ = triage.fix_live_time(svc, SIG, "asia-south1",
-                                           NOW.replace(hour=9, minute=0), NOW)
-        self.assertEqual(live, NOW.replace(hour=9, minute=5))
+        # Another region's rollout, or a row with no region, says nothing about
+        # asia-south1, which may still serve the old revision.
+        with patch("urllib.request.urlopen", _Feed(rows)):
+            self.assertIsNone(triage.fix_live_time(svc, SIG, "asia-south1",
+                                                   NOW.replace(hour=9, minute=0), NOW))
+
+    def test_a_rollout_not_yet_in_the_signature_region_keeps_the_cooldown(self):
+        # us-central1 went live at 09:14; europe-west1 errors at 11:30 on the old revision.
+        feed = _Feed([_deploy("2026-10-01T09:14:08Z", region="us-central1")])
+        [item] = _run([_group()], _cooldown(), feed)
+        self.assertEqual(item["action"], "cooldown_suppressed")
+        self.assertNotIn("cooldown_override", item)
+
+    def test_sentry_waits_for_every_region_that_deployed(self):
+        # Sentry's region is synthetic: the fix counts as live once every region
+        # seen deploying after the closure has done so.
+        rows = [_deploy("2026-10-01T09:10:00Z", service="joblander-app", region="europe-west1"),
+                _deploy("2026-10-01T09:50:00Z", service="joblander-app", region="us-central1"),
+                _deploy("2026-10-01T10:30:00Z", service="joblander-app", region="europe-west1")]
+        with patch("urllib.request.urlopen", _Feed(rows)):
+            live, source = triage.fix_live_time("joblander-app", SENTRY_SIG, "frontend",
+                                                NOW.replace(hour=9, minute=0), NOW)
+        self.assertEqual(live, NOW.replace(hour=9, minute=50))
+        self.assertTrue(source.endswith(":all-regions"))
 
     def test_rows_for_another_service_or_kind_are_ignored(self):
         rows = [_deploy("2026-10-01T09:05:00Z", service="joblander-audio-engine-preview"),
