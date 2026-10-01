@@ -34,8 +34,8 @@ Deploy activation also waits for that lock. Do not add a second cron.
    the first `run_deploy` of the signature's service (Sentry: `joblander-app`)
    after the closure in the change-ingest feed (`CHANGE_FEED_URL`): for a regional
    signature only a successful deploy recorded in that region counts (failed
-   calls are `run_deploy_failed`); for Sentry, the latest of the first deploys in
-   every region that deployed. Only a tracked deploy counts: with the feed unreachable or
+   calls are `run_deploy_failed`); for Sentry, a deploy in every production region
+   (`REGIONS`), timed at the latest of those first deploys. Only a tracked deploy counts: with the feed unreachable or
    showing no deploy, the event may still come from the old revision, so the
    cooldown is kept. Only Cloud Run log and Sentry signals qualify: voice-agent worker pools,
    Cloud Functions and the snapshot signals (`duplicate-worker:`,

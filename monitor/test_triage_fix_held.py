@@ -154,7 +154,8 @@ class TestFixDidNotHold(unittest.TestCase):
         self.assertNotIn("cooldown_override", item)
 
     def test_sentry_signature_maps_to_the_app_service(self):
-        feed = _Feed([_deploy("2026-10-01T09:20:00Z", service="joblander-app")])
+        feed = _Feed([_deploy("2026-10-01T09:20:00Z", service="joblander-app", region=r)
+                      for r in triage.REGIONS])
         group = _group(sig=SENTRY_SIG, service="joblander-app", region="frontend",
                        last_seen="2026-10-01T11:00:00.000000Z")
         [item] = _run([group], _cooldown(sig=SENTRY_SIG), feed)
@@ -218,16 +219,23 @@ class TestFixDidNotHold(unittest.TestCase):
         self.assertEqual(item["action"], "cooldown_suppressed")
         self.assertNotIn("cooldown_override", item)
 
-    def test_sentry_waits_for_every_region_that_deployed(self):
-        # Sentry's region is synthetic: the fix counts as live once every region
-        # seen deploying after the closure has done so.
-        rows = [_deploy("2026-10-01T09:10:00Z", service="joblander-app", region="europe-west1"),
-                _deploy("2026-10-01T09:50:00Z", service="joblander-app", region="us-central1"),
-                _deploy("2026-10-01T10:30:00Z", service="joblander-app", region="europe-west1")]
-        with patch("urllib.request.urlopen", _Feed(rows)):
+    def test_sentry_waits_for_every_production_region(self):
+        # Sentry's region is synthetic: the fix counts as live only once every
+        # production region has deployed. A staggered rollout is not enough.
+        staggered = [
+            _deploy("2026-10-01T09:10:00Z", service="joblander-app", region="europe-west1"),
+            _deploy("2026-10-01T09:50:00Z", service="joblander-app", region="us-central1")]
+        with patch("urllib.request.urlopen", _Feed(staggered)):
+            self.assertIsNone(triage.fix_live_time("joblander-app", SENTRY_SIG, "frontend",
+                                                   NOW.replace(hour=9, minute=0), NOW))
+        full = staggered + [
+            _deploy("2026-10-01T09:30:00Z", service="joblander-app", region="asia-south1"),
+            _deploy("2026-10-01T09:55:00Z", service="joblander-app", region="australia-southeast1"),
+            _deploy("2026-10-01T10:30:00Z", service="joblander-app", region="europe-west1")]
+        with patch("urllib.request.urlopen", _Feed(full)):
             live, source = triage.fix_live_time("joblander-app", SENTRY_SIG, "frontend",
                                                 NOW.replace(hour=9, minute=0), NOW)
-        self.assertEqual(live, NOW.replace(hour=9, minute=50))
+        self.assertEqual(live, NOW.replace(hour=9, minute=55))
         self.assertTrue(source.endswith(":all-regions"))
 
     def test_rows_for_another_service_or_kind_are_ignored(self):

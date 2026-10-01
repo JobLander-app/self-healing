@@ -829,8 +829,8 @@ def fix_live_time(service, signature, region, closed_at, now_dt):
     real GCP region only a deploy recorded in THAT region counts: another region
     going live, or a row with no region, says nothing about the one that
     errored. A synthetic region (Sentry's "frontend") cannot be pinned to one
-    deployment, so the fix counts as live only once every region seen deploying
-    after the closure has done so: the latest of those first deploys. If the
+    deployment, so the fix counts as live only once every production region in
+    REGIONS has deployed after the closure: the latest of those first deploys. If the
     feed is unreachable, unhealthy (503) or holds no qualifying deploy, there
     is no evidence the fix is live: returns None and the caller keeps the
     cooldown.
@@ -874,11 +874,20 @@ def fix_live_time(service, signature, region, closed_at, now_dt):
         ts = matching[0][0]
         source = f"change-feed:run_deploy:{service}:{region}"
     else:
+        # Not just the regions that happen to have deployed already: during a
+        # staggered rollout that subset says nothing about the rest. Require every
+        # production region (joblander-app, the Sentry service, runs in exactly
+        # REGIONS and each deploy reaches all four, verified 2026-10-01).
         first_per_region = {}
         for d_ts, d_regions in deploys:
-            for r in d_regions or {""}:
+            for r in d_regions:
                 first_per_region.setdefault(r, d_ts)
-        ts = max(first_per_region.values())
+        missing = [r for r in REGIONS if r not in first_per_region]
+        if missing:
+            log(f"fix-check: {service} not yet deployed in {', '.join(missing)} since the "
+                f"closure for {signature} — fix not live everywhere, cooldown kept")
+            return None
+        ts = max(first_per_region[r] for r in REGIONS)
         source = f"change-feed:run_deploy:{service}:all-regions"
     live = _EPOCH + datetime.timedelta(milliseconds=ts)
     log(f"fix-check: {signature} fix live at {_iso_z(live)} ({source})")
