@@ -175,6 +175,22 @@ class TestFixDidNotHold(unittest.TestCase):
         self.assertEqual(item["action"], "cooldown_suppressed")
         self.assertEqual(item["cooldown"]["limit_h"], triage.COOLDOWN_HOURS_CANCELED)
 
+    def test_synthetic_region_aggregate_uses_the_deploy_feed(self):
+        # The geo misroute group is Cloud Run-derived but spans regions
+        # ("geo-routing") and carries no revision: judged by the feed, which
+        # needs every production region deployed.
+        sig = "joblander-app:geo:in-users-misrouted"
+        group = _group(sig=sig, service="joblander-app", region="geo-routing",
+                       last_seen="2026-10-01T11:00:00Z", sev="P1")
+        del group["last_revision"]
+        feed = _Feed([_deploy("2026-10-01T09:20:00Z", service="joblander-app", region=r)
+                      for r in triage.REGIONS])
+        revs = _Revisions()
+        [item] = _run([group], _cooldown(sig=sig, prior="P1"), feed, revs)
+        self.assertEqual(item["cooldown_override"]["reason"], "recurred-after-fix")
+        self.assertTrue(item["cooldown_override"]["fix_live_source"].endswith(":all-regions"))
+        self.assertEqual(revs.calls, [])
+
     def test_sentry_feed_unavailable_or_empty_keeps_the_cooldown(self):
         group = _group(sig=SENTRY_SIG, service="joblander-app", region="frontend",
                        last_seen="2026-10-01T11:00:00Z")

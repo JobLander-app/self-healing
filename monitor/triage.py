@@ -967,8 +967,12 @@ def recurred_after_fix(group, cooldown, closed_at, now_dt):
         # marks the ticket Done after, so a fast deploy can precede completedAt.
         merged_at = _parse_ts(cooldown.get("fixed_merged_at"))
         since = min(merged_at, closed_at) if merged_at else closed_at
-        if not signature.startswith("sentry:"):
-            # Cloud Run log signal: judge the revision that logged the error.
+        region = group.get("region") or ""
+        if not signature.startswith("sentry:") and _GCP_REGION_RE.match(region):
+            # Cloud Run log signal from one real region: judge the revision that
+            # logged the error. Aggregates with a synthetic region (Sentry's
+            # "frontend", the geo misroute's "geo-routing") have no single
+            # revision and use the deploy feed below.
             revision = group.get("last_revision")
             if not revision:
                 log(f"fix-check: {signature} has no revision on its latest event — cooldown kept")
