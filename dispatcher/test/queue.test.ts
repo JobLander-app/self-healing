@@ -44,6 +44,40 @@ test("In Progress requires a stale agent label regardless of assignee", () => {
   assert.equal(isQueueCandidate({ ...claimed, updatedAt: "invalid" }, CUTOFF), false);
 });
 
+test("a Done ticket that still carries a stale agent-claimed label is selected for post-deploy verification", () => {
+  // The GitHub integration moves a ticket to Done on merge but never touches
+  // labels, so a pending verification (Step 4a.11b) survives that race.
+  const done = issue({ state: { name: "Done" }, labels: { nodes: [{ name: "monitor" }, { name: "agent-claimed" }] } });
+  assert.equal(isQueueCandidate(done, CUTOFF), true);
+  const selected = selectCandidate([done], CUTOFF)!;
+  assert.equal(selected.verify, true);
+  assert.equal(selected.reclaim, false);
+  assert.match(candidateInstruction(selected), /post-deploy check is pending/);
+  assert.match(candidateInstruction(selected), /ONLY the post-deploy check/);
+  // A not-yet-live exit must restore Done + label so the next pick is again verify mode.
+  assert.match(candidateInstruction(selected), /not live yet → comment, set the state back to Done and KEEP agent-claimed/);
+  // Not yet stale: the run that set it may still be closing it.
+  assert.equal(isQueueCandidate({ ...done, updatedAt: "2026-09-09T12:05:00Z" }, CUTOFF), false);
+  // Without the label a Done ticket is terminal; Canceled never qualifies.
+  assert.equal(isQueueCandidate(issue({ state: { name: "Done" } }), CUTOFF), false);
+  assert.equal(isQueueCandidate({ ...done, state: { name: "Canceled" } }, CUTOFF), false);
+  // The seven-day createdAt scope still applies.
+  assert.equal(isQueueCandidate({ ...done, createdAt: "2026-08-01T00:00:00Z" }, CUTOFF), false);
+  // Ordinary candidates carry no verification instruction.
+  assert.doesNotMatch(candidateInstruction(selectCandidate([issue()], CUTOFF)!), /post-deploy check is pending/);
+  assert.match(queuePolicy(30), /Done ONLY with "agent-claimed"/);
+});
+
+test("the Linear filter also asks for stale agent-claimed Done tickets", () => {
+  const filter = buildQueueFilter("JobLander", CUTOFF) as { and: Array<{ or: Array<Record<string, unknown>> }> };
+  const done = filter.and[1].or[2] as { and: Array<Record<string, unknown>> };
+  assert.deepEqual(done.and, [
+    { state: { name: { eq: "Done" } } },
+    { updatedAt: { lt: CUTOFF } },
+    { labels: { name: { eq: "agent-claimed" } } },
+  ]);
+});
+
 test("terminal, parent, and descriptionless tickets never spawn an investigation", () => {
   for (const candidate of [
     issue({ state: { name: "Done" } }), issue({ state: { name: "Canceled" } }),

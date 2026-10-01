@@ -5,6 +5,12 @@ export const AGENT_CLAIMED_LABEL = "agent-claimed";
 // Owner scope: a hard seven-day ceiling, deliberately not configurable.
 export const MAX_ISSUE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const READY_STATES = ["To Do", "Backlog"] as const;
+// A Done ticket that still carries agent-claimed is a merged fix whose
+// post-deploy check is pending: constitution Step 4a.11b keeps the label on
+// purpose, and a run killed right after its merge leaves it too. The GitHub
+// integration moves a ticket to Done on merge but never touches labels, so the
+// label, not the state, is the durable marker.
+export const VERIFY_STATE = "Done";
 
 export interface QueueIssue {
   id: string;
@@ -25,6 +31,8 @@ export interface SelectedCandidate {
   createdAt: string;
   updatedAt: string;
   reclaim: boolean;
+  /** Done + agent-claimed: run only the post-deploy verification (Step 4a.11b). */
+  verify?: boolean;
 }
 
 /** Linear timestamps are UTC ISO dates. Reject permissive Date.parse inputs and
@@ -70,6 +78,11 @@ export function buildQueueFilter(team: string, staleClaimBefore: string, now = D
           { updatedAt: { lt: staleClaimBefore } },
           { labels: { name: { eq: AGENT_CLAIMED_LABEL } } },
         ] },
+        { and: [
+          { state: { name: { eq: VERIFY_STATE } } },
+          { updatedAt: { lt: staleClaimBefore } },
+          { labels: { name: { eq: AGENT_CLAIMED_LABEL } } },
+        ] },
       ] },
     ],
   };
@@ -83,7 +96,8 @@ export function isQueueCandidate(issue: QueueIssue, staleClaimBefore: string, no
   if (!issue.description?.trim() || issue.children.nodes.length > 0) return false;
   if (!Number.isFinite(timestamp(issue.updatedAt))) return false;
   return READY_STATES.some((state) => issue.state.name === state) ||
-    (issue.state.name === "In Progress" && labels.includes(AGENT_CLAIMED_LABEL) &&
+    ((issue.state.name === "In Progress" || issue.state.name === VERIFY_STATE) &&
+      labels.includes(AGENT_CLAIMED_LABEL) &&
       Date.parse(issue.updatedAt) < Date.parse(staleClaimBefore));
 }
 
@@ -101,6 +115,7 @@ export function selectCandidate(issues: QueueIssue[], staleClaimBefore: string, 
     createdAt: issue.createdAt,
     updatedAt: issue.updatedAt,
     reclaim: issue.state.name === "In Progress",
+    ...(issue.state.name === VERIFY_STATE ? { verify: true } : {}),
   } : null;
 }
 
@@ -110,7 +125,9 @@ export function queuePolicy(staleClaimMinutes: number, dryRun = false): string {
     "HARD AGE LIMIT: createdAt must be valid and within the last 7 days, inclusive, never in the future. " +
     "Older tickets are forbidden regardless of priority, updatedAt, active state, stale claim, manual trigger, or provider retry. Leave them untouched; do not close or clean up old backlog. " +
     `Eligible states: ${READY_STATES.join(" / ")}; also In Progress ONLY with "${AGENT_CLAIMED_LABEL}" ` +
-    `and updatedAt older than ${staleClaimMinutes} minutes. Never infer ownership from assignee. ` +
+    `and updatedAt older than ${staleClaimMinutes} minutes; also ${VERIFY_STATE} ONLY with "${AGENT_CLAIMED_LABEL}" ` +
+    `and updatedAt older than ${staleClaimMinutes} minutes, which is a merged fix awaiting post-deploy verification. ` +
+    "Never infer ownership from assignee. " +
     "Exclude parent tickets with children and tickets with no usable description. " +
     "Within the seven-day window only, sort Urgent > High > Medium > Low > unprioritized, then oldest createdAt. " +
     "Before claiming, re-read the issue and apply this contract to its CURRENT createdAt, state and labels using the current UTC time. Age is measured from createdAt only, never updatedAt. " +
@@ -128,5 +145,13 @@ export function candidateInstruction(candidate?: SelectedCandidate, dryRun = fal
     "If createdAt or updatedAt changed since this snapshot, its createdAt is older than 7 days at the current time, or it is no longer eligible, exit no-work; the next tick will select again. " +
     "A prefix-only [Monitor] ticket is authorized even without the monitor label. " +
     (dryRun ? "Report whether this WOULD be a stale-claim reclaim; do not claim it. " : "An eligible stale agent-claimed ticket is yours to reclaim. ") +
+    (candidate.verify
+      ? `This ticket is ${VERIFY_STATE} but still carries "${AGENT_CLAIMED_LABEL}": a merged fix whose post-deploy check is pending ` +
+        "(constitution Step 4a.11b), or a run that merged and was killed before closing. Find the merged PR, then do ONLY the " +
+        `post-deploy check: fix live and signal clear → evidence comment, ${VERIFY_STATE}, remove agent-claimed; ` +
+        `not live yet → comment, set the state back to ${VERIFY_STATE} and KEEP agent-claimed (that pair is what brings the ` +
+        "ticket back in verification mode; never leave it In Progress, or the next run treats it as unfinished work and may " +
+        "fix it again); live and still failing → the fix did not hold, continue as a new fix. "
+      : "") +
     "A human-held In Progress ticket without that label is protected.";
 }
