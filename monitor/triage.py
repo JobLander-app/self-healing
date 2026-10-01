@@ -270,7 +270,7 @@ def slugify(message):
     return "-".join(w.lower() for w in words[:7]) or "unknown-error"
 
 
-def add_to_groups(groups, signature, service, region, ts, message):
+def add_to_groups(groups, signature, service, region, ts, message, revision=None):
     g = groups.setdefault(signature, {
         "signature": signature,
         "service": service,
@@ -283,8 +283,12 @@ def add_to_groups(groups, signature, service, region, ts, message):
     g["count"] += 1
     if ts < g["first_seen"]:
         g["first_seen"] = ts
-    if ts > g["last_seen"]:
+    if ts >= g["last_seen"]:
         g["last_seen"] = ts
+        if revision:
+            # The Cloud Run revision that produced the latest event: the
+            # fix-did-not-hold check asks whether THAT code was post-merge.
+            g["last_revision"] = revision
 
 
 def request_route_signature(path):
@@ -325,7 +329,8 @@ def collect_cloud_run(groups):
             suffix = f" | error: {detail}"
             sample = msg.strip()[:SAMPLE_MAX - len(suffix)] + suffix
         add_to_groups(groups, signature,
-                      service, region, e.get("timestamp", ""), sample)
+                      service, region, e.get("timestamp", ""), sample,
+                      revision=labels.get("revision_name"))
         if sample is not msg and " | error: " not in groups[signature]["sample_message"]:
             # The first entry of the group may have been a bare one.
             groups[signature]["sample_message"] = sample
@@ -900,6 +905,43 @@ def fix_live_time(service, signature, region, closed_at, now_dt):
     return live, source
 
 
+REVISION_LOOKBACK_HOURS = 48
+
+
+def revision_started_at(service, region, revision, merged_at, now_dt):
+    """First log time of a Cloud Run revision, looking back from before the merge.
+
+    Reads the revision's oldest log entry from REVISION_LOOKBACK_HOURS before
+    the merge. A timestamp before the merge means the revision was already
+    running pre-merge: it carries the OLD code. None on any failure (the
+    caller keeps the cooldown).
+
+    This, not the deploy feed, is the evidence for Cloud Run log signals: an
+    error logged BY a revision proves that revision served it. A backend build
+    first deploys with --no-traffic and switches traffic minutes later, so "the
+    first deploy after the merge" is not when the new code started serving.
+    """
+    floor = merged_at - datetime.timedelta(hours=REVISION_LOOKBACK_HOURS)
+    hours = int((now_dt - floor).total_seconds() // 3600) + 1
+    out = run_cmd([
+        "gcloud", "logging", "read",
+        ('resource.type="cloud_run_revision" '
+         f'AND resource.labels.service_name="{service}" '
+         f'AND resource.labels.location="{region}" '
+         f'AND resource.labels.revision_name="{revision}" '
+         f'AND timestamp>="{_iso_z(floor)}"'),
+        f"--project={PROJECT}", "--limit=1", "--order=asc",
+        f"--freshness={hours}h", "--format=json",
+    ], optional=True)
+    try:
+        entries = json.loads(out) if out else []
+    except json.JSONDecodeError:
+        return None
+    if not entries:
+        return None
+    return _parse_ts(entries[0].get("timestamp"))
+
+
 def recurred_after_fix(group, cooldown, closed_at, now_dt):
     """The cooldown override for a fix that did not hold, or None.
 
@@ -925,10 +967,26 @@ def recurred_after_fix(group, cooldown, closed_at, now_dt):
         # marks the ticket Done after, so a fast deploy can precede completedAt.
         merged_at = _parse_ts(cooldown.get("fixed_merged_at"))
         since = min(merged_at, closed_at) if merged_at else closed_at
-        live = fix_live_time(service, signature, group.get("region"), since, now_dt)
-        if live is None:
-            return None
-        live_at, source = live
+        if not signature.startswith("sentry:"):
+            # Cloud Run log signal: judge the revision that logged the error.
+            revision = group.get("last_revision")
+            if not revision:
+                log(f"fix-check: {signature} has no revision on its latest event — cooldown kept")
+                return None
+            started = revision_started_at(service, group.get("region"), revision, since, now_dt)
+            if started is None:
+                log(f"fix-check: could not date revision {revision} for {signature} — cooldown kept")
+                return None
+            if started <= since:
+                log(f"fix-check: {signature} last seen on {revision}, running since "
+                    f"{_iso_z(started)}, before the merge — old code, cooldown kept")
+                return None
+            live_at, source = started, f"revision:{revision}"
+        else:
+            live = fix_live_time(service, signature, group.get("region"), since, now_dt)
+            if live is None:
+                return None
+            live_at, source = live
         if last_seen <= live_at:
             log(f"fix-check: {group.get('signature')} last seen {_iso_z(last_seen)}, "
                 f"before the fix went live {_iso_z(live_at)} — cooldown kept")
@@ -947,8 +1005,12 @@ def recurred_after_fix(group, cooldown, closed_at, now_dt):
 
 def fix_did_not_hold_text(override, last_seen):
     """The sentence the re-filed ticket must carry (title + Problem section)."""
-    return (f"fix did not hold: {override['prior_issue']} ({override['fixed_by_pr']}) "
-            f"deployed {override['fix_live_at']}, signature seen again at {last_seen}")
+    source = override.get("fix_live_source", "")
+    head = f"fix did not hold: {override['prior_issue']} ({override['fixed_by_pr']})"
+    if source.startswith("revision:"):
+        return (f"{head} merged, signature seen again at {last_seen} on revision "
+                f"{source.split(':', 1)[1]}, which started {override['fix_live_at']}, after the merge")
+    return f"{head} deployed {override['fix_live_at']}, signature seen again at {last_seen}"
 
 
 def collect_closed_signature_cooldowns():
