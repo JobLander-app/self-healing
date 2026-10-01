@@ -470,6 +470,8 @@ Reach **exactly one** of two terminal outcomes:
    post your evidence, leave it for the owner, and report `backlogged`.
 11. **Close the ticket in the same run, right after `gh pr merge` succeeds.**
     The run ends at the merge, so do this immediately, in this order:
+    0. Confirm `gh pr view <N> --json state,mergedAt` shows `MERGED`. A merge
+       queue only enqueues the PR; until it is merged, do not close anything.
     1. `create_comment` with the PR URL, the root cause, what you verified
        before the merge, the Codex review verdict, and the line
        "Post-deploy verification: the monitor re-files this signature if it

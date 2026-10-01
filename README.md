@@ -46,8 +46,9 @@ monitor, dispatcher) is the reusable engine.
 | **Watchdog** (off-box) | the only layer that is not on the VM: reads heartbeat age from Cloud Logging every 5 min, pages Telegram, and resets the instance on its own — budgeted, and never on a signal it has never seen (2026-08-26) | `watchdog/` | Cloud Scheduler → Cloud Functions gen2, `europe-west1` |
 
 The watcher files a ticket → the dispatcher picks it up → the fix merges → Cloud
-Build deploys. A closed loop from "output died" to "fix in prod", with the owner
-watching in Telegram but not in the critical path.
+Build deploys. A closed loop from "output died" to "fix merged", with the owner
+watching in Telegram but not in the critical path; if the signature recurs
+after the deploy, the monitor re-files it.
 
 
 ### Applying infrastructure
