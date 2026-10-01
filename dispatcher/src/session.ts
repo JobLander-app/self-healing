@@ -279,8 +279,10 @@ export function buildRunNotification(s: RunSummary): string | null {
   if (s.outcome !== "error" && !s.issueId) return null;
   if (s.outcome === "error") {
     const ticket = s.issueId ? `${s.issueId}: ` : "";
-    const cost = s.costUsd !== null && s.costUsd > 0 ? ` ${`$${s.costUsd.toFixed(2)}`},` : " ";
-    return `${s.dryRun ? "[DRY_RUN] " : ""}⚠️ ${ticket}run FAILED — ${s.summary.trim() || "no detail"}.${cost}${s.durationSec}s, ${s.numTurns} turns`;
+    const detail = s.summary.trim().replace(/\.+$/, "") || "no detail";
+    const cost = s.costUsd === null ? ["cost unknown"] : s.costUsd > 0 ? [`$${s.costUsd.toFixed(2)}`] : [];
+    const stats = [...cost, `${s.durationSec}s`, `${s.numTurns} turns`];
+    return `${s.dryRun ? "[DRY_RUN] " : ""}⚠️ ${ticket}run FAILED — ${detail}. ${stats.join(", ")}`;
   }
 
   const ticket = s.issueId;
@@ -431,6 +433,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   let numTurns = 0;
   let sessionError: string | null = null;
   let eligibilityError: CandidateEligibilityError | null = null;
+  let claimedOutsideCandidate: string[] = [];
 
   // Watchdog. config.claudeMaxTurns bounds the turn COUNT but not wall-clock
   // time. A single hung turn would block the `for await` forever and leave
@@ -440,6 +443,9 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   // released so the next tick can proceed no matter how the run ends.
   const abortController = new AbortController();
   let timedOut = false;
+  // The abort surfaces from executeWithFallback as a generic "run aborted"
+  // error; name the limit that fired so the alert says why.
+  const watchdogError = `watchdog: run exceeded MAX_RUN_MS (${Math.round(config.maxRunMs / 60000)}m) and was aborted`;
   const watchdog = setTimeout(() => {
     timedOut = true;
     abortController.abort();
@@ -477,11 +483,13 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
       },
     });
     output = result.output;
-    sessionError = result.error;
+    sessionError = timedOut && result.error?.startsWith("watchdog:") ? watchdogError : result.error;
+    const allowed: readonly string[] = [candidate.id, candidate.identifier];
+    claimedOutsideCandidate = [...new Set(result.results.flatMap(r => r.issueIds).filter(id => !allowed.includes(id)))];
   } catch (err) {
     if (err instanceof CandidateEligibilityError) eligibilityError = err;
     sessionError = timedOut
-      ? `watchdog: dispatch exceeded MAX_RUN_MS (${Math.round(config.maxRunMs / 60000)}m) — aborted to release the busy lock and unwedge the poll loop`
+      ? watchdogError
       : err instanceof Error
         ? err.message
         : String(err);
@@ -514,7 +522,18 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     finishedAt: finishedAt.toISOString(),
     durationSec,
     outcome,
-    issueId: parsed.issue ?? (eligibilityError && attempts.length ? candidate.identifier : undefined),
+    // The daemon pins every run to one selected candidate, so a run that
+    // started a provider attempt is about that ticket even when the agent
+    // never printed [DISPATCH_RESULT] (watchdog abort, crash). Without this
+    // the failure alert named no ticket. issueId is display-only (feed and
+    // Telegram); it is never read back as a claim. "no-work" means the agent
+    // declined the ticket, so it stays unattributed. A provider that claimed a
+    // DIFFERENT ticket is named by what it actually mutated, ahead of even its
+    // own [DISPATCH_RESULT]: an observed mutation outranks a provider-authored
+    // marker, and naming the selected ticket would hide the one that may have
+    // been changed.
+    issueId: claimedOutsideCandidate.length ? claimedOutsideCandidate.join(", ")
+      : parsed.issue ?? (attempts.length && outcome !== "no-work" ? candidate.identifier : undefined),
     repo: parsed.repo,
     prUrl,
     costUsd,

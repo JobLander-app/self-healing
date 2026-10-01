@@ -25,7 +25,14 @@ export interface ProviderAttempt {
   rawUsage?: Record<string, number>;
   models?: Array<{ model: string; usage: TokenUsage }>;
   estimatedCostUsd: number | null;
-  costSource: "claude-sdk-estimate" | "unavailable";
+  /**
+   * claude-sdk-estimate: the SDK's `result` total_cost_usd.
+   * transcript-estimate: no `result` arrived (e.g. watchdog abort); priced from
+   *   streamed per-message usage with src/pricing.ts.
+   * claude-sdk-plus-transcript-estimate: the SDK total plus usage streamed
+   *   after the last `result`, priced the same way.
+   */
+  costSource: "claude-sdk-estimate" | "transcript-estimate" | "claude-sdk-plus-transcript-estimate" | "unavailable";
   turns: number;
 }
 export interface AttemptResult {
