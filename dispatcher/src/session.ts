@@ -528,11 +528,12 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
     // the failure alert named no ticket. issueId is display-only (feed and
     // Telegram); it is never read back as a claim. "no-work" means the agent
     // declined the ticket, so it stays unattributed. A provider that claimed a
-    // DIFFERENT ticket is named by what it actually mutated, never the
-    // candidate: pointing the alert at the selected ticket would hide the one
-    // that may have been changed.
-    issueId: parsed.issue ?? (claimedOutsideCandidate.length ? claimedOutsideCandidate.join(", ")
-      : attempts.length && outcome !== "no-work" ? candidate.identifier : undefined),
+    // DIFFERENT ticket is named by what it actually mutated, ahead of even its
+    // own [DISPATCH_RESULT]: an observed mutation outranks a provider-authored
+    // marker, and naming the selected ticket would hide the one that may have
+    // been changed.
+    issueId: claimedOutsideCandidate.length ? claimedOutsideCandidate.join(", ")
+      : parsed.issue ?? (attempts.length && outcome !== "no-work" ? candidate.identifier : undefined),
     repo: parsed.repo,
     prUrl,
     costUsd,

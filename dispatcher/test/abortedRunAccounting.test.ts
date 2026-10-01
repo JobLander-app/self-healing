@@ -185,7 +185,8 @@ test("a run that claimed a different ticket is attributed to that ticket, not th
   mock.method(claude, "executeClaude", (input: Parameters<typeof claude.executeClaude>[0]) => realExecuteClaude(input, (async function* () {
     yield { type: "assistant", session_id: "s1", parent_tool_use_id: null, message: { id: "m1", model: "claude-sonnet-4-6", usage: u(1, 1),
       content: [{ type: "tool_use", id: "toolu_1", name: "mcp__linear__update_issue", input: { id: "JOB-9999", labelIds: [LINEAR_AGENT_CLAIMED_LABEL_ID] } }] } };
-    yield RESULT;
+    // The provider's own marker names the selected ticket; the observed claim must still win.
+    yield { ...RESULT, result: '[DISPATCH_RESULT] {"outcome":"fixed","issue":"JOB-1138","repo":null,"pr":null,"note":"done"}' };
   }) as any));
 
   const summary = await session.runDispatchSession("cron", candidate);
