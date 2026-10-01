@@ -167,23 +167,52 @@ class TestFixDidNotHold(unittest.TestCase):
         self.assertEqual(item["action"], "linear_create_if_no_dup")
 
     def test_deploy_service_mapping(self):
-        self.assertEqual(triage.deploy_service(SENTRY_SIG), "joblander-app")
-        self.assertEqual(triage.deploy_service(SIG), "joblander-audio-engine")
-        self.assertEqual(triage.deploy_service("joblander-app:us-central1:http-500-get-root"),
-                         "joblander-app")
+        self.assertEqual(triage.deploy_service(SENTRY_SIG, "joblander-app"), "joblander-app")
+        self.assertEqual(triage.deploy_service(SIG, "joblander-audio-engine"),
+                         "joblander-audio-engine")
+        self.assertEqual(triage.deploy_service("joblander-app:us-central1:http-500-get-root",
+                                               "joblander-app"), "joblander-app")
+        # Signal namespaces are not Cloud Run services tracked by the feed.
+        for sig, service in (("voice-agent:europe-west1:x", "ai-voice-agent-python"),
+                             ("cloud-function:sendEmail:x", "email-service"),
+                             ("duplicate-worker:run-errors", "backend"),
+                             ("monitor-topology:asia-south1:voice-agent-in",
+                              "ai-voice-agent-python")):
+            with self.subTest(sig=sig):
+                self.assertIsNone(triage.deploy_service(sig, service))
+
+    def test_untracked_and_snapshot_signals_keep_the_cooldown(self):
+        # duplicate-worker stamps last_seen with the collection time, and
+        # voice-agent worker-pool deploys are not in the feed: neither may
+        # be declared a failed fix.
+        for sig, service, region in (
+                ("duplicate-worker:run-errors", "backend", "europe-west1"),
+                ("voice-agent:europe-west1:google-stt-cancelled", "ai-voice-agent-python",
+                 "europe-west1"),
+                ("cloud-function:sendEmail:resend-failed", "email-service", "sendEmail")):
+            with self.subTest(sig=sig):
+                feed = _Feed([_deploy("2026-10-01T09:14:08Z", service=service)])
+                group = _group(sig=sig, service=service, region=region,
+                               last_seen="2026-10-01T11:59:00Z")
+                [item] = _run([group], _cooldown(sig=sig), feed)
+                self.assertEqual(item["action"], "cooldown_suppressed")
+                self.assertNotIn("cooldown_override", item)
+                self.assertEqual(feed.urls, [])
 
     def test_deploy_in_the_signature_region_is_preferred(self):
         rows = [_deploy("2026-10-01T09:10:00Z", region="us-central1"),
                 _deploy("2026-10-01T09:20:00Z", region="europe-west1"),
                 _deploy("2026-10-01T09:05:00Z")]
+        svc = "joblander-audio-engine"
         with patch("urllib.request.urlopen", _Feed(rows)):
-            live, source = triage.fix_live_time(SIG, "europe-west1",
+            live, source = triage.fix_live_time(svc, SIG, "europe-west1",
                                                 NOW.replace(hour=9, minute=0), NOW)
         self.assertEqual(live, NOW.replace(hour=9, minute=20))
         self.assertTrue(source.endswith(":europe-west1"))
         # Without a regional row, a row with no region beats another region's.
         with patch("urllib.request.urlopen", _Feed(rows[::2])):
-            live, _ = triage.fix_live_time(SIG, "asia-south1", NOW.replace(hour=9, minute=0), NOW)
+            live, _ = triage.fix_live_time(svc, SIG, "asia-south1",
+                                           NOW.replace(hour=9, minute=0), NOW)
         self.assertEqual(live, NOW.replace(hour=9, minute=5))
 
     def test_rows_for_another_service_or_kind_are_ignored(self):
@@ -191,7 +220,8 @@ class TestFixDidNotHold(unittest.TestCase):
                 dict(_deploy("2026-10-01T09:06:00Z"), kind="iam_change"),
                 _deploy("2026-10-01T09:40:00Z")]
         with patch("urllib.request.urlopen", _Feed(rows)):
-            live, _ = triage.fix_live_time(SIG, "europe-west1", NOW.replace(hour=9, minute=0), NOW)
+            live, _ = triage.fix_live_time("joblander-audio-engine", SIG, "europe-west1",
+                                           NOW.replace(hour=9, minute=0), NOW)
         self.assertEqual(live, NOW.replace(hour=9, minute=40))
 
     def test_an_error_in_the_check_keeps_the_cooldown(self):

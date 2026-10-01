@@ -797,16 +797,27 @@ def merged_pr_url(attachments):
     return best
 
 
-def deploy_service(signature):
-    """The Cloud Run service a signature belongs to: its first segment, except
-    Sentry (`sentry:<service>:...`) where the service is the second."""
+def deploy_service(signature, group_service):
+    """The Cloud Run service whose deploy puts a fix for this signal live, or None.
+
+    Only two signal families qualify, and for both `last_seen` is a real event
+    time: Cloud Run log groups (`<service>:<region>:<slug>`, where the prefix IS
+    the group's service) and Sentry (`sentry:<service>:...`, lastSeen). Every
+    other prefix is a signal namespace, not a service the change feed tracks:
+    `voice-agent:` (worker pools), `cloud-function:`, and the snapshot signals
+    `duplicate-worker:` / `monitor-topology:`, which stamp `last_seen` with the
+    collection time and would look like a recurrence on every run. Those return
+    None and keep the cooldown.
+    """
     parts = str(signature).split(":")
-    if parts[0] == "sentry" and len(parts) > 1:
+    if parts[0] == "sentry" and len(parts) > 2:
         return parts[1]
-    return parts[0]
+    if len(parts) > 2 and parts[0] and parts[0] == group_service:
+        return parts[0]
+    return None
 
 
-def fix_live_time(signature, region, closed_at, now_dt):
+def fix_live_time(service, signature, region, closed_at, now_dt):
     """When the fix for a closed ticket went live: (datetime, source).
 
     The first `run_deploy` row of the signature's service at or after the
@@ -817,8 +828,7 @@ def fix_live_time(signature, region, closed_at, now_dt):
     (503) or holds no such deploy, the closure plus FIX_DEPLOY_GRACE_MINUTES is
     used instead, and the source says so.
     """
-    service = deploy_service(signature)
-    grace = (closed_at + datetime.timedelta(minutes=FIX_DEPLOY_GRACE_MINUTES),
+    grace =(closed_at + datetime.timedelta(minutes=FIX_DEPLOY_GRACE_MINUTES),
              f"grace:completedAt+{FIX_DEPLOY_GRACE_MINUTES}m")
     since_ms = int((closed_at - _EPOCH).total_seconds() * 1000)
     until_ms = int((now_dt - _EPOCH).total_seconds() * 1000)
@@ -874,10 +884,16 @@ def recurred_after_fix(group, cooldown, closed_at, now_dt):
         pr = cooldown.get("fixed_by_pr")
         if cooldown.get("state_type") != "completed" or not pr:
             return None
+        signature = group.get("signature", "")
+        service = deploy_service(signature, group.get("service"))
+        if service is None:
+            log(f"fix-check: {signature} has no deploy tracked by the change feed "
+                f"— cooldown kept")
+            return None
         last_seen = _parse_ts(group.get("last_seen"))
         if last_seen is None:
             return None
-        live_at, source = fix_live_time(group.get("signature", ""), group.get("region"),
+        live_at, source = fix_live_time(service, signature, group.get("region"),
                                         closed_at, now_dt)
         if last_seen <= live_at:
             log(f"fix-check: {group.get('signature')} last seen {_iso_z(last_seen)}, "

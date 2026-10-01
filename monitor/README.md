@@ -34,8 +34,11 @@ Deploy activation also waits for that lock. Do not add a second cron.
    the first `run_deploy` of the signature's service (Sentry: `joblander-app`)
    after the closure in the change-ingest feed (`CHANGE_FEED_URL`), preferring the
    signature's region; without one it is completion + `FIX_DEPLOY_GRACE_MINUTES`
-   (30). Done without a merged PR, Canceled, and recurrence before the deploy keep
-   the cooldown; any lookup failure keeps it too.
+   (30). Only Cloud Run log and Sentry signals qualify: voice-agent worker pools,
+   Cloud Functions and the snapshot signals (`duplicate-worker:`,
+   `monitor-topology:`) have no tracked deploy or no real event time. Those, Done
+   without a merged PR, Canceled, recurrence before the deploy and any lookup
+   failure keep the cooldown.
 2. Persist prepared P0 pages to `p0-outbox.json`, deliver verbatim through Telegram,
    and remove only acknowledged deliveries. Failed deliveries retry next launch,
    even if the next collection fails. A crash after delivery can repeat a page;
