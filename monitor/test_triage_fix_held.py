@@ -41,9 +41,9 @@ def _group(sig=SIG, last_seen="2026-10-01T11:30:00.123456789Z", sev="P2", status
     }
 
 
-def _cooldown(sig=SIG, state="completed", pr=PR, closed=CLOSED, prior="P2"):
+def _cooldown(sig=SIG, state="completed", pr=PR, closed=CLOSED, prior="P2", merged=None):
     return {sig: {"state_type": state, "closed_at": closed, "issue": "JOB-1131",
-                  "prior_severity": prior, "fixed_by_pr": pr}}
+                  "prior_severity": prior, "fixed_by_pr": pr, "fixed_merged_at": merged}}
 
 
 def _deploy(ts_iso, service="joblander-audio-engine", region="europe-west1"):
@@ -116,6 +116,17 @@ class TestFixDidNotHold(unittest.TestCase):
         [item] = _run([_group(sev="P3")], _cooldown(), feed)
         self.assertEqual(item["action"], "report_only")
         self.assertEqual(item["cooldown_override"]["reason"], "recurred-after-fix")
+
+    def test_deploy_between_merge_and_closure_counts(self):
+        # The dispatcher merges first and marks Done after: a fast deploy at 08:58
+        # lands before completedAt (09:00) but after the merge (08:50).
+        feed = _Feed([_deploy("2026-10-01T08:58:00Z")])
+        [item] = _run([_group()], _cooldown(merged="2026-10-01T08:50:00Z"), feed)
+        self.assertEqual(item["cooldown_override"]["fix_live_at"], "2026-10-01T08:58:00Z")
+        self.assertEqual(feed.params()["since"], [str(_ms("2026-10-01T08:50:00Z"))])
+        # Without mergedAt the lookup starts at the closure and misses it.
+        [kept] = _run([_group()], _cooldown(), _Feed([_deploy("2026-10-01T08:58:00Z")]))
+        self.assertEqual(kept["action"], "cooldown_suppressed")
 
     def test_recurrence_only_before_deploy_stays_suppressed(self):
         # The old revision keeps erroring until the deploy lands; that is expected.
@@ -329,7 +340,9 @@ class TestCooldownRecordsTheFix(unittest.TestCase):
             cooldowns = triage.collect_closed_signature_cooldowns()
         self.assertRegex(sent[0], r"attachments\(first: \d+\) \{ nodes \{ url metadata \} \}")
         self.assertEqual(cooldowns[SIG]["fixed_by_pr"], PR)
+        self.assertEqual(cooldowns[SIG]["fixed_merged_at"], "2026-10-01T08:59:00Z")
         self.assertIsNone(cooldowns["svc:eu:not-a-bug"]["fixed_by_pr"])
+        self.assertIsNone(cooldowns["svc:eu:not-a-bug"]["fixed_merged_at"])
 
 
 class TestParseTs(unittest.TestCase):

@@ -30,6 +30,9 @@ export interface GcpAuditLogEntry {
   resource?: {
     labels?: Record<string, string>;
   };
+  /** Present on long-running operations: one entry at start (`first`) and one
+   *  at completion (`last`). Synchronous calls (v1 ReplaceService) omit it. */
+  operation?: { id?: string; first?: boolean; last?: boolean };
 }
 
 /** zone `australia-southeast1-a` → region `australia-southeast1`. A region
@@ -40,7 +43,7 @@ export function regionFromZone(zone: string): string {
 }
 
 /** Map an audit methodName (and the call's status) to a fine-grained `kind`. */
-function auditKind(methodName: string, statusCode: number): string {
+function auditKind(methodName: string, statusCode: number, operationPending: boolean): string {
   if (methodName.endsWith("compute.instances.delete")) return "instance_delete";
   if (methodName.endsWith("compute.instances.insert")) return "instance_create";
   // IAM before Cloud Run: `google.cloud.run.v1.Services.SetIamPolicy` is an IAM
@@ -53,7 +56,11 @@ function auditKind(methodName: string, statusCode: number): string {
     // monitor reads the first run_deploy after a fix as "the fix went live", so a
     // failed call or a delete must not look like one.
     if (statusCode !== 0) return "run_deploy_failed";
-    if (/\.(CreateService|UpdateService|ReplaceService)$/.test(methodName)) return "run_deploy";
+    if (/\.(CreateService|UpdateService|ReplaceService)$/.test(methodName)) {
+      // A long-running operation logs its START before the revision is live
+      // (and before any status exists); only the terminal entry is the deploy.
+      return operationPending ? "run_deploy_started" : "run_deploy";
+    }
     if (methodName.endsWith(".DeleteService")) return "run_delete";
     return "audit_event";
   }
@@ -124,7 +131,7 @@ export function gcpAuditExtract({ entry }: { entry: GcpAuditLogEntry }): Extract
     event: {
       id: `audit:${insertId}`,
       source: "gcp_audit",
-      kind: auditKind(methodName, proto.status?.code ?? 0),
+      kind: auditKind(methodName, proto.status?.code ?? 0, entry.operation !== undefined && entry.operation.last !== true),
       ts: Number.isNaN(ts) ? 0 : ts,
       actor: proto.authenticationInfo?.principalEmail ?? null,
       title: `${methodName} ${resourceName}`.trim(),

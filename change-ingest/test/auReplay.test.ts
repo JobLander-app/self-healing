@@ -306,6 +306,20 @@ test("gcpAuditExtract: a failed Cloud Run update is not a deploy", () => {
   assert.equal(gcpAuditExtract({ entry }).event.kind, "run_deploy_failed");
 });
 
+test("gcpAuditExtract: a long-running deploy counts only at its terminal entry", () => {
+  const base: GcpAuditLogEntry = {
+    timestamp: "2026-10-01T14:00:00Z",
+    protoPayload: {
+      methodName: "google.cloud.run.v2.Services.UpdateService",
+      resourceName: "projects/p/locations/europe-west1/services/joblander-app",
+    },
+  };
+  const start = gcpAuditExtract({ entry: { ...base, insertId: "op-first", operation: { id: "op", first: true } } });
+  const done = gcpAuditExtract({ entry: { ...base, insertId: "op-last", operation: { id: "op", last: true } } });
+  assert.equal(start.event.kind, "run_deploy_started");
+  assert.equal(done.event.kind, "run_deploy");
+});
+
 test("gcpAuditExtract: only create/update/replace count as a deploy", () => {
   const kind = (methodName: string) => gcpAuditExtract({ entry: { insertId: methodName, timestamp: "2026-10-01T14:00:00Z",
     protoPayload: { methodName, resourceName: "projects/p/locations/europe-west1/services/joblander-app" } } }).event.kind;

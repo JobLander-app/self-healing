@@ -774,15 +774,20 @@ def _iso_z(dt):
 
 
 def merged_pr_url(attachments):
-    """URL of the merged GitHub pull request linked to a Linear issue, or None.
+    """URL of the merged GitHub pull request linked to a Linear issue, or None."""
+    return merged_pr(attachments)[0]
+
+
+def merged_pr(attachments):
+    """(url, mergedAt ISO or None) of the merged GitHub PR linked to an issue.
 
     Linear's GitHub integration attaches linked PRs as Attachment rows whose
     `url` is the PR and whose `metadata` carries `status` ("merged") and
     `mergedAt` (verified live on JOB-1109, JOB-1131, JOB-1138, 2026-10-01). An
     open or closed-unmerged PR fixed nothing, so it does not count. With several
-    merged PRs the most recently merged one is reported.
+    merged PRs the most recently merged one is reported. (None, None) if none.
     """
-    best, best_at = None, None
+    best, best_at, best_raw = None, None, None
     nodes = attachments.get("nodes") if isinstance(attachments, dict) else None
     for node in nodes if isinstance(nodes, list) else []:
         if not isinstance(node, dict):
@@ -793,10 +798,11 @@ def merged_pr_url(attachments):
             continue
         if meta.get("status") != "merged" and not meta.get("mergedAt"):
             continue
-        merged_at = _parse_ts(meta.get("mergedAt")) or _EPOCH
+        parsed = _parse_ts(meta.get("mergedAt"))
+        merged_at = parsed or _EPOCH
         if best is None or merged_at > best_at:
-            best, best_at = url, merged_at
-    return best
+            best, best_at, best_raw = url, merged_at, (_iso_z(parsed) if parsed else None)
+    return best, best_raw
 
 
 def deploy_service(signature, group_service):
@@ -915,7 +921,11 @@ def recurred_after_fix(group, cooldown, closed_at, now_dt):
         last_seen = _parse_ts(group.get("last_seen"))
         if last_seen is None:
             return None
-        live = fix_live_time(service, signature, group.get("region"), closed_at, now_dt)
+        # Look for the deploy from the merge on: the dispatcher merges first and
+        # marks the ticket Done after, so a fast deploy can precede completedAt.
+        merged_at = _parse_ts(cooldown.get("fixed_merged_at"))
+        since = min(merged_at, closed_at) if merged_at else closed_at
+        live = fix_live_time(service, signature, group.get("region"), since, now_dt)
         if live is None:
             return None
         live_at, source = live
@@ -1075,6 +1085,8 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
         if prev and _iso_or_min(prev.get("closed_at")) >= _iso_or_min(closed_at):
             continue
 
+        fixed_pr, fixed_merged_at = merged_pr(node.get("attachments"))
+
         cooldowns[sig] = {
             "state_type": state_type,
             "closed_at": closed_at,
@@ -1085,7 +1097,11 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
                 node.get("priority", 0), "P3"),
             # A merged GitHub PR linked to the ticket: it was closed by a fix,
             # so a recurrence after that fix deployed must not stay silent.
-            "fixed_by_pr": merged_pr_url(node.get("attachments")),
+            "fixed_by_pr": fixed_pr,
+            # The dispatcher merges BEFORE it marks the ticket Done, so the deploy
+            # carrying the fix can land before completedAt; the deploy lookup
+            # starts at the merge.
+            "fixed_merged_at": fixed_merged_at,
         }
     log(f"cooldown: {len(nodes)} recently-closed [Monitor] tickets, "
         f"{len(cooldowns)} distinct signatures")

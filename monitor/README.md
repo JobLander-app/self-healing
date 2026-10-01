@@ -32,7 +32,8 @@ Deploy activation also waits for that lock. Do not add a second cron.
    is bypassed (`cooldown_override.reason = "recurred-after-fix"`) and a P1/P2 is
    re-filed with "fix did not hold" in its title and first line. Fix-live time is
    the first `run_deploy` of the signature's service (Sentry: `joblander-app`)
-   after the closure in the change-ingest feed (`CHANGE_FEED_URL`): for a regional
+   since the PR's `mergedAt` (the dispatcher merges before it closes the ticket),
+   counting only a long-running operation's terminal entry, in the change-ingest feed (`CHANGE_FEED_URL`): for a regional
    signature only a successful deploy recorded in that region counts (failed
    calls are `run_deploy_failed`); for Sentry, a deploy in every production region
    (`REGIONS`), timed at the latest of those first deploys. Only a tracked deploy counts: with the feed unreachable or
