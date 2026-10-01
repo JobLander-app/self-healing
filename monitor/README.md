@@ -33,8 +33,9 @@ Deploy activation also waits for that lock. Do not add a second cron.
    re-filed with "fix did not hold" in its title and first line. Fix-live time is
    the first `run_deploy` of the signature's service (Sentry: `joblander-app`)
    after the closure in the change-ingest feed (`CHANGE_FEED_URL`), preferring the
-   signature's region; without one it is completion + `FIX_DEPLOY_GRACE_MINUTES`
-   (30). Only Cloud Run log and Sentry signals qualify: voice-agent worker pools,
+   signature's region. Only a tracked deploy counts: with the feed unreachable or
+   showing no deploy, the event may still come from the old revision, so the
+   cooldown is kept. Only Cloud Run log and Sentry signals qualify: voice-agent worker pools,
    Cloud Functions and the snapshot signals (`duplicate-worker:`,
    `monitor-topology:`) have no tracked deploy or no real event time. Those, Done
    without a merged PR, Canceled, recurrence before the deploy and any lookup

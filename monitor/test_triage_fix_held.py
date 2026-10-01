@@ -136,26 +136,22 @@ class TestFixDidNotHold(unittest.TestCase):
         self.assertEqual(item["action"], "cooldown_suppressed")
         self.assertEqual(item["cooldown"]["limit_h"], triage.COOLDOWN_HOURS_CANCELED)
 
-    def test_feed_unavailable_falls_back_to_grace(self):
+    def test_feed_unavailable_keeps_the_cooldown(self):
+        # No deploy evidence: the event may still come from the old revision.
         for error in (URLError("connection refused"),
                       HTTPError("http://127.0.0.1:4200/changes", 503, "degraded", {}, None)):
             with self.subTest(error=type(error).__name__):
-                # 11:30 is after closure + 30m (09:30): fix assumed live → re-file.
                 [item] = _run([_group()], _cooldown(), _Feed(error=error))
-                self.assertEqual(item["action"], "linear_create_if_no_dup")
-                override = item["cooldown_override"]
-                self.assertEqual(override["fix_live_at"], "2026-10-01T09:30:00Z")
-                self.assertEqual(override["fix_live_source"],
-                                 f"grace:completedAt+{triage.FIX_DEPLOY_GRACE_MINUTES}m")
-                self.assertIn("assumed live 2026-10-01T09:30:00Z", item["fix_did_not_hold"])
-                # Inside the grace window → still the old revision → suppressed.
-                [inside] = _run([_group(last_seen="2026-10-01T09:20:00Z")], _cooldown(),
-                                _Feed(error=error))
-                self.assertEqual(inside["action"], "cooldown_suppressed")
+                self.assertEqual(item["action"], "cooldown_suppressed")
+                self.assertNotIn("cooldown_override", item)
+                self.assertNotIn("fix_did_not_hold", item)
 
-    def test_feed_without_a_deploy_falls_back_to_grace(self):
+    def test_feed_without_a_deploy_keeps_the_cooldown(self):
+        # A healthy feed with no deploy since the closure is positive evidence the
+        # fix is not live yet (delayed, failed, never started).
         [item] = _run([_group()], _cooldown(), _Feed([]))
-        self.assertTrue(item["cooldown_override"]["fix_live_source"].startswith("grace:"))
+        self.assertEqual(item["action"], "cooldown_suppressed")
+        self.assertNotIn("cooldown_override", item)
 
     def test_sentry_signature_maps_to_the_app_service(self):
         feed = _Feed([_deploy("2026-10-01T09:20:00Z", service="joblander-app")])

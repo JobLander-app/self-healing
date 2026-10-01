@@ -71,9 +71,10 @@ COOLDOWN_HOURS_DONE = int(os.environ.get("COOLDOWN_HOURS_DONE", "6"))
 #
 # The fix-live time is the first Cloud Run deploy of the signature's service
 # after the ticket closed, read from the local change-ingest feed (the same
-# CHANGE_FEED_URL the dispatcher uses). Without a feed answer it is assumed to
-# be the closure plus FIX_DEPLOY_GRACE_MINUTES.
-FIX_DEPLOY_GRACE_MINUTES = int(os.environ.get("FIX_DEPLOY_GRACE_MINUTES", "30"))
+# CHANGE_FEED_URL the dispatcher uses). Only a TRACKED deploy counts: when the
+# feed is unreachable or shows no deploy, the event may still come from the old
+# revision (deploy delayed, failed, never started), so "fix did not hold" would
+# be an unproven claim and the cooldown is kept.
 CHANGE_FEED_URL = os.environ.get("CHANGE_FEED_URL", "http://127.0.0.1:4200").rstrip("/")
 _GITHUB_PR_URL_RE = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/\d+/?$")
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
@@ -818,18 +819,16 @@ def deploy_service(signature, group_service):
 
 
 def fix_live_time(service, signature, region, closed_at, now_dt):
-    """When the fix for a closed ticket went live: (datetime, source).
+    """When the fix for a closed ticket went live: (datetime, source), or None.
 
     The first `run_deploy` row of the signature's service at or after the
     closure, from change-ingest `GET /changes` (rows: `kind`, `ts` epoch ms,
     `entities` [{type, id}], region as a `region` entity when the audit entry
     named one). A deploy in the signature's own region is preferred, then one
     with no region recorded, then any. If the feed is unreachable, unhealthy
-    (503) or holds no such deploy, the closure plus FIX_DEPLOY_GRACE_MINUTES is
-    used instead, and the source says so.
+    (503) or holds no such deploy, there is no evidence the fix is live:
+    returns None and the caller keeps the cooldown.
     """
-    grace =(closed_at + datetime.timedelta(minutes=FIX_DEPLOY_GRACE_MINUTES),
-             f"grace:completedAt+{FIX_DEPLOY_GRACE_MINUTES}m")
     since_ms = int((closed_at - _EPOCH).total_seconds() * 1000)
     until_ms = int((now_dt - _EPOCH).total_seconds() * 1000)
     query = urllib.parse.urlencode([
@@ -839,10 +838,10 @@ def fix_live_time(service, signature, region, closed_at, now_dt):
     try:
         with urllib.request.urlopen(f"{CHANGE_FEED_URL}/changes?{query}", timeout=5) as resp:
             rows = json.loads(resp.read().decode())
-    except Exception as e:  # noqa: BLE001 — the grace fallback covers any feed failure
+    except Exception as e:  # noqa: BLE001 — no deploy evidence: the cooldown is kept
         log(f"fix-check: change feed unavailable for {signature} ({str(e)[:120]}) "
-            f"— using {grace[1]}")
-        return grace
+            f"— no deploy evidence, cooldown kept")
+        return None
     deploys = []
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict) or row.get("kind") != "run_deploy":
@@ -857,8 +856,8 @@ def fix_live_time(service, signature, region, closed_at, now_dt):
         deploys.append((ts, regions))
     if not deploys:
         log(f"fix-check: no {service} deploy in the change feed since the closure "
-            f"for {signature} — using {grace[1]}")
-        return grace
+            f"for {signature} — fix not confirmed live, cooldown kept")
+        return None
     deploys.sort(key=lambda d: d[0])
     regional = [d for d in deploys if region and region in d[1]]
     if regional:
@@ -893,8 +892,10 @@ def recurred_after_fix(group, cooldown, closed_at, now_dt):
         last_seen = _parse_ts(group.get("last_seen"))
         if last_seen is None:
             return None
-        live_at, source = fix_live_time(service, signature, group.get("region"),
-                                        closed_at, now_dt)
+        live = fix_live_time(service, signature, group.get("region"), closed_at, now_dt)
+        if live is None:
+            return None
+        live_at, source = live
         if last_seen <= live_at:
             log(f"fix-check: {group.get('signature')} last seen {_iso_z(last_seen)}, "
                 f"before the fix went live {_iso_z(live_at)} — cooldown kept")
@@ -913,12 +914,8 @@ def recurred_after_fix(group, cooldown, closed_at, now_dt):
 
 def fix_did_not_hold_text(override, last_seen):
     """The sentence the re-filed ticket must carry (title + Problem section)."""
-    when = (f"deployed {override['fix_live_at']}"
-            if override["fix_live_source"].startswith("change-feed")
-            else f"assumed live {override['fix_live_at']} (no deploy found in the change "
-                 f"feed; ticket completion + {FIX_DEPLOY_GRACE_MINUTES}m)")
     return (f"fix did not hold: {override['prior_issue']} ({override['fixed_by_pr']}) "
-            f"{when}, signature seen again at {last_seen}")
+            f"deployed {override['fix_live_at']}, signature seen again at {last_seen}")
 
 
 def collect_closed_signature_cooldowns():
