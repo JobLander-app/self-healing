@@ -69,6 +69,38 @@ test('never resets on a heartbeat stream it has never seen (misconfiguration gua
   assert.match(v.reasons.join(' '), /never observed a watcher heartbeat/);
 });
 
+test('a fresh boot after a long stop is not reset on pre-boot heartbeats (2026-10-13)', () => {
+  // Stopped for 36 h, started 4 min ago: the watcher already ticked, the
+  // dispatcher's 5-minute heartbeat has not yet.
+  const v = decide({ ...base, watcherAgeSec: 60, dispatcherAgeSec: 36 * 3600, sinceStartSec: 240 });
+  assert.equal(v.condition, OK);
+  assert.equal(v.reset, false);
+  assert.equal(v.page, false);
+});
+
+test('a stream that never reports after boot still goes dead on uptime', () => {
+  const late = decide({ ...base, dispatcherAgeSec: 36 * 3600, sinceStartSec: 2000 });
+  assert.equal(late.condition, 'dispatcher-late');
+  assert.equal(late.reset, false);
+  assert.match(late.detail, /no DISPATCHER_HEARTBEAT since the instance started 33 min ago/);
+
+  const dead = decide({ ...base, dispatcherAgeSec: null, sinceStartSec: 4000 });
+  assert.equal(dead.condition, 'dispatcher-dead');
+  assert.equal(dead.reset, true);
+  assert.match(dead.detail, /since the instance started 67 min ago/);
+
+  const watcher = decide({ ...base, watcherAgeSec: 36 * 3600, sinceStartSec: 1000 });
+  assert.equal(watcher.condition, 'watcher-dead');
+  assert.equal(watcher.reset, true);
+});
+
+test('heartbeats newer than the boot are judged as before', () => {
+  const v = decide({ ...base, dispatcherAgeSec: 4000, sinceStartSec: 30 * 24 * 3600 });
+  assert.equal(v.condition, 'dispatcher-dead');
+  assert.equal(v.reset, true);
+  assert.match(v.detail, /DISPATCHER_HEARTBEAT is 67 min old/);
+});
+
 test('dispatcher dead while the VM is alive resets only after its own threshold', () => {
   const late = decide({ ...base, dispatcherAgeSec: 2000 });
   assert.equal(late.condition, 'dispatcher-late');
