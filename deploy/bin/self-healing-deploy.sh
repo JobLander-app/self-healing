@@ -18,6 +18,7 @@ WATCH_LOCK="${DEPLOY_WATCH_LOCK:-/home/joblander/.output-watch.lock}"
 # for minutes).
 WATCH_WAIT_SEC="${DEPLOY_WATCH_WAIT_SEC:-50}"
 MONITOR_LOCK="${DEPLOY_MONITOR_LOCK:-/tmp/joblander-Monitor.lock}"
+METADATA_URL="${DEPLOY_METADATA_URL:-http://metadata.google.internal/computeMetadata/v1/instance/attributes}"
 TRANSACTION_FILE="${DEPLOY_TRANSACTION_FILE:-/var/lib/self-healing-deploy/transaction.env}"
 HEALTH_URL="${DEPLOY_HEALTH_URL:-http://localhost:4100/health}"
 STATUS_URL="${DEPLOY_STATUS_URL:-http://localhost:4100/status}"
@@ -278,6 +279,46 @@ file.write_text(file.read_text().replace('__CONSOLE_DOMAIN__', sys.argv[2]))
 PYRENDER
   fi
 done
+# A Caddyfile is installed whole, so it must carry every vhost this host
+# serves. The Chatwoot vhost comes from the host's Terraform declaration
+# (instance metadata) through the renderer init.sh uses. When the declaration
+# cannot be read, this release leaves the installed Caddyfile alone rather
+# than drop a vhost it cannot account for: on 2026-10-13 a release installed
+# the console-only template and chat.joblander.app was down for an hour.
+managed_config() {
+  local source
+  for source in ${CONFIG_SOURCES[@]+"${CONFIG_SOURCES[@]}"}; do [ "$source" = "$1" ] && return 0; done
+  return 1
+}
+drop_config() {
+  local i sources=() targets=()
+  for ((i=0; i<${#CONFIG_SOURCES[@]}; i++)); do
+    [ "${CONFIG_SOURCES[i]}" = "$1" ] && continue
+    sources+=("${CONFIG_SOURCES[i]}"); targets+=("${CONFIG_TARGETS[i]}")
+  done
+  CONFIG_SOURCES=(${sources[@]+"${sources[@]}"}); CONFIG_TARGETS=(${targets[@]+"${targets[@]}"})
+}
+chatwoot_vhost() {
+  local domain port
+  if [ -n "${DEPLOY_CHATWOOT_DOMAIN+set}" ]; then
+    domain="$DEPLOY_CHATWOOT_DOMAIN"; port="${DEPLOY_CHATWOOT_PORT:-3100}"
+  else
+    domain="$(curl -fsS --max-time 5 -H 'Metadata-Flavor: Google' "$METADATA_URL/chatwoot-domain")" || return 1
+    [ -n "$domain" ] || return 0
+    port="$(curl -fsS --max-time 5 -H 'Metadata-Flavor: Google' "$METADATA_URL/chatwoot-upstream-port")" || return 1
+  fi
+  bash "$TX/stage/deploy/bin/render-chatwoot-vhost.sh" "$domain" "${port:-3100}"
+}
+if managed_config deploy/caddy/Caddyfile && [ -f "$TX/stage/deploy/caddy/Caddyfile" ]; then
+  # An unreadable declaration is an answer here, not a staging failure: the
+  # inherited ERR trap would clean up the stage from inside this subshell.
+  if vhost="$(trap - ERR; chatwoot_vhost)"; then
+    [ -z "$vhost" ] || printf '%s\n' "$vhost" >>"$TX/stage/deploy/caddy/Caddyfile"
+  else
+    log "caddy: chatwoot-domain metadata unreadable; leaving the installed Caddyfile as it is"
+    drop_config deploy/caddy/Caddyfile
+  fi
+fi
 # Converge the full desired config, including drift left by older CD versions
 # that reset source without copying dashboards/provisioning to the host.
 for ((i=0; i<${#CONFIG_SOURCES[@]}; i++)); do

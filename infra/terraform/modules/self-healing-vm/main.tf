@@ -99,6 +99,10 @@ resource "google_compute_instance" "this" {
       chatwoot_upstream_port = var.chatwoot_upstream_port
       grafana_admin_secret   = var.grafana_admin_secret
     })
+    # Read by every release (deploy/bin/self-healing-deploy.sh) so it installs
+    # the same Caddy vhosts init.sh renders. Empty domain: no Chatwoot here.
+    chatwoot-domain        = var.chatwoot_domain
+    chatwoot-upstream-port = tostring(var.chatwoot_upstream_port)
   }
 
   # Allow machine-type bumps etc. without manual stop/start choreography.

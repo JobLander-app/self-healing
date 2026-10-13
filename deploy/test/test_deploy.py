@@ -82,8 +82,13 @@ case "$*" in
 esac
 exit 0
 ''')
+        self.mock('caddy', '#!/bin/sh\nexit 0\n')
         self.mock('curl', '''#!/bin/sh
 case "$*" in
+  *computeMetadata*/chatwoot-domain) [ -n "${MOCK_META_CHATWOOT_DOMAIN+set}" ] || exit 22
+    printf '%s' "$MOCK_META_CHATWOOT_DOMAIN" ;;
+  *computeMetadata*/chatwoot-upstream-port) [ -n "${MOCK_META_CHATWOOT_PORT+set}" ] || exit 22
+    printf '%s' "$MOCK_META_CHATWOOT_PORT" ;;
   *status*) [ "${MOCK_STATUS_UNREACHABLE:-}" != 1 ] || exit 7
     printf '{"busy":%s}' "${MOCK_BUSY:-false}" ;;
   *4200*) printf '{"ok":false,"rowCount":4}' ;;
@@ -273,6 +278,51 @@ def migrate_state(config):
         self.git('push', '-q', 'origin', 'main')
         self.git('reset', '-q', '--keep', self.old)
         self.write(self.host / 'etc/grafana/grafana.ini', '[server]\nroot_url = https://alerts.example.test/path\n')
+
+    CONSOLE_TEMPLATE = '__CONSOLE_DOMAIN__ {\n\treverse_proxy localhost:3000\n}\n'
+    INSTALLED_CADDYFILE = ('console.example.test {\n\treverse_proxy localhost:3000\n}\n'
+                           'chat.example.test {\n\treverse_proxy localhost:3100\n}\n')
+
+    def install_caddy_template(self):
+        self.git('reset', '-q', '--keep', self.new)
+        self.write(self.repo / 'deploy/caddy/Caddyfile', self.CONSOLE_TEMPLATE)
+        renderer = SCRIPT.parent / 'render-chatwoot-vhost.sh'
+        self.write(self.repo / 'deploy/bin/render-chatwoot-vhost.sh', renderer.read_text())
+        self.git('add', 'deploy/caddy/Caddyfile', 'deploy/bin/render-chatwoot-vhost.sh')
+        self.git('commit', '-qm', 'caddy template')
+        self.new = self.git('rev-parse', 'HEAD').strip()
+        self.git('push', '-q', 'origin', 'main')
+        self.git('reset', '-q', '--keep', self.old)
+        self.write(self.host / 'etc/caddy/Caddyfile', self.INSTALLED_CADDYFILE)
+
+    def test_a_release_keeps_the_chatwoot_vhost_the_host_declares(self):
+        # 2026-10-13: a release installed the console-only template and took
+        # chat.joblander.app down for an hour.
+        self.install_caddy_template()
+        result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test',
+                             MOCK_META_CHATWOOT_DOMAIN='chat.example.test', MOCK_META_CHATWOOT_PORT='3100')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.new)
+        vhost = self.run_cmd('bash', str(SCRIPT.parent / 'render-chatwoot-vhost.sh'), 'chat.example.test', '3100')
+        self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(),
+                         'console.example.test {\n\treverse_proxy localhost:3000\n}\n' + vhost)
+        self.assertIn('caddy.service', (self.root / 'systemctl.log').read_text())
+
+    def test_a_host_declaring_no_chatwoot_gets_the_console_only_caddyfile(self):
+        self.install_caddy_template()
+        result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test', MOCK_META_CHATWOOT_DOMAIN='')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(),
+                         'console.example.test {\n\treverse_proxy localhost:3000\n}\n')
+
+    def test_an_unreadable_chatwoot_declaration_leaves_the_installed_caddyfile(self):
+        self.install_caddy_template()
+        result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.new)
+        self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(), self.INSTALLED_CADDYFILE)
+        self.assertIn('chatwoot-domain metadata unreadable', (self.root / 'deploy.log').read_text())
+        self.assertNotIn('caddy.service', (self.root / 'systemctl.log').read_text())
 
     def test_console_domain_is_recovered_from_production_root_url_shape(self):
         self.install_console_template()
