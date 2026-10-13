@@ -119,6 +119,15 @@ migration rollout, before removing old resources. Add and verify replacements
 before retiring their predecessors. Never derive expected coverage from the
 set of currently running VMs or from whichever resources emitted recent logs.
 
+When a target's shutdown is scheduled, give it `until` (an ISO timestamp with a
+timezone) plus `until_reason` and `until_evidence` (an https link), and merge
+that before the deletion. After `until` the target is no longer inspected, so
+the planned deletion does not file a coverage ticket. The entry stays in the
+file, so removing a target by accident still fails validation. The JobLander
+closure uses this: the LiveKit config check ends when the site left Cloud Run
+(JOB-1232), and the voice-agent worker pools end at the Practice cutoff,
+2026-10-19T12:00Z (JOB-1231).
+
 Every collection checks the expected worker deployments and the app's actual
 LIVEKIT_URL. It records a policy revision and each observation in the report.
 Missing permissions, missing resources and failed lookups remain UNKNOWN;

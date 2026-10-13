@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import tempfile
@@ -8,15 +9,31 @@ from unittest.mock import Mock, patch
 import run_monitor as runner
 import topology
 
+UNTIL_KEYS = ("until", "until_reason", "until_evidence")
+
+
+def open_ended(targets):
+    """The checked-in targets with every reviewed end of coverage removed."""
+    value = copy.deepcopy(targets)
+    for target in [value["livekit"], *value["voice_agents"]]:
+        for key in UNTIL_KEYS:
+            target.pop(key, None)
+    return value
+
+
+def write_targets(directory, value):
+    path = Path(directory) / "targets.json"
+    path.write_text(json.dumps(value))
+    return path
+
 
 class TopologyTests(unittest.TestCase):
     def test_missing_resources_do_not_disappear_from_expected_coverage(self):
-        targets = topology.load_targets()
+        targets = open_ended(topology.load_targets())
         fetch = Mock(side_effect=RuntimeError("permission denied or missing"))
         result = topology.inspect_targets(targets, fetch)
         self.assertEqual(len(result), len(targets["voice_agents"]) + 1)
         self.assertTrue(all(t["status"] == "UNKNOWN" for t in result))
-        self.assertEqual(topology.load_targets(), targets)
 
     def test_deployed_configuration_drift_and_not_ready_are_explicit(self):
         def fetch(project, kind, name, region):
@@ -24,8 +41,29 @@ class TopologyTests(unittest.TestCase):
                 return {"status": {"conditions": [{"type": "Ready", "status": "False"}]}}
             return {"spec": {"template": {"spec": {"containers": [{"env": [
                 {"name": "LIVEKIT_URL", "value": "wss://replacement.livekit.cloud"}]}]}}}}
-        result = topology.inspect_targets(topology.load_targets(), fetch)
+        result = topology.inspect_targets(open_ended(topology.load_targets()), fetch)
         self.assertEqual([r["status"] for r in result], ["NOT_READY"] * 3 + ["DRIFT"])
+
+    def test_targets_are_inspected_until_their_reviewed_end_of_coverage(self):
+        targets = topology.load_targets()
+        cutoff = topology.coverage_until(targets["voice_agents"][0])
+        fetch = Mock(side_effect=RuntimeError("missing"))
+        before = topology.inspect_targets(targets, fetch, now=cutoff.replace(hour=11))
+        self.assertEqual([r["kind"] for r in before], ["worker-pool"] * 3)
+        self.assertEqual(topology.inspect_targets(targets, fetch, now=cutoff), [])
+        self.assertEqual(topology.inspect_targets(targets, fetch, now=datetime(2027, 1, 1, tzinfo=timezone.utc)), [])
+
+    def test_end_of_coverage_requires_timezone_reason_and_evidence(self):
+        base = topology.load_targets()
+        cases = []
+        naive = copy.deepcopy(base); naive["voice_agents"][0]["until"] = "2026-10-19T12:00:00"; cases.append(naive)
+        garbage = copy.deepcopy(base); garbage["livekit"]["until"] = "soon"; cases.append(garbage)
+        no_reason = copy.deepcopy(base); no_reason["voice_agents"][1]["until_reason"] = ""; cases.append(no_reason)
+        no_evidence = copy.deepcopy(base); del no_evidence["livekit"]["until_evidence"]; cases.append(no_evidence)
+        with tempfile.TemporaryDirectory() as directory:
+            for value in cases:
+                with self.assertRaises(ValueError):
+                    topology.load_targets(write_targets(directory, value))
 
     def test_next_retirement_needs_data_only_and_retains_unrelated_pages(self):
         targets = copy.deepcopy(topology.load_targets())

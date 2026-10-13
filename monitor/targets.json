@@ -5,20 +5,32 @@
     "hosting": "cloud",
     "endpoint": "wss://ai-coach-5ctqnjx6.livekit.cloud",
     "config_service": "joblander-app",
-    "config_region": "europe-west1"
+    "config_region": "europe-west1",
+    "until": "2026-10-12T22:25:00Z",
+    "until_reason": "The site moved to Vercel and Cloud Run joblander-app was deleted; its LIVEKIT_URL is no longer readable through gcloud",
+    "until_evidence": "https://linear.app/joblander/issue/JOB-1232"
   },
   "voice_agents": [
     {
       "name": "voice-agent-eu",
-      "region": "europe-west1"
+      "region": "europe-west1",
+      "until": "2026-10-19T12:00:00Z",
+      "until_reason": "Practice ends at the closure cutoff and the worker pool is deleted",
+      "until_evidence": "https://linear.app/joblander/issue/JOB-1231"
     },
     {
       "name": "voice-agent-us",
-      "region": "us-central1"
+      "region": "us-central1",
+      "until": "2026-10-19T12:00:00Z",
+      "until_reason": "Practice ends at the closure cutoff and the worker pool is deleted",
+      "until_evidence": "https://linear.app/joblander/issue/JOB-1231"
     },
     {
       "name": "voice-agent-in",
-      "region": "asia-south1"
+      "region": "asia-south1",
+      "until": "2026-10-19T12:00:00Z",
+      "until_reason": "Practice ends at the closure cutoff and the worker pool is deleted",
+      "until_evidence": "https://linear.app/joblander/issue/JOB-1231"
     }
   ],
   "retired_resources": [
