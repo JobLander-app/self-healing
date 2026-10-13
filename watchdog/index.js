@@ -25,7 +25,7 @@
 
 const functions = require('@google-cloud/functions-framework');
 const { loadConfig } = require('./config');
-const { decide, OK } = require('./decide');
+const { decide, OK, BOOTING } = require('./decide');
 const { decideDelivery } = require('./relay-policy');
 const gcp = require('./gcp');
 
@@ -130,7 +130,7 @@ async function runWatchdog() {
     }
   }
 
-  state.condition = verdict.condition;
+  state.condition = verdict.stateCondition;
   state.updatedAt = new Date(nowMs).toISOString();
   await gcp.writeState({ bucket: cfg.stateBucket, object: cfg.stateObject, state });
 
@@ -140,7 +140,7 @@ async function runWatchdog() {
     projectId: cfg.projectId,
     logId: cfg.watchdogLogId,
     text: `${HEARTBEAT_TEXT} condition=${verdict.condition} watcher_age=${ages.watcher} dispatcher_age=${ages.dispatcher} canary_age=${ages.canary} instance=${instanceStatus} actions=${actionsTaken.join('|') || 'none'}`,
-    severity: verdict.condition === OK ? 'INFO' : 'ERROR',
+    severity: verdict.condition === OK || verdict.condition === BOOTING ? 'INFO' : 'ERROR',
   });
 
   return { condition: verdict.condition, ages, instanceStatus, actionsTaken, failures, reasons: verdict.reasons };

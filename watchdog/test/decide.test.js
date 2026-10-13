@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { decide, OK } = require('../decide');
+const { decide, OK, BOOTING } = require('../decide');
 
 const cfg = {
   instance: 'self-healing-1',
@@ -73,9 +73,33 @@ test('a fresh boot after a long stop is not reset on pre-boot heartbeats (2026-1
   // Stopped for 36 h, started 4 min ago: the watcher already ticked, the
   // dispatcher's 5-minute heartbeat has not yet.
   const v = decide({ ...base, watcherAgeSec: 60, dispatcherAgeSec: 36 * 3600, sinceStartSec: 240 });
-  assert.equal(v.condition, OK);
+  assert.equal(v.condition, BOOTING);
   assert.equal(v.reset, false);
   assert.equal(v.page, false);
+  assert.equal(v.stateCondition, OK);
+});
+
+test('a boot grace after a reset neither pages RECOVERED nor forgets the outage', () => {
+  const after = { ...base.state, condition: 'dispatcher-dead' };
+  const grace = decide({ ...base, dispatcherAgeSec: 36 * 3600, sinceStartSec: 240, state: after });
+  assert.equal(grace.condition, BOOTING);
+  assert.equal(grace.page, false);
+  assert.equal(grace.recovered, false);
+  assert.equal(grace.stateCondition, 'dispatcher-dead', 'the outage carries over to the first real verdict');
+
+  const proven = decide({ ...base, dispatcherAgeSec: 100, sinceStartSec: 400, state: after });
+  assert.equal(proven.condition, OK);
+  assert.equal(proven.recovered, true);
+  assert.equal(proven.page, true);
+});
+
+test('a healthy start that boots quietly sends nothing at all', () => {
+  const grace = decide({ ...base, watcherAgeSec: null, dispatcherAgeSec: null, sinceStartSec: 90 });
+  assert.equal(grace.condition, BOOTING);
+  assert.equal(grace.page, false);
+  const proven = decide({ ...base, sinceStartSec: 400, state: { ...base.state, condition: grace.stateCondition } });
+  assert.equal(proven.condition, OK);
+  assert.equal(proven.page, false);
 });
 
 test('a stream that never reports after boot still goes dead on uptime', () => {

@@ -26,6 +26,9 @@
 //
 // Heartbeat ages in rules 2–5 count from no earlier than the instance's last
 // start, so a VM that was stopped for days is not reset minutes after it boots.
+// Until every stream has reported since the boot (and none is past a
+// threshold) the verdict is `booting`: no page, no RECOVERED, and the previous
+// condition is kept for the first real verdict.
 //
 // TWO INVARIANTS THAT MATTER MORE THAN THE THRESHOLDS
 //
@@ -40,6 +43,7 @@
 //    reboot loop is the classic failure of automatic recovery.
 
 const OK = 'ok';
+const BOOTING = 'booting';
 
 /**
  * @param {object} input
@@ -127,6 +131,16 @@ function decide({ nowMs, watcherAgeSec: rawWatcherAgeSec, dispatcherAgeSec: rawD
       : `the alert-path canary was last delivered ${Math.round(canaryAgeSec / 3600)}h ago (stale after ${Math.round(cfg.canaryStaleSec / 3600)}h)`;
   }
 
+  // Inside the boot grace a stream that has not reported since the boot is
+  // past no threshold, yet it has proven nothing either. That is no verdict
+  // yet: not `ok` (a box that proved nothing must not page RECOVERED), not a
+  // page, and the previous condition carries over to the first real verdict.
+  const booting = condition === OK && (predatesBoot(rawWatcherAgeSec) || predatesBoot(rawDispatcherAgeSec));
+  if (booting) {
+    condition = BOOTING;
+    detail = `waiting for the first heartbeat since the instance started ${Math.round(sinceStartSec / 60)} min ago`;
+  }
+
   // ---- reset budget --------------------------------------------------------
   let resetAllowed = wantReset;
   if (wantReset) {
@@ -150,12 +164,15 @@ function decide({ nowMs, watcherAgeSec: rawWatcherAgeSec, dispatcherAgeSec: rawD
   const lastPageAt = Number(state.lastPageAt || 0);
   const pageCooldownMs = cfg.resetCooldownSec * 1000;
   const shouldPage =
-    condition !== OK
-      ? transitioned || resetAllowed || wantStart || nowMs - lastPageAt >= pageCooldownMs
-      : transitioned && previous !== OK; // RECOVERED notice
+    booting ? false
+      : condition !== OK
+        ? transitioned || resetAllowed || wantStart || nowMs - lastPageAt >= pageCooldownMs
+        : transitioned && previous !== OK; // RECOVERED notice
 
   return {
     condition,
+    // What to persist as state.condition: a boot grace is not a verdict.
+    stateCondition: booting ? previous : condition,
     detail,
     reasons,
     reset: resetAllowed,
@@ -166,4 +183,4 @@ function decide({ nowMs, watcherAgeSec: rawWatcherAgeSec, dispatcherAgeSec: rawD
   };
 }
 
-module.exports = { decide, OK };
+module.exports = { decide, OK, BOOTING };
