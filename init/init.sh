@@ -458,17 +458,13 @@ if [ -d "$SH_DIR" ]; then
   #
   # Without this block the vhost exists only as a hand-edit of
   # /etc/caddy/Caddyfile, and the next `terraform apply` silently wipes it,
-  # taking customer support offline.
+  # taking customer support offline. The block comes from the same renderer
+  # every release uses (self-healing-deploy.sh reads the domain from the
+  # chatwoot-domain instance metadata), so a deploy cannot install a
+  # Caddyfile without it either.
   if [ -n "$CHATWOOT_DOMAIN" ]; then
-    cat >> /etc/caddy/Caddyfile <<CADDY_CHATWOOT
-
-# Chatwoot support app (docker compose stack at /opt/chatwoot). TLS is issued
-# and renewed automatically by Caddy over ACME HTTP-01, which works because
-# $CHATWOOT_DOMAIN resolves to this VM.
-$CHATWOOT_DOMAIN {
-	reverse_proxy localhost:$CHATWOOT_UPSTREAM_PORT
-}
-CADDY_CHATWOOT
+    bash "$SH_DIR/deploy/bin/render-chatwoot-vhost.sh" "$CHATWOOT_DOMAIN" "$CHATWOOT_UPSTREAM_PORT" \
+      >> /etc/caddy/Caddyfile
     log "caddy: rendered Chatwoot vhost $CHATWOOT_DOMAIN -> localhost:$CHATWOOT_UPSTREAM_PORT"
   fi
 

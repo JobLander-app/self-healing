@@ -82,8 +82,13 @@ case "$*" in
 esac
 exit 0
 ''')
+        self.mock('caddy', '#!/bin/sh\nexit 0\n')
         self.mock('curl', '''#!/bin/sh
 case "$*" in
+  *computeMetadata*/chatwoot-domain) [ -n "${MOCK_META_CHATWOOT_DOMAIN+set}" ] || exit 22
+    printf '%s' "$MOCK_META_CHATWOOT_DOMAIN" ;;
+  *computeMetadata*/chatwoot-upstream-port) [ -n "${MOCK_META_CHATWOOT_PORT+set}" ] || exit 22
+    printf '%s' "$MOCK_META_CHATWOOT_PORT" ;;
   *status*) [ "${MOCK_STATUS_UNREACHABLE:-}" != 1 ] || exit 7
     printf '{"busy":%s}' "${MOCK_BUSY:-false}" ;;
   *4200*) printf '{"ok":false,"rowCount":4}' ;;
@@ -273,6 +278,80 @@ def migrate_state(config):
         self.git('push', '-q', 'origin', 'main')
         self.git('reset', '-q', '--keep', self.old)
         self.write(self.host / 'etc/grafana/grafana.ini', '[server]\nroot_url = https://alerts.example.test/path\n')
+
+    CONSOLE_TEMPLATE = '__CONSOLE_DOMAIN__ {\n\treverse_proxy localhost:3000\n}\n'
+    INSTALLED_CADDYFILE = ('console.example.test {\n\treverse_proxy localhost:3000\n}\n'
+                           'chat.example.test {\n\treverse_proxy localhost:3100\n}\n')
+
+    def install_caddy_template(self):
+        self.git('reset', '-q', '--keep', self.new)
+        self.write(self.repo / 'deploy/caddy/Caddyfile', self.CONSOLE_TEMPLATE)
+        renderer = SCRIPT.parent / 'render-chatwoot-vhost.sh'
+        self.write(self.repo / 'deploy/bin/render-chatwoot-vhost.sh', renderer.read_text())
+        self.git('add', 'deploy/caddy/Caddyfile', 'deploy/bin/render-chatwoot-vhost.sh')
+        self.git('commit', '-qm', 'caddy template')
+        self.new = self.git('rev-parse', 'HEAD').strip()
+        self.git('push', '-q', 'origin', 'main')
+        self.git('reset', '-q', '--keep', self.old)
+        self.write(self.host / 'etc/caddy/Caddyfile', self.INSTALLED_CADDYFILE)
+
+    def test_a_release_keeps_the_chatwoot_vhost_the_host_declares(self):
+        # 2026-10-13: a release installed the console-only template and took
+        # chat.joblander.app down for an hour.
+        self.install_caddy_template()
+        result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test',
+                             MOCK_META_CHATWOOT_DOMAIN='chat.example.test', MOCK_META_CHATWOOT_PORT='3100')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.new)
+        vhost = self.run_cmd('bash', str(SCRIPT.parent / 'render-chatwoot-vhost.sh'), 'chat.example.test', '3100')
+        self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(),
+                         'console.example.test {\n\treverse_proxy localhost:3000\n}\n' + vhost)
+        self.assertIn('caddy.service', (self.root / 'systemctl.log').read_text())
+
+    def test_a_host_declaring_no_chatwoot_gets_the_console_only_caddyfile(self):
+        self.install_caddy_template()
+        result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test', MOCK_META_CHATWOOT_DOMAIN='')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(),
+                         'console.example.test {\n\treverse_proxy localhost:3000\n}\n')
+
+    def test_an_unreadable_declaration_defers_the_release_until_it_recovers(self):
+        self.install_caddy_template()
+        notified = self.root / 'notified.log'
+        self.mock('notify', f'#!/bin/sh\nprintf "%s\\n" "$1" >> {notified}\n')
+        for _ in range(2):
+            result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test', DEPLOY_NOTIFY_SCRIPT=str(self.bin / 'notify'))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.old)
+            self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(), self.INSTALLED_CADDYFILE)
+            self.assertFalse((self.root / 'systemctl.log').exists())
+        self.assertIn('deferring: chatwoot-domain metadata unreadable', (self.root / 'deploy.log').read_text())
+        self.assertEqual(len(notified.read_text().splitlines()), 1, 'one notice per blocked release')
+        # Once the declaration is readable, the same release ships with the vhost.
+        result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test',
+                             MOCK_META_CHATWOOT_DOMAIN='chat.example.test', MOCK_META_CHATWOOT_PORT='3100')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.new)
+        self.assertIn('chat.example.test {\n\treverse_proxy localhost:3100\n}\n',
+                      (self.host / 'etc/caddy/Caddyfile').read_text())
+
+    def test_an_invalid_chatwoot_declaration_is_named_and_defers_the_release(self):
+        self.install_caddy_template()
+        result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test',
+                             MOCK_META_CHATWOOT_DOMAIN='chat.example.test', MOCK_META_CHATWOOT_PORT='99999')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.old)
+        self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(), self.INSTALLED_CADDYFILE)
+        self.assertIn('deferring: the declared Chatwoot vhost is invalid', (self.root / 'deploy.log').read_text())
+
+    def test_the_renderer_rejects_malformed_declarations(self):
+        renderer = str(SCRIPT.parent / 'render-chatwoot-vhost.sh')
+        for domain, port in [('.', '3100'), ('-', '3100'), ('a..b', '3100'), ('-a.test', '3100'),
+                             ('chat.test', '0'), ('chat.test', '65536'), ('chat.test', 'x')]:
+            result = subprocess.run(['bash', renderer, domain, port], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 1, (domain, port))
+            self.assertEqual(result.stdout, '')
+        self.assertIn('chat.test {', self.run_cmd('bash', renderer, 'chat.test', '65535'))
 
     def test_console_domain_is_recovered_from_production_root_url_shape(self):
         self.install_console_template()
