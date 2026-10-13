@@ -24,6 +24,12 @@
 //   7. Otherwise                       -> ok (and a RECOVERED page if the
 //                                         previous run was not ok).
 //
+// Heartbeat ages in rules 2–5 count from no earlier than the instance's last
+// start, so a VM that was stopped for days is not reset minutes after it boots.
+// Until every stream has reported since the boot (and none is past a
+// threshold) the verdict is `booting`: no page, no RECOVERED, and the previous
+// condition is kept for the first real verdict.
+//
 // TWO INVARIANTS THAT MATTER MORE THAN THE THRESHOLDS
 //
 // a) Never reset on a signal that has never been seen. If no heartbeat has
@@ -37,6 +43,7 @@
 //    reboot loop is the classic failure of automatic recovery.
 
 const OK = 'ok';
+const BOOTING = 'booting';
 
 /**
  * @param {object} input
@@ -44,11 +51,31 @@ const OK = 'ok';
  * @param {number|null} input.watcherAgeSec    null = no entry found in lookback
  * @param {number|null} input.dispatcherAgeSec null = no entry found in lookback
  * @param {number|null} [input.canaryAgeSec]     null = no canary delivery found
+ * @param {number|null} [input.sinceStartSec]    seconds since the instance last started; null = unknown
  * @param {string} input.instanceStatus        RUNNING | TERMINATED | ...
  * @param {object} input.state                 persisted watchdog state
  * @param {object} input.cfg
  */
-function decide({ nowMs, watcherAgeSec, dispatcherAgeSec, canaryAgeSec = null, instanceStatus, state, cfg }) {
+function decide({ nowMs, watcherAgeSec: rawWatcherAgeSec, dispatcherAgeSec: rawDispatcherAgeSec, canaryAgeSec = null, sinceStartSec = null, instanceStatus, state, cfg }) {
+  // A heartbeat written before the current boot says nothing about this boot.
+  // A VM started after a long stop has stale heartbeats by definition until its
+  // crons tick, and judging it by them reset a fresh boot on 2026-10-13 four
+  // minutes after it came up. So a stream is aged from the later of its last
+  // heartbeat and the instance start: a fresh boot gets its full thresholds,
+  // and a stream that never reports after boot still goes dead on uptime.
+  // A missing heartbeat only means "none in the lookback", so it is aged from
+  // the boot only when the boot is inside the lookback; otherwise it stays
+  // null and reads as before.
+  const bootInLookback = sinceStartSec !== null && sinceStartSec <= cfg.lookbackSec;
+  const sinceBoot = (age) => (sinceStartSec === null ? age
+    : age === null ? (bootInLookback ? sinceStartSec : null)
+      : Math.min(age, sinceStartSec));
+  const predatesBoot = (age) => (age === null ? bootInLookback : sinceStartSec !== null && age > sinceStartSec);
+  const ageText = (stream, raw, aged) => (predatesBoot(raw)
+    ? `no ${stream} since the instance started ${Math.round(aged / 60)} min ago`
+    : `${stream} is ${Math.round(aged / 60)} min old`);
+  const watcherAgeSec = sinceBoot(rawWatcherAgeSec);
+  const dispatcherAgeSec = sinceBoot(rawDispatcherAgeSec);
   const reasons = [];
   const seenWatcher = Boolean(state.everSeenWatcher);
   const seenDispatcher = Boolean(state.everSeenDispatcher);
@@ -70,7 +97,7 @@ function decide({ nowMs, watcherAgeSec, dispatcherAgeSec, canaryAgeSec = null, i
     condition = 'watcher-dead';
     detail = watcherAgeSec === null
       ? `no WATCHER_HEARTBEAT in the last ${Math.round(cfg.lookbackSec / 3600)}h`
-      : `WATCHER_HEARTBEAT is ${Math.round(watcherAgeSec / 60)} min old (reset threshold ${Math.round(cfg.watcherResetSec / 60)} min)`;
+      : `${ageText('WATCHER_HEARTBEAT', rawWatcherAgeSec, watcherAgeSec)} (reset threshold ${Math.round(cfg.watcherResetSec / 60)} min)`;
     if (!seenWatcher) {
       reasons.push('not resetting: this watchdog has never observed a watcher heartbeat — suspect configuration, not the VM');
     } else {
@@ -78,12 +105,12 @@ function decide({ nowMs, watcherAgeSec, dispatcherAgeSec, canaryAgeSec = null, i
     }
   } else if (watcherAgeSec > cfg.watcherPageSec) {
     condition = 'watcher-late';
-    detail = `WATCHER_HEARTBEAT is ${Math.round(watcherAgeSec / 60)} min old (page threshold ${Math.round(cfg.watcherPageSec / 60)} min)`;
+    detail = `${ageText('WATCHER_HEARTBEAT', rawWatcherAgeSec, watcherAgeSec)} (page threshold ${Math.round(cfg.watcherPageSec / 60)} min)`;
   } else if (dispatcherAgeSec === null || dispatcherAgeSec > cfg.dispatcherResetSec) {
     condition = 'dispatcher-dead';
     detail = dispatcherAgeSec === null
       ? `no DISPATCHER_HEARTBEAT in the last ${Math.round(cfg.lookbackSec / 3600)}h (VM itself is alive)`
-      : `DISPATCHER_HEARTBEAT is ${Math.round(dispatcherAgeSec / 60)} min old while the VM is alive (reset threshold ${Math.round(cfg.dispatcherResetSec / 60)} min)`;
+      : `${ageText('DISPATCHER_HEARTBEAT', rawDispatcherAgeSec, dispatcherAgeSec)} while the VM is alive (reset threshold ${Math.round(cfg.dispatcherResetSec / 60)} min)`;
     if (!seenDispatcher) {
       reasons.push('not resetting: this watchdog has never observed a dispatcher heartbeat — suspect configuration, not the daemon');
     } else {
@@ -91,7 +118,7 @@ function decide({ nowMs, watcherAgeSec, dispatcherAgeSec, canaryAgeSec = null, i
     }
   } else if (dispatcherAgeSec > cfg.dispatcherPageSec) {
     condition = 'dispatcher-late';
-    detail = `DISPATCHER_HEARTBEAT is ${Math.round(dispatcherAgeSec / 60)} min old (page threshold ${Math.round(cfg.dispatcherPageSec / 60)} min)`;
+    detail = `${ageText('DISPATCHER_HEARTBEAT', rawDispatcherAgeSec, dispatcherAgeSec)} (page threshold ${Math.round(cfg.dispatcherPageSec / 60)} min)`;
   } else if (
     seenCanary &&
     (canaryAgeSec === null || canaryAgeSec > cfg.canaryStaleSec)
@@ -102,6 +129,16 @@ function decide({ nowMs, watcherAgeSec, dispatcherAgeSec, canaryAgeSec = null, i
     detail = canaryAgeSec === null
       ? 'the daily alert-path canary has not been delivered inside the lookback window'
       : `the alert-path canary was last delivered ${Math.round(canaryAgeSec / 3600)}h ago (stale after ${Math.round(cfg.canaryStaleSec / 3600)}h)`;
+  }
+
+  // Inside the boot grace a stream that has not reported since the boot is
+  // past no threshold, yet it has proven nothing either. That is no verdict
+  // yet: not `ok` (a box that proved nothing must not page RECOVERED), not a
+  // page, and the previous condition carries over to the first real verdict.
+  const booting = condition === OK && (predatesBoot(rawWatcherAgeSec) || predatesBoot(rawDispatcherAgeSec));
+  if (booting) {
+    condition = BOOTING;
+    detail = `waiting for the first heartbeat since the instance started ${Math.round(sinceStartSec / 60)} min ago`;
   }
 
   // ---- reset budget --------------------------------------------------------
@@ -127,12 +164,15 @@ function decide({ nowMs, watcherAgeSec, dispatcherAgeSec, canaryAgeSec = null, i
   const lastPageAt = Number(state.lastPageAt || 0);
   const pageCooldownMs = cfg.resetCooldownSec * 1000;
   const shouldPage =
-    condition !== OK
-      ? transitioned || resetAllowed || wantStart || nowMs - lastPageAt >= pageCooldownMs
-      : transitioned && previous !== OK; // RECOVERED notice
+    booting ? false
+      : condition !== OK
+        ? transitioned || resetAllowed || wantStart || nowMs - lastPageAt >= pageCooldownMs
+        : transitioned && previous !== OK; // RECOVERED notice
 
   return {
     condition,
+    // What to persist as state.condition: a boot grace is not a verdict.
+    stateCondition: booting ? previous : condition,
     detail,
     reasons,
     reset: resetAllowed,
@@ -143,4 +183,4 @@ function decide({ nowMs, watcherAgeSec, dispatcherAgeSec, canaryAgeSec = null, i
   };
 }
 
-module.exports = { decide, OK };
+module.exports = { decide, OK, BOOTING };

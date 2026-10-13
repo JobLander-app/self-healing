@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { decide, OK } = require('../decide');
+const { decide, OK, BOOTING } = require('../decide');
 
 const cfg = {
   instance: 'self-healing-1',
@@ -67,6 +67,71 @@ test('never resets on a heartbeat stream it has never seen (misconfiguration gua
   assert.equal(v.reset, false, 'a log id typo must not power-cycle a healthy VM');
   assert.equal(v.page, true);
   assert.match(v.reasons.join(' '), /never observed a watcher heartbeat/);
+});
+
+test('a fresh boot after a long stop is not reset on pre-boot heartbeats (2026-10-13)', () => {
+  // Stopped for 36 h, started 4 min ago: the watcher already ticked, the
+  // dispatcher's 5-minute heartbeat has not yet.
+  const v = decide({ ...base, watcherAgeSec: 60, dispatcherAgeSec: 36 * 3600, sinceStartSec: 240 });
+  assert.equal(v.condition, BOOTING);
+  assert.equal(v.reset, false);
+  assert.equal(v.page, false);
+  assert.equal(v.stateCondition, OK);
+});
+
+test('a boot grace after a reset neither pages RECOVERED nor forgets the outage', () => {
+  const after = { ...base.state, condition: 'dispatcher-dead' };
+  const grace = decide({ ...base, dispatcherAgeSec: 36 * 3600, sinceStartSec: 240, state: after });
+  assert.equal(grace.condition, BOOTING);
+  assert.equal(grace.page, false);
+  assert.equal(grace.recovered, false);
+  assert.equal(grace.stateCondition, 'dispatcher-dead', 'the outage carries over to the first real verdict');
+
+  const proven = decide({ ...base, dispatcherAgeSec: 100, sinceStartSec: 400, state: after });
+  assert.equal(proven.condition, OK);
+  assert.equal(proven.recovered, true);
+  assert.equal(proven.page, true);
+});
+
+test('a healthy start that boots quietly sends nothing at all', () => {
+  const grace = decide({ ...base, watcherAgeSec: null, dispatcherAgeSec: null, sinceStartSec: 90 });
+  assert.equal(grace.condition, BOOTING);
+  assert.equal(grace.page, false);
+  const proven = decide({ ...base, sinceStartSec: 400, state: { ...base.state, condition: grace.stateCondition } });
+  assert.equal(proven.condition, OK);
+  assert.equal(proven.page, false);
+});
+
+test('a stream that never reports after boot still goes dead on uptime', () => {
+  const late = decide({ ...base, dispatcherAgeSec: 36 * 3600, sinceStartSec: 2000 });
+  assert.equal(late.condition, 'dispatcher-late');
+  assert.equal(late.reset, false);
+  assert.match(late.detail, /no DISPATCHER_HEARTBEAT since the instance started 33 min ago/);
+
+  const dead = decide({ ...base, dispatcherAgeSec: null, sinceStartSec: 4000 });
+  assert.equal(dead.condition, 'dispatcher-dead');
+  assert.equal(dead.reset, true);
+  assert.match(dead.detail, /since the instance started 67 min ago/);
+
+  const watcher = decide({ ...base, watcherAgeSec: 36 * 3600, sinceStartSec: 1000 });
+  assert.equal(watcher.condition, 'watcher-dead');
+  assert.equal(watcher.reset, true);
+});
+
+test('a heartbeat missing from the lookback on a long-running VM reads as before', () => {
+  // Booted a month ago; nothing in the 48 h lookback. "Since the instance
+  // started" would misstate the outage window.
+  const v = decide({ ...base, dispatcherAgeSec: null, sinceStartSec: 30 * 24 * 3600 });
+  assert.equal(v.condition, 'dispatcher-dead');
+  assert.equal(v.reset, true);
+  assert.match(v.detail, /no DISPATCHER_HEARTBEAT in the last 48h/);
+});
+
+test('heartbeats newer than the boot are judged as before', () => {
+  const v = decide({ ...base, dispatcherAgeSec: 4000, sinceStartSec: 30 * 24 * 3600 });
+  assert.equal(v.condition, 'dispatcher-dead');
+  assert.equal(v.reset, true);
+  assert.match(v.detail, /DISPATCHER_HEARTBEAT is 67 min old/);
 });
 
 test('dispatcher dead while the VM is alive resets only after its own threshold', () => {

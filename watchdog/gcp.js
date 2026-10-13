@@ -81,11 +81,13 @@ async function writeLogEntry({ projectId, logId, text, severity = 'INFO', labels
   });
 }
 
-async function getInstanceStatus({ projectId, zone, instance }) {
+/** Instance status plus its last start (ms), or null when Compute omits it. */
+async function getInstance({ projectId, zone, instance }) {
   const res = await authed(
     `https://compute.googleapis.com/compute/v1/projects/${projectId}/zones/${zone}/instances/${instance}`,
   );
-  return res.status;
+  const lastStartMs = Date.parse(res.lastStartTimestamp);
+  return { status: res.status, lastStartMs: Number.isFinite(lastStartMs) ? lastStartMs : null };
 }
 
 async function instanceAction({ projectId, zone, instance, action }) {
@@ -132,7 +134,7 @@ module.exports = {
   accessToken,
   latestEntryMs,
   writeLogEntry,
-  getInstanceStatus,
+  getInstance,
   instanceAction,
   readState,
   writeState,

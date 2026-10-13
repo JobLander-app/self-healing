@@ -25,7 +25,7 @@
 
 const functions = require('@google-cloud/functions-framework');
 const { loadConfig } = require('./config');
-const { decide, OK } = require('./decide');
+const { decide, OK, BOOTING } = require('./decide');
 const { decideDelivery } = require('./relay-policy');
 const gcp = require('./gcp');
 
@@ -57,13 +57,14 @@ async function runWatchdog() {
   const cfg = loadConfig();
   const nowMs = Date.now();
 
-  const [watcherMs, dispatcherMs, canaryMs, instanceStatus, rawState] = await Promise.all([
+  const [watcherMs, dispatcherMs, canaryMs, instance, rawState] = await Promise.all([
     gcp.latestEntryMs({ projectId: cfg.projectId, logId: cfg.watcherLogId, lookbackSec: cfg.lookbackSec, contains: 'WATCHER_HEARTBEAT' }),
     gcp.latestEntryMs({ projectId: cfg.projectId, logId: cfg.dispatcherLogId, lookbackSec: cfg.lookbackSec, contains: 'DISPATCHER_HEARTBEAT' }),
     gcp.latestEntryMs({ projectId: cfg.projectId, logId: cfg.relayLogId, lookbackSec: cfg.lookbackSec, contains: 'RELAY_DELIVERED' }),
-    gcp.getInstanceStatus({ projectId: cfg.projectId, zone: cfg.zone, instance: cfg.instance }),
+    gcp.getInstance({ projectId: cfg.projectId, zone: cfg.zone, instance: cfg.instance }),
     gcp.readState({ bucket: cfg.stateBucket, object: cfg.stateObject }),
   ]);
+  const instanceStatus = instance.status;
 
   const state = {
     condition: OK,
@@ -90,6 +91,7 @@ async function runWatchdog() {
     watcherAgeSec: ages.watcher,
     dispatcherAgeSec: ages.dispatcher,
     canaryAgeSec: ages.canary,
+    sinceStartSec: ageSec(instance.lastStartMs, nowMs),
     instanceStatus,
     state,
     cfg,
@@ -128,7 +130,7 @@ async function runWatchdog() {
     }
   }
 
-  state.condition = verdict.condition;
+  state.condition = verdict.stateCondition;
   state.updatedAt = new Date(nowMs).toISOString();
   await gcp.writeState({ bucket: cfg.stateBucket, object: cfg.stateObject, state });
 
@@ -138,7 +140,7 @@ async function runWatchdog() {
     projectId: cfg.projectId,
     logId: cfg.watchdogLogId,
     text: `${HEARTBEAT_TEXT} condition=${verdict.condition} watcher_age=${ages.watcher} dispatcher_age=${ages.dispatcher} canary_age=${ages.canary} instance=${instanceStatus} actions=${actionsTaken.join('|') || 'none'}`,
-    severity: verdict.condition === OK ? 'INFO' : 'ERROR',
+    severity: verdict.condition === OK || verdict.condition === BOOTING ? 'INFO' : 'ERROR',
   });
 
   return { condition: verdict.condition, ages, instanceStatus, actionsTaken, failures, reasons: verdict.reasons };
