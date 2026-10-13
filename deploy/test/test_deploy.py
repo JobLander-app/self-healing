@@ -315,22 +315,34 @@ def migrate_state(config):
         self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(),
                          'console.example.test {\n\treverse_proxy localhost:3000\n}\n')
 
-    def test_an_unreadable_chatwoot_declaration_leaves_the_installed_caddyfile(self):
+    def test_an_unreadable_declaration_defers_the_release_until_it_recovers(self):
         self.install_caddy_template()
-        result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test')
+        notified = self.root / 'notified.log'
+        self.mock('notify', f'#!/bin/sh\nprintf "%s\\n" "$1" >> {notified}\n')
+        for _ in range(2):
+            result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test', DEPLOY_NOTIFY_SCRIPT=str(self.bin / 'notify'))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.old)
+            self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(), self.INSTALLED_CADDYFILE)
+            self.assertFalse((self.root / 'systemctl.log').exists())
+        self.assertIn('deferring: chatwoot-domain metadata unreadable', (self.root / 'deploy.log').read_text())
+        self.assertEqual(len(notified.read_text().splitlines()), 1, 'one notice per blocked release')
+        # Once the declaration is readable, the same release ships with the vhost.
+        result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test',
+                             MOCK_META_CHATWOOT_DOMAIN='chat.example.test', MOCK_META_CHATWOOT_PORT='3100')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.new)
-        self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(), self.INSTALLED_CADDYFILE)
-        self.assertIn('chatwoot-domain metadata unreadable', (self.root / 'deploy.log').read_text())
-        self.assertNotIn('caddy.service', (self.root / 'systemctl.log').read_text())
+        self.assertIn('chat.example.test {\n\treverse_proxy localhost:3100\n}\n',
+                      (self.host / 'etc/caddy/Caddyfile').read_text())
 
-    def test_an_invalid_chatwoot_declaration_is_named_and_leaves_the_caddyfile(self):
+    def test_an_invalid_chatwoot_declaration_is_named_and_defers_the_release(self):
         self.install_caddy_template()
         result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test',
                              MOCK_META_CHATWOOT_DOMAIN='chat.example.test', MOCK_META_CHATWOOT_PORT='99999')
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.old)
         self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(), self.INSTALLED_CADDYFILE)
-        self.assertIn('the declared Chatwoot vhost is invalid', (self.root / 'deploy.log').read_text())
+        self.assertIn('deferring: the declared Chatwoot vhost is invalid', (self.root / 'deploy.log').read_text())
 
     def test_the_renderer_rejects_malformed_declarations(self):
         renderer = str(SCRIPT.parent / 'render-chatwoot-vhost.sh')

@@ -282,21 +282,15 @@ done
 # A Caddyfile is installed whole, so it must carry every vhost this host
 # serves. The Chatwoot vhost comes from the host's Terraform declaration
 # (instance metadata) through the renderer init.sh uses. When the declaration
-# cannot be read, this release leaves the installed Caddyfile alone rather
-# than drop a vhost it cannot account for: on 2026-10-13 a release installed
-# the console-only template and chat.joblander.app was down for an hour.
+# cannot be read or is invalid, the release is deferred and retried, never
+# installed without a vhost it cannot account for: on 2026-10-13 a release
+# installed the console-only template and chat.joblander.app was down for an
+# hour. (Activating without the Caddyfile instead would advance the checkout
+# and lose this release's Caddy changes for good.)
 managed_config() {
   local source
   for source in ${CONFIG_SOURCES[@]+"${CONFIG_SOURCES[@]}"}; do [ "$source" = "$1" ] && return 0; done
   return 1
-}
-drop_config() {
-  local i sources=() targets=()
-  for ((i=0; i<${#CONFIG_SOURCES[@]}; i++)); do
-    [ "${CONFIG_SOURCES[i]}" = "$1" ] && continue
-    sources+=("${CONFIG_SOURCES[i]}"); targets+=("${CONFIG_TARGETS[i]}")
-  done
-  CONFIG_SOURCES=(${sources[@]+"${sources[@]}"}); CONFIG_TARGETS=(${targets[@]+"${targets[@]}"})
 }
 chatwoot_vhost() {
   local domain port
@@ -316,10 +310,19 @@ if managed_config deploy/caddy/Caddyfile && [ -f "$TX/stage/deploy/caddy/Caddyfi
     [ -z "$vhost" ] || printf '%s\n' "$vhost" >>"$TX/stage/deploy/caddy/Caddyfile"
   else
     case "$?" in
-      2) log "caddy: the declared Chatwoot vhost is invalid; leaving the installed Caddyfile as it is" ;;
-      *) log "caddy: chatwoot-domain metadata unreadable; leaving the installed Caddyfile as it is" ;;
+      2) reason="the declared Chatwoot vhost is invalid" ;;
+      *) reason="chatwoot-domain metadata unreadable" ;;
     esac
-    drop_config deploy/caddy/Caddyfile
+    log "deferring: $reason; the Caddyfile cannot be rendered"
+    # Same once-per-release notice as a dirty checkout: only a human (or a
+    # terraform apply) can fix the declaration.
+    CADDY_BLOCKED_MARKER="$(dirname "$TRANSACTION_FILE")/caddy-blocked-notified"
+    if [ "$(cat "$CADDY_BLOCKED_MARKER" 2>/dev/null || true)" != "$REMOTE" ] && [ -x "$NOTIFY" ] &&
+      as_agent "$NOTIFY" "CD BLOCKED: ${REMOTE:0:8} not deployed, $reason (instance metadata chatwoot-domain / chatwoot-upstream-port)" >/dev/null 2>&1; then
+      install -d -m 700 "$(dirname "$CADDY_BLOCKED_MARKER")"
+      printf '%s\n' "$REMOTE" >"$CADDY_BLOCKED_MARKER"
+    fi
+    exit 0
   fi
 fi
 # Converge the full desired config, including drift left by older CD versions
