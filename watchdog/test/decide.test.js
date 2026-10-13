@@ -94,6 +94,15 @@ test('a stream that never reports after boot still goes dead on uptime', () => {
   assert.equal(watcher.reset, true);
 });
 
+test('a heartbeat missing from the lookback on a long-running VM reads as before', () => {
+  // Booted a month ago; nothing in the 48 h lookback. "Since the instance
+  // started" would misstate the outage window.
+  const v = decide({ ...base, dispatcherAgeSec: null, sinceStartSec: 30 * 24 * 3600 });
+  assert.equal(v.condition, 'dispatcher-dead');
+  assert.equal(v.reset, true);
+  assert.match(v.detail, /no DISPATCHER_HEARTBEAT in the last 48h/);
+});
+
 test('heartbeats newer than the boot are judged as before', () => {
   const v = decide({ ...base, dispatcherAgeSec: 4000, sinceStartSec: 30 * 24 * 3600 });
   assert.equal(v.condition, 'dispatcher-dead');

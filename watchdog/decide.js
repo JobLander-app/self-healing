@@ -59,8 +59,14 @@ function decide({ nowMs, watcherAgeSec: rawWatcherAgeSec, dispatcherAgeSec: rawD
   // minutes after it came up. So a stream is aged from the later of its last
   // heartbeat and the instance start: a fresh boot gets its full thresholds,
   // and a stream that never reports after boot still goes dead on uptime.
-  const sinceBoot = (age) => (sinceStartSec === null ? age : age === null ? sinceStartSec : Math.min(age, sinceStartSec));
-  const predatesBoot = (age) => sinceStartSec !== null && (age === null || age > sinceStartSec);
+  // A missing heartbeat only means "none in the lookback", so it is aged from
+  // the boot only when the boot is inside the lookback; otherwise it stays
+  // null and reads as before.
+  const bootInLookback = sinceStartSec !== null && sinceStartSec <= cfg.lookbackSec;
+  const sinceBoot = (age) => (sinceStartSec === null ? age
+    : age === null ? (bootInLookback ? sinceStartSec : null)
+      : Math.min(age, sinceStartSec));
+  const predatesBoot = (age) => (age === null ? bootInLookback : sinceStartSec !== null && age > sinceStartSec);
   const ageText = (stream, raw, aged) => (predatesBoot(raw)
     ? `no ${stream} since the instance started ${Math.round(aged / 60)} min ago`
     : `${stream} is ${Math.round(aged / 60)} min old`);
