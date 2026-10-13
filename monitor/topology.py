@@ -2,6 +2,11 @@
 
 Never discover the watchlist from running machines or recent logs: that would
 erase a real outage. Explicit retirements also govern durable pending alerts.
+
+A target may carry a reviewed end of coverage (`until`, with `until_reason`
+and `until_evidence`) when its shutdown is scheduled: after that instant it is
+no longer inspected, so a planned deletion does not page as a coverage gap.
+The entry stays in the file, so the end of coverage remains reviewable.
 """
 from datetime import datetime, timezone
 import hashlib
@@ -14,6 +19,21 @@ TARGETS_FILE = Path(__file__).with_name("targets.json")
 NAME = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
 
 
+def coverage_until(target):
+    """The reviewed end of coverage, or None when the target is open-ended."""
+    if "until" not in target:
+        return None
+    at = datetime.fromisoformat(str(target["until"]).replace("Z", "+00:00"))
+    if at.tzinfo is None or not target.get("until_reason") or not str(target.get("until_evidence", "")).startswith("https://"):
+        raise ValueError("end of coverage requires a timezone, reason and evidence")
+    return at
+
+
+def covered(target, now=None):
+    at = coverage_until(target)
+    return at is None or (now or datetime.now(timezone.utc)) < at
+
+
 def load_targets(path=None):
     value = json.loads(Path(path or TARGETS_FILE).read_text())
     if value.get("version") != 1 or not NAME.fullmatch(value.get("project", "")):
@@ -22,6 +42,7 @@ def load_targets(path=None):
     if (livekit.get("hosting") != "cloud" or not re.fullmatch(r"wss://[a-z0-9-]+\.livekit\.cloud", livekit.get("endpoint", ""))
             or not NAME.fullmatch(livekit.get("config_service", "")) or not NAME.fullmatch(livekit.get("config_region", ""))):
         raise ValueError("invalid LiveKit target")
+    coverage_until(livekit)
     pools = value["voice_agents"]
     if not pools:
         raise ValueError("voice agent coverage cannot be empty")
@@ -29,6 +50,7 @@ def load_targets(path=None):
     for pool in pools:
         if not all(NAME.fullmatch(pool.get(key, "")) for key in ("name", "region")):
             raise ValueError("invalid worker pool target")
+        coverage_until(pool)
         identity = (pool["name"], pool["region"])
         if identity in active:
             raise ValueError("duplicate worker pool target")
@@ -67,9 +89,27 @@ def voice_filter(targets):
     return 'resource.type="cloud_run_worker_pool" AND (' + " OR ".join(scopes) + ')'
 
 
-def retirement(value, kind, targets):
-    return next((resource for resource in targets["retired_resources"]
-                 if any(value.startswith(prefix) for prefix in resource[kind])), None)
+def topology_signature(region, name):
+    return f"monitor-topology:{region}:{name}"
+
+
+def ended_coverage(targets, now=None):
+    """Targets past their reviewed end of coverage, shaped like retirements."""
+    cloud = targets["livekit"]
+    candidates = [(cloud, cloud["config_region"], "livekit-config"),
+                  *((pool, pool["region"], pool["name"]) for pool in targets["voice_agents"])]
+    return [{"name": name, "reason": target["until_reason"], "evidence": target["until_evidence"],
+             "signature": topology_signature(region, name)}
+            for target, region, name in candidates if not covered(target, now)]
+
+
+def retirement(value, kind, targets, now=None):
+    resource = next((resource for resource in targets["retired_resources"]
+                     if any(value.startswith(prefix) for prefix in resource[kind])), None)
+    if resource or kind != "signature_prefixes":
+        return resource
+    # A coverage escalation queued before its target's end must not be filed after it.
+    return next((target for target in ended_coverage(targets, now) if value == target["signature"]), None)
 
 
 def describe(project, kind, name, region):
@@ -86,14 +126,17 @@ def describe(project, kind, name, region):
     return value
 
 
-def inspect_targets(targets, fetch=describe):
+def inspect_targets(targets, fetch=describe, now=None):
     """Separate configuration drift and missing coverage from application errors.
 
     Ready is a control-plane deployment condition, not synthetic call health.
     Log-based application error thresholds continue to apply independently.
+    Targets past their reviewed end of coverage are not inspected.
     """
     observations = []
     for pool in targets["voice_agents"]:
+        if not covered(pool, now):
+            continue
         observation = {"kind": "worker-pool", "name": pool["name"], "region": pool["region"], "status": "UNKNOWN"}
         try:
             resource = fetch(targets["project"], "worker-pools", pool["name"], pool["region"])
@@ -103,6 +146,8 @@ def inspect_targets(targets, fetch=describe):
             pass
         observations.append(observation)
     cloud = targets["livekit"]
+    if not covered(cloud, now):
+        return observations
     observation = {"kind": "livekit-config", "name": "livekit-config", "region": cloud["config_region"], "status": "UNKNOWN"}
     try:
         app = fetch(targets["project"], "services", cloud["config_service"], cloud["config_region"])

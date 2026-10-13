@@ -45,14 +45,11 @@ class LiveKitCloudTests(unittest.TestCase):
             self.assertIn(triage.VOICE_AGENT_LOG_FILTER, call.args[0])
             self.assertNotIn("gce_instance", call.args[0])
 
-    def test_collection_never_probes_retired_hosts_or_reports_them_down(self):
+    def run_main(self, observations, previous_groups=()):
         with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
-            runner.write_json(Path(directory) / "latest-report.json", {"error_groups": [{
-                "signature": "lk-server:lk-asia-south1:down", "service": "livekit",
-                "region": "lk-asia-south1", "severity": "P0", "count": 1}]})
+            runner.write_json(Path(directory) / "latest-report.json", {"error_groups": list(previous_groups)})
             stack.enter_context(patch.object(triage, "STATE_DIR", directory))
-            stack.enter_context(patch.object(triage, "inspect_targets", return_value=[
-                {"name": "worker", "status": "READY"}, {"name": "livekit-config", "status": "MATCH"}]))
+            stack.enter_context(patch.object(triage, "inspect_targets", return_value=observations))
             stack.enter_context(patch.object(triage, "gcloud_logging_read", return_value=[]))
             stack.enter_context(patch.object(triage, "collect_sentry"))
             stack.enter_context(patch.object(triage, "check_duplicate_worker"))
@@ -63,11 +60,30 @@ class LiveKitCloudTests(unittest.TestCase):
             triage.main()
             summary = json.loads((Path(directory) / "triage-summary.json").read_text())
             report = json.loads((Path(directory) / "latest-report.json").read_text())
+        return summary, report
+
+    def test_collection_never_probes_retired_hosts_or_reports_them_down(self):
+        summary, report = self.run_main(
+            [{"kind": "worker-pool", "name": "worker", "status": "READY"},
+             {"kind": "livekit-config", "name": "livekit-config", "status": "MATCH"}],
+            [{"signature": "lk-server:lk-asia-south1:down", "service": "livekit",
+              "region": "lk-asia-south1", "severity": "P0", "count": 1}])
         self.assertEqual(summary["p0_alerts"], [])
         self.assertEqual(summary["escalations"], [])
         self.assertNotIn("livekit-vms", report["services"])
         self.assertEqual(report["services"]["livekit"], {"hosting": "cloud", "status": "MANAGED"})
         self.assertEqual(report["error_groups"][0]["diff_status"], "resolved")
+
+    def test_ended_coverage_neither_misattributes_nor_crashes_the_report(self):
+        # Until the Practice cutoff only the pools are observed; after it, nothing.
+        _, report = self.run_main([{"kind": "worker-pool", "name": "voice-agent-in",
+                                    "region": "asia-south1", "status": "NOT_READY"}])
+        self.assertEqual(report["services"]["livekit"], {"hosting": "cloud", "status": "COVERAGE_ENDED"})
+        self.assertEqual(report["services"]["ai-voice-agent-python"]["status"], "DEGRADED")
+        summary, report = self.run_main([])
+        self.assertEqual(report["services"]["livekit"]["status"], "COVERAGE_ENDED")
+        self.assertEqual(report["services"]["ai-voice-agent-python"]["status"], "HEALTHY")
+        self.assertEqual(summary["escalations"], [])
 
     def test_anam_aggregate_does_not_attribute_mixed_regions_to_first_worker(self):
         entries = [{"resource": {"labels": {"location": region}},
