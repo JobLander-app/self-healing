@@ -53,6 +53,23 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(topology.inspect_targets(targets, fetch, now=cutoff), [])
         self.assertEqual(topology.inspect_targets(targets, fetch, now=datetime(2027, 1, 1, tzinfo=timezone.utc)), [])
 
+    def test_queued_coverage_escalations_end_with_their_target(self):
+        targets = topology.load_targets()
+        cutoff = topology.coverage_until(targets["voice_agents"][0])
+        livekit = topology.topology_signature("europe-west1", "livekit-config")
+        pool = topology.topology_signature("asia-south1", "voice-agent-in")
+        error = "voice-agent:asia-south1:connection-failed"
+        pending = {signature: {"signature": signature} for signature in (livekit, pool, error)}
+        with tempfile.TemporaryDirectory() as directory:
+            config = runner.Config(Path(directory), ())
+            before = runner.retire_pending(config, pending, "signature_prefixes", now=cutoff.replace(hour=11))
+            self.assertEqual(set(before), {pool, error})
+            after = runner.retire_pending(config, pending, "signature_prefixes", now=cutoff)
+            self.assertEqual(set(after), {error})
+            audit = json.loads((Path(directory) / "retired-outbox.json").read_text())
+        self.assertEqual({entry["resource"] for entry in audit.values()}, {"livekit-config", "voice-agent-in"})
+        self.assertTrue(all(entry["evidence"].startswith("https://") for entry in audit.values()))
+
     def test_end_of_coverage_requires_timezone_reason_and_evidence(self):
         base = topology.load_targets()
         cases = []

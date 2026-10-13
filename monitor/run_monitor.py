@@ -23,14 +23,14 @@ from topology import load_targets, retirement, revision
 PROJECT = "meet-assistant-6d8ad"
 MONITOR_DIR = Path(__file__).resolve().parent
 ESCALATION_ACTIONS = {"telegram_p0_and_linear", "linear_create_if_no_dup", "linear_ensure_open_issue"}
-def retire_pending(config, pending, kind):
+def retire_pending(config, pending, kind, now=None):
     targets = load_targets()  # validate policy before retrying old pages too
     audit_path = config.state_dir / "retired-outbox.json"
     audit = json.loads(audit_path.read_text()) if audit_path.exists() else {}
     retained = {}
     for key, item in pending.items():
         value = key if kind == "signature_prefixes" else item
-        resource = retirement(value, kind, targets)
+        resource = retirement(value, kind, targets, now)
         if resource:
             audit[f"{kind}:{key}"] = {"at": timestamp(), "item": item, "resource": resource["name"],
                                        "reason": resource["reason"], "evidence": resource["evidence"],

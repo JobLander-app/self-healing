@@ -89,9 +89,27 @@ def voice_filter(targets):
     return 'resource.type="cloud_run_worker_pool" AND (' + " OR ".join(scopes) + ')'
 
 
-def retirement(value, kind, targets):
-    return next((resource for resource in targets["retired_resources"]
-                 if any(value.startswith(prefix) for prefix in resource[kind])), None)
+def topology_signature(region, name):
+    return f"monitor-topology:{region}:{name}"
+
+
+def ended_coverage(targets, now=None):
+    """Targets past their reviewed end of coverage, shaped like retirements."""
+    cloud = targets["livekit"]
+    candidates = [(cloud, cloud["config_region"], "livekit-config"),
+                  *((pool, pool["region"], pool["name"]) for pool in targets["voice_agents"])]
+    return [{"name": name, "reason": target["until_reason"], "evidence": target["until_evidence"],
+             "signature": topology_signature(region, name)}
+            for target, region, name in candidates if not covered(target, now)]
+
+
+def retirement(value, kind, targets, now=None):
+    resource = next((resource for resource in targets["retired_resources"]
+                     if any(value.startswith(prefix) for prefix in resource[kind])), None)
+    if resource or kind != "signature_prefixes":
+        return resource
+    # A coverage escalation queued before its target's end must not be filed after it.
+    return next((target for target in ended_coverage(targets, now) if value == target["signature"]), None)
 
 
 def describe(project, kind, name, region):

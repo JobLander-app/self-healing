@@ -27,7 +27,7 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
-from topology import inspect_targets, load_targets, revision, voice_filter, worker_service_status
+from topology import inspect_targets, load_targets, revision, topology_signature, voice_filter, worker_service_status
 
 REGIONS = ["europe-west1", "us-central1", "australia-southeast1", "asia-south1"]
 TARGETS = load_targets()
@@ -1563,7 +1563,7 @@ def main():
     for target in topology:
         if target["status"] in {"READY", "MATCH"}:
             continue
-        sig = f'monitor-topology:{target["region"]}:{target["name"]}'
+        sig = topology_signature(target["region"], target["name"])
         groups[sig] = {"signature": sig, "service": "ai-voice-agent-python", "region": target["region"],
                        "count": 1, "severity": "P2", "first_seen": utcnow_iso(), "last_seen": utcnow_iso(),
                        "sample_message": f'Monitoring target {target["name"]}: {target["status"]}. Verify targets.json against deployment intent; do not restore retired infrastructure.'}
