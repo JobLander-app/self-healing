@@ -6,7 +6,7 @@ erase a real outage. Explicit retirements also govern durable pending alerts.
 A target may carry a reviewed end of coverage (`until`, with `until_reason`
 and `until_evidence`) when its shutdown is scheduled: after that instant it is
 no longer inspected, so a planned deletion does not page as a coverage gap.
-The entry stays in the file, so an accidental deletion still fails loudly.
+The entry stays in the file, so the end of coverage remains reviewable.
 """
 from datetime import datetime, timezone
 import hashlib

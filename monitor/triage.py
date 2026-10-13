@@ -1619,8 +1619,13 @@ def main():
             "status": worker_service_status(service_status("ai-voice-agent-python"), topology),
             "hosting": "cloud-run-worker-pools",
         }
+        # Looked up by kind, not position: a target past its end of coverage
+        # is absent from the observations, so the list can be short or empty.
+        livekit = next((o for o in topology if o.get("kind") == "livekit-config"), None)
         services["livekit"] = {
-            "hosting": "cloud", "status": "MANAGED" if topology[-1]["status"] == "MATCH" else topology[-1]["status"],
+            "hosting": "cloud",
+            "status": ("COVERAGE_ENDED" if livekit is None
+                       else "MANAGED" if livekit["status"] == "MATCH" else livekit["status"]),
         }
         report = {
             "timestamp": now,
