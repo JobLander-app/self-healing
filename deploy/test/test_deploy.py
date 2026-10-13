@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -102,8 +103,14 @@ esac
         flock = shutil.which('flock')
         if not flock:
             # macOS has the same flock(2) primitive but no util-linux CLI.
-            # Reproduce only the exact descriptor-lock operation used by CD.
-            self.mock('flock', "#!/usr/bin/env python3\nimport fcntl,sys\ntry: fcntl.flock(int(sys.argv[-1]),fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError: sys.exit(1)\n")
+            # Reproduce only the descriptor-lock operations used by CD: -n, -w N.
+            self.mock('flock', "#!/usr/bin/env python3\nimport fcntl,sys,time\n"
+                               "fd=int(sys.argv[-1]); end=time.time()+(float(sys.argv[sys.argv.index('-w')+1]) if '-w' in sys.argv else 0)\n"
+                               "while True:\n"
+                               "  try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB); break\n"
+                               "  except BlockingIOError:\n"
+                               "    if time.time()>=end: sys.exit(1)\n"
+                               "    time.sleep(0.05)\n")
         self.env = {**os.environ, 'PATH': str(self.bin) + os.pathsep + os.environ['PATH'],
                     'SH_DIR': str(self.repo), 'AGENT_USER': os.environ.get('USER', 'runner'),
                     'DEPLOY_SYSTEM_ROOT': str(self.host), 'DEPLOY_LOG': str(self.root / 'deploy.log'),
@@ -289,6 +296,38 @@ def migrate_state(config):
         self.assertEqual((self.host / 'etc/grafana/dashboards/technical.json').read_text(), '{"version":"tracked-old"}\n')
         self.assertFalse((self.host / 'etc/systemd/system/removed.service').exists())
         self.assertFalse((self.repo / '.deploying').exists())
+
+    def hold_watch_lock(self, seconds):
+        lock = self.root / 'watch.lock'
+        lock.touch()
+        holder = subprocess.Popen(
+            [sys.executable, '-c', 'import fcntl,sys,time; f=open(sys.argv[1]); fcntl.flock(f, fcntl.LOCK_EX); '
+             'print("held", flush=True); time.sleep(float(sys.argv[2]))', str(lock), str(seconds)],
+            stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.stdout.close)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), 'held')
+        return holder
+
+    def test_a_watcher_tick_in_progress_delays_the_release_instead_of_deferring_it(self):
+        # 2026-10-13: the timer and the minute cron both fired at :00, and a
+        # fail-fast lock deferred every release.
+        self.hold_watch_lock(4)
+        result = self.deploy(DEPLOY_WATCH_WAIT_SEC='30')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.new)
+        log = (self.root / 'deploy.log').read_text()
+        self.assertIn('waiting up to 30s for the watcher tick', log)
+        self.assertNotIn('deferring', log)
+
+    def test_a_watcher_holding_its_lock_past_the_wait_still_defers(self):
+        self.hold_watch_lock(60)
+        result = self.deploy(DEPLOY_WATCH_WAIT_SEC='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.old)
+        self.assertIn('deferring: watcher tick active', (self.root / 'deploy.log').read_text())
+        self.assertFalse((self.root / 'systemctl.log').exists())
 
     def test_busy_unknown_and_dirty_checkout_defer_without_restarting(self):
         for value in ['true', 'null', '"false"']:

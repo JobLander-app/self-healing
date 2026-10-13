@@ -11,6 +11,12 @@ NOTIFY="${DEPLOY_NOTIFY_SCRIPT:-$SH_DIR/deploy/bin/self-healing-notify.py}"
 SYSTEM_ROOT="${DEPLOY_SYSTEM_ROOT:-}"
 LOCK_FILE="${DEPLOY_LOCK_FILE:-/var/lock/self-healing-deploy.lock}"
 WATCH_LOCK="${DEPLOY_WATCH_LOCK:-/home/joblander/.output-watch.lock}"
+# The watcher tick starts at :00 of every minute and lasts seconds, and systemd
+# coalesces the 2-minute deploy timer onto minute boundaries too. Failing fast
+# on the watcher lock deferred every release after the 2026-10-13 boot, so a
+# busy lock is waited for briefly (the monitor lock still fails fast: it runs
+# for minutes).
+WATCH_WAIT_SEC="${DEPLOY_WATCH_WAIT_SEC:-50}"
 MONITOR_LOCK="${DEPLOY_MONITOR_LOCK:-/tmp/joblander-Monitor.lock}"
 TRANSACTION_FILE="${DEPLOY_TRANSACTION_FILE:-/var/lib/self-healing-deploy/transaction.env}"
 HEALTH_URL="${DEPLOY_HEALTH_URL:-http://localhost:4100/health}"
@@ -22,6 +28,12 @@ log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG_FILE"; }
 as_agent() { sudo -u "$AGENT_USER" "$@"; }
 git_agent() { as_agent git -C "$SH_DIR" "$@"; }
 notify() { if [ -x "$NOTIFY" ]; then as_agent "$NOTIFY" "$1" >/dev/null 2>&1 || true; fi; }
+# Lock the watcher (fd 7) so no tick runs mid-activation.
+lock_watcher() {
+  flock -n 7 && return 0
+  log "waiting up to ${WATCH_WAIT_SEC}s for the watcher tick"
+  flock -w "$WATCH_WAIT_SEC" 7
+}
 # Re-exec inherits the SAME open file description, with no unlock/relock gap.
 if [ "${SELF_HEALING_CD_LOCKED:-}" != 1 ]; then
   exec 9>"$LOCK_FILE"
@@ -198,7 +210,7 @@ if [ "$RECOVER" = 1 ]; then
   # A cron process may have started since the interrupted process lost locks.
   as_agent touch "$WATCH_LOCK" "$MONITOR_LOCK"
   exec 7<"$WATCH_LOCK"
-  flock -n 7 || { log "deferring recovery: watcher active"; exit 0; }
+  lock_watcher || { log "deferring recovery: watcher active"; exit 0; }
   exec 6<"$MONITOR_LOCK"
   flock -n 6 || { log "deferring recovery: monitor active"; exit 0; }
   idle || { log "deferring recovery: dispatcher busy or status unavailable"; exit 0; }
@@ -283,7 +295,7 @@ printf '%s\n' "$REMOTE" >"$SH_DIR/.deploying"
 idle || { log "deferring after staging: dispatcher busy"; exit 0; }
 as_agent touch "$WATCH_LOCK" "$MONITOR_LOCK"
 exec 7<"$WATCH_LOCK"
-flock -n 7 || { log "deferring: watcher tick active"; exit 0; }
+lock_watcher || { log "deferring: watcher tick active"; exit 0; }
 exec 6<"$MONITOR_LOCK"
 flock -n 6 || { log "deferring: monitor active"; exit 0; }
 RESTART_UNITS=("$DISPATCHER_UNIT" "$INGEST_UNIT")
