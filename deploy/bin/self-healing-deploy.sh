@@ -307,7 +307,7 @@ chatwoot_vhost() {
     [ -n "$domain" ] || return 0
     port="$(curl -fsS --max-time 5 -H 'Metadata-Flavor: Google' "$METADATA_URL/chatwoot-upstream-port")" || return 1
   fi
-  bash "$TX/stage/deploy/bin/render-chatwoot-vhost.sh" "$domain" "${port:-3100}"
+  bash "$TX/stage/deploy/bin/render-chatwoot-vhost.sh" "$domain" "${port:-3100}" || return 2
 }
 if managed_config deploy/caddy/Caddyfile && [ -f "$TX/stage/deploy/caddy/Caddyfile" ]; then
   # An unreadable declaration is an answer here, not a staging failure: the
@@ -315,7 +315,10 @@ if managed_config deploy/caddy/Caddyfile && [ -f "$TX/stage/deploy/caddy/Caddyfi
   if vhost="$(trap - ERR; chatwoot_vhost)"; then
     [ -z "$vhost" ] || printf '%s\n' "$vhost" >>"$TX/stage/deploy/caddy/Caddyfile"
   else
-    log "caddy: chatwoot-domain metadata unreadable; leaving the installed Caddyfile as it is"
+    case "$?" in
+      2) log "caddy: the declared Chatwoot vhost is invalid; leaving the installed Caddyfile as it is" ;;
+      *) log "caddy: chatwoot-domain metadata unreadable; leaving the installed Caddyfile as it is" ;;
+    esac
     drop_config deploy/caddy/Caddyfile
   fi
 fi

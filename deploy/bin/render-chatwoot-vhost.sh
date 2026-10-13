@@ -14,8 +14,12 @@ set -euo pipefail
 domain="${1:-}"
 port="${2:-3100}"
 [ -n "$domain" ] || exit 0
-[[ "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "render-chatwoot-vhost: invalid domain" >&2; exit 1; }
-[[ "$port" =~ ^[0-9]+$ ]] || { echo "render-chatwoot-vhost: invalid port" >&2; exit 1; }
+label='[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?'
+[[ "$domain" =~ ^($label\.)+$label$ ]] || { echo "render-chatwoot-vhost: invalid domain" >&2; exit 1; }
+if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
+  echo "render-chatwoot-vhost: invalid port" >&2
+  exit 1
+fi
 
 cat <<CADDY
 

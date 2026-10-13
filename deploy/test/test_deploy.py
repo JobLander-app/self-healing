@@ -324,6 +324,23 @@ def migrate_state(config):
         self.assertIn('chatwoot-domain metadata unreadable', (self.root / 'deploy.log').read_text())
         self.assertNotIn('caddy.service', (self.root / 'systemctl.log').read_text())
 
+    def test_an_invalid_chatwoot_declaration_is_named_and_leaves_the_caddyfile(self):
+        self.install_caddy_template()
+        result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test',
+                             MOCK_META_CHATWOOT_DOMAIN='chat.example.test', MOCK_META_CHATWOOT_PORT='99999')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.host / 'etc/caddy/Caddyfile').read_text(), self.INSTALLED_CADDYFILE)
+        self.assertIn('the declared Chatwoot vhost is invalid', (self.root / 'deploy.log').read_text())
+
+    def test_the_renderer_rejects_malformed_declarations(self):
+        renderer = str(SCRIPT.parent / 'render-chatwoot-vhost.sh')
+        for domain, port in [('.', '3100'), ('-', '3100'), ('a..b', '3100'), ('-a.test', '3100'),
+                             ('chat.test', '0'), ('chat.test', '65536'), ('chat.test', 'x')]:
+            result = subprocess.run(['bash', renderer, domain, port], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 1, (domain, port))
+            self.assertEqual(result.stdout, '')
+        self.assertIn('chat.test {', self.run_cmd('bash', renderer, 'chat.test', '65535'))
+
     def test_console_domain_is_recovered_from_production_root_url_shape(self):
         self.install_console_template()
         result = self.deploy()
