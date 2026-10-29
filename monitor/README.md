@@ -43,6 +43,12 @@ emits a successful heartbeat only when the cycle finishes. Back up this director
 and the dispatcher's ledger/outboxes. Run through `config/run.py`; do not install
 a second independent hourly scheduler.
 
+Dry-run reports and metrics live under `MONITOR_STATE_DIR/dry-run/`. Preview cycles
+do not alter live baselines/outboxes or publish production heartbeats. Switching
+to live mode therefore evaluates fresh observations against the last live baseline,
+not against preview activity. Inspect the preview's `triage-summary.json` and
+`last-session.json` before enabling writes.
+
 ```sh
 python3 -m unittest discover -s monitor -p 'test_*.py'
 PYTHONPATH=monitor python3 config/run.py --profile consumers/joblander/profile.json -- \

@@ -66,6 +66,23 @@ class MonitorRunnerTests(unittest.TestCase):
             self.assertFalse(result["heartbeatPublished"])
         session.assert_not_called()
 
+    def test_dry_run_preserves_live_reports_pending_deliveries_and_metrics(self):
+        originals = {'latest-report.json': '{"error_groups":[]}', 'linear-outbox.json': '{"pending":{}}',
+                     'p0-outbox.json': '{"urgent":"page"}', 'last-session.json': '{"status":"live"}'}
+        for name, content in originals.items():
+            (self.config.state_dir / name).write_text(content)
+        self.config.metrics_file.write_text('live metrics')
+        publisher, session, pager = Mock(), Mock(), Mock()
+        with patch.dict(os.environ, {'DRY_RUN': 'true'}):
+            self.assertEqual(self.run_once(collector=self.collector(alerts=['preview']),
+                session_runner=session, pager=pager, publisher=publisher), 0)
+        for name, content in originals.items():
+            self.assertEqual((self.config.state_dir / name).read_text(), content)
+        self.assertEqual(self.config.metrics_file.read_text(), 'live metrics')
+        session.assert_not_called()
+        pager.assert_not_called()
+        publisher.assert_not_called()
+
     def test_migration_preserves_reports_and_never_replaces_new_state(self):
         legacy = self.root / "source"
         legacy.mkdir()

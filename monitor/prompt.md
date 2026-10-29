@@ -72,10 +72,11 @@ not falsely report a completed escalation batch.
 
 For each known service:
 
-1. The deterministic runner has checked false-positive labels. Never remove or reverse
-   those decisions. If a matching same-or-lower-severity false-positive is found
-   during your own reads, do not file: report the batch incomplete so the next
-   deterministic check can remove it from the outbox. Read its `linear_issue` when present, and search open Self-healing monitor bugs
+1. The deterministic runner owns false-positive history, pause expiry and severity
+   overrides. Every prepared escalation passed that check. A historical
+   `false-positive` label does not veto this batch: the pause may have expired or
+   severity may have increased. Do not recompute suppression or remove/reverse
+   prior verdicts. Read its `linear_issue` when present, and search open Self-healing monitor bugs
    by the exact signature and its slug. Confirm duplicates against the body,
    not merely a similar title. Completed/Canceled issues are not open duplicates.
    If an open issue exists, record its id for this signature; comment with the

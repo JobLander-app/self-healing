@@ -207,3 +207,33 @@ class FalsePositiveTests(unittest.TestCase):
             self.assertEqual(summary['escalations'], [])
             summary, _ = self.collect_tick(directory, 400, [])
             self.assertEqual(len(summary['p0_alerts']), 1)
+
+    def test_dry_run_then_live_keeps_stable_p2_eligible_without_external_preview_effects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = runner.Config(root, (), metrics_file=root / 'metrics.prom')
+            def collect(config):
+                self.collect_tick(str(config.state_dir), 10, [])
+                return 0
+            session, pager, publisher = Mock(), Mock(), Mock(return_value=True)
+            with patch.dict(os.environ, {'DRY_RUN': 'true'}), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(runner.run_once(config, collector=collect, session_runner=session,
+                                                pager=pager, publisher=publisher), 0)
+            session.assert_not_called()
+            pager.assert_not_called()
+            publisher.assert_not_called()
+            self.assertFalse((root / 'latest-report.json').exists())
+            self.assertFalse((root / 'linear-outbox.json').exists())
+            self.assertTrue((root / 'dry-run/latest-report.json').exists())
+            def investigate(config):
+                batch = json.loads((config.state_dir / 'escalation-batch.json').read_text())
+                self.assertEqual(batch['escalations'][0]['severity'], 'P2')
+                self.assertEqual(batch['escalations'][0]['diff_status'], 'new')
+                return {'error': None, 'attempts': [], 'actions': {'linear_created': ['APP-1'],
+                    'linear_commented': [], 'issue_by_signature': {'api:eu:noise': 'APP-1'}}}
+            session.side_effect = investigate
+            with patch.dict(os.environ, {'DRY_RUN': 'false'}), patch.object(runner, 'decisions', return_value=[]), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(runner.run_once(config, collector=collect, session_runner=session,
+                                                pager=pager, publisher=publisher), 0)
+            session.assert_called_once()
+            self.assertEqual(json.loads((root / 'linear-outbox.json').read_text()), {})

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Standalone hourly monitor. No workspace launcher, manager context or git pulls."""
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import argparse
 import fcntl
@@ -428,6 +428,13 @@ def write_metrics(config, result):
 
 
 def run_once(config, collector=collect, session_runner=run_session, pager=send_p0, publisher=publish_heartbeat):
+    dry_run = os.environ.get("DRY_RUN") == "true"
+    if dry_run:
+        # Preview observations must not advance the live eligibility baseline,
+        # consume pending deliveries, or overwrite live health/metrics.
+        preview = config.state_dir / "dry-run"
+        preview.mkdir(parents=True, exist_ok=True)
+        config = replace(config, state_dir=preview, legacy_dirs=(), metrics_file=preview / "metrics.prom")
     result = {"startedAt": timestamp(), "finishedAt": None, "status": "failed", "llmSkipped": True,
               "triageAt": None, "telegramSent": [], "attempts": [], "errors": []}
     try:
@@ -435,7 +442,7 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
             raise RuntimeError("triage collection failed")
         summary = load_triage(config)
         result["triageAt"] = summary["timestamp"]
-        if os.environ.get("DRY_RUN") == "true":
+        if dry_run:
             result["status"] = "success"
             result["dryRun"] = True
         else:
@@ -470,7 +477,7 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
                 result["status"] = "success"
     except Exception as error:
         result["errors"].append(str(error))
-        if result["triageAt"] is None and os.environ.get("DRY_RUN") != "true":
+        if result["triageAt"] is None and not dry_run:
             try:
                 sent, failures = deliver_pending(config, [], pager)
                 result["telegramSent"].extend(sent)
@@ -478,7 +485,7 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
             except (ValueError, OSError) as outbox_error:
                 result["errors"].append(f"P0 outbox retry failed: {outbox_error}")
     result["finishedAt"] = timestamp()
-    result["heartbeatPublished"] = publisher(result)
+    result["heartbeatPublished"] = False if dry_run else publisher(result)
     write_json(config.state_dir / "last-session.json", result)
     try:
         write_metrics(config, result)
