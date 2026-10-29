@@ -4,6 +4,9 @@ Code, documentation, commits and dashboards use English.
 
 Work in a dedicated git worktree based on `origin/main`. Keep the main checkout
 untouched. Commit persistent changes with conventional commit subjects.
+Push feature branches and open pull requests; never push directly to main.
+Obtain an actual automated review of the current commit, resolve valid findings,
+and wait for passing CI before merging. A green status alone is not a review.
 
 The reusable core contains no customer identifiers or product rules. Put those in
 `consumers/<name>/profile.json`, `targets.json`, `policy.md` and an optional Python

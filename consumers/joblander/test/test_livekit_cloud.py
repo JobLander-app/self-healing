@@ -14,6 +14,16 @@ import triage
 class LiveKitCloudTests(unittest.TestCase):
     def setUp(self):
         triage.collection_errors.clear()
+        labels = patch.object(runner, "decisions", return_value=[])
+        labels.start()
+        self.addCleanup(labels.stop)
+        # A unit test must fail locally too if a newly added path escapes mocks.
+        network = patch("urllib.request.urlopen", side_effect=AssertionError("unexpected network access"))
+        network.start()
+        self.addCleanup(network.stop)
+        commands = patch("subprocess.run", side_effect=AssertionError("unexpected external command"))
+        commands.start()
+        self.addCleanup(commands.stop)
 
     def test_worker_json_errors_keep_region_and_escalation_without_gcp_severity(self):
         entry = {"resource": {"type": "cloud_run_worker_pool", "labels": {

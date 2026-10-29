@@ -162,11 +162,13 @@ def prepare_escalations(config, summary):
     pending = json.loads(path.read_text()) if path.exists() else {}
     for suppressed in summary.get("cooldown_suppressed", []):
         pending.pop(suppressed["signature"], None)
+    for item in summary["escalations"]:
+        pending[item["signature"]] = {**item, "prepared_at": summary["timestamp"]}
+    # Triage already advanced its baseline. Persist new work before a remote
+    # lookup can fail, or a stable P2 will become report-only and disappear.
+    write_json(path, pending)
     rules = decisions()
     pending = {key: item for key, item in pending.items() if not matching(key, item.get("severity"), rules)}
-    for item in summary["escalations"]:
-        if not matching(item["signature"], item.get("severity"), rules):
-            pending[item["signature"]] = {**item, "prepared_at": summary["timestamp"]}
     pending = retire_pending(config, pending, "signature_prefixes")
     write_json(path, pending)
     batch = {**summary, "escalations": list(pending.values())}

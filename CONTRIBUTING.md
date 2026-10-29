@@ -3,6 +3,9 @@
 Use English code/docs and conventional commits. Work in a feature worktree based
 on origin/main. Keep customer identifiers and business rules under consumers.
 Do not commit credentials, generated builds, Terraform state or local databases.
+Never push directly to main. Open a PR, obtain an automated review of its current
+commit, address valid findings and pass CI before merging. Check reviewer comments
+as well as status checks.
 
 Run package builds/tests for changed Node components, Python monitor and affected
 consumer tests, deployment failure tests, shellcheck and Terraform validation.

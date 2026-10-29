@@ -35,6 +35,17 @@ INGEST_UNIT="self-healing-change-ingest.service"
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG_FILE"; }
 as_agent() { sudo -u "$AGENT_USER" "$@"; }
 git_agent() { as_agent git -C "$SH_DIR" "$@"; }
+monitor_python() {
+  local source="$1" profile="$2"
+  shift 2
+  if [ -f "$source/config/run.py" ]; then
+    as_agent env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$source/monitor" \
+      python3 "$source/config/run.py" --profile "$profile" -- python3 "$@"
+  else
+    # Compatibility with releases from before consumer profiles existed.
+    as_agent env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$source/monitor" python3 "$@"
+  fi
+}
 notify_confirmed() {
   if [ -f "$SH_DIR/config/run.py" ]; then
     as_agent python3 "$SH_DIR/config/run.py" -- "$NOTIFY" "$1"
@@ -233,6 +244,7 @@ fi
 git_agent archive "$REMOTE" | tar -x -C "$TX/stage"
 chown -R "$AGENT_USER" "$TX/stage"
 # Refuse activation if the new release cannot read the selected consumer contract.
+stage_profile="$SELF_HEALING_PROFILE"
 if [ -f "$TX/stage/config/run.py" ]; then
   profile_relative="$(python3 - "$SELF_HEALING_PROFILE" "$SH_DIR" <<'PYPROFILE'
 from pathlib import Path
@@ -386,8 +398,8 @@ fi
 # imports that newer legacy state. Established monitor state is never backed
 # up or removed: its live reports and suppressions must survive code rollback.
 if [ -f "$TX/stage/monitor/run_monitor.py" ]; then
-  monitor_target="$(as_agent env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$TX/stage/monitor" \
-    python3 -c 'from run_monitor import Config; print(Config.from_env().state_dir)')"
+  monitor_target="$(monitor_python "$TX/stage" "$stage_profile" \
+    -c 'from run_monitor import Config; print(Config.from_env().state_dir)')"
   [[ "$monitor_target" = /* && "$monitor_target" != / ]]
   if [ ! -e "$monitor_target" ] && [ ! -L "$monitor_target" ]; then
     ABSENT_PATHS+=("$monitor_target")
@@ -435,8 +447,8 @@ fi
 # Do it before dispatcher startup can create the new suppression directory and
 # accidentally suppress copy-once migration of the legacy monitor history.
 if [ -f "$SH_DIR/monitor/run_monitor.py" ]; then
-  as_agent env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SH_DIR/monitor" \
-    python3 -c 'from run_monitor import Config, migrate_state; migrate_state(Config.from_env())'
+  monitor_python "$SH_DIR" "$SELF_HEALING_PROFILE" \
+    -c 'from run_monitor import Config, migrate_state; migrate_state(Config.from_env())'
   log "monitor state migration checked before dispatcher restart"
 fi
 systemctl daemon-reload

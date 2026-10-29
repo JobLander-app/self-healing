@@ -175,6 +175,23 @@ class MonitorRunnerTests(unittest.TestCase):
             "cooldown_suppressed": [{"signature": "audio:failed", "prior_issue": "APP-42"}]})
         self.assertEqual(batch["escalations"], [])
 
+    def test_label_lookup_outage_preserves_new_p2_until_recovery(self):
+        session = Mock(side_effect=AssertionError("filing must wait for suppression lookup"))
+        with patch.object(runner, "decisions", side_effect=RuntimeError("Linear offline")):
+            self.assertEqual(self.run_once(
+                collector=self.collector(escalations=[{"action": "linear_create_if_no_dup", "severity": "P2"}]),
+                session_runner=session), 1)
+        session.assert_not_called()
+        self.assertIn("audio:failed", json.loads((self.config.state_dir / "linear-outbox.json").read_text()))
+        def recovered(config):
+            batch = json.loads((config.state_dir / "escalation-batch.json").read_text())
+            self.assertEqual([item["signature"] for item in batch["escalations"]], ["audio:failed"])
+            return {"error": None, "attempts": [], "actions": {"linear_created": ["APP-42"],
+                "linear_commented": [], "issue_by_signature": {"audio:failed": "APP-42"}}}
+        # No fresh escalation on the next collection: the old P2 is report-only.
+        self.assertEqual(self.run_once(collector=self.collector(), session_runner=recovered), 0)
+        self.assertEqual(json.loads((self.config.state_dir / "linear-outbox.json").read_text()), {})
+
     def test_success_marker_cannot_ack_a_batch_with_recorded_routing_errors(self):
         self.assertEqual(self.run_once(
             collector=self.collector(escalations=[{"action": "linear_create_if_no_dup"}]),

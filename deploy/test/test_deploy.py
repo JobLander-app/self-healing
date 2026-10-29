@@ -1,5 +1,6 @@
 """Run actual CD against isolated Git + fake host commands; never touch a VM."""
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -229,21 +230,40 @@ def migrate_state(config):
 
     def install_real_monitor_release(self):
         self.git('reset', '-q', '--keep', self.new)
+        home = self.root / 'agent-home'
+        legacy = home / 'workspace/teams/logs/monitoring'
+        target = home / '.local/state/self-healing/monitor'
         # Run the real copy-once migration through actual transactional CD.
         for name in ['run_monitor.py', 'topology.py', 'false_positives.py']:
             source = SCRIPT.parents[2] / 'monitor' / name
             self.write(self.repo / 'monitor' / name, source.read_text())
-        self.git('add', 'monitor')
+        for name in ['run.py', 'profile.py', 'render.py']:
+            self.write(self.repo / 'config' / name, (SCRIPT.parents[2] / 'config' / name).read_text())
+        consumer = self.repo / 'consumers/test'
+        profile = json.loads((SCRIPT.parents[2] / 'consumers/example/profile.json').read_text())
+        profile['env'].update({
+            'GCP_PROJECT': 'ci-project', 'LINEAR_TEAM': 'Test',
+            'LINEAR_TEAM_ID': '11111111-1111-1111-1111-111111111111',
+            'LINEAR_MONITOR_LABEL_ID': '22222222-2222-2222-2222-222222222222',
+            'LINEAR_AGENT_CLAIMED_LABEL_ID': '33333333-3333-3333-3333-333333333333',
+            'WATCH_URL': 'https://app.test.invalid', 'TG_CHAT_ID': '1', 'TRACKED_REPOS': 'test/app',
+            'GIT_AUTHOR_EMAIL': 'self-healing@test.invalid',
+            'MONITOR_STATE_DIR': str(target), 'MONITOR_LEGACY_DIRS': str(legacy),
+        })
+        self.write(consumer / 'profile.json', json.dumps(profile))
+        self.write(consumer / 'targets.json', '{"project":"ci-project"}')
+        self.write(consumer / 'policy.md', 'Test consumer policy')
+        self.git('add', 'monitor', 'config', 'consumers')
         self.git('commit', '-qm', 'standalone monitor release')
         self.new = self.git('rev-parse', 'HEAD').strip()
         self.git('push', '-q', 'origin', 'main')
         self.git('reset', '-q', '--keep', self.old)
-        home = self.root / 'agent-home'
-        legacy = home / 'workspace/teams/logs/monitoring'
         self.write(legacy / 'known-errors.json', '{"old-decision":"suppressed"}\n')
         self.write(legacy / 'latest-report.json', '{"timestamp":"before-cutover"}\n')
-        target = home / '.local/state/self-healing/monitor'
-        return legacy, target, {'HOME': str(home), 'MONITOR_STATE_DIR': str(target), 'MONITOR_LEGACY_DIRS': str(legacy)}
+        self.write(legacy / 'linear-outbox.json', '{"pending-incident":{"severity":"P2"}}\n')
+        self.write(legacy / 'p0-outbox.json', '{"pending-page":"Urgent incident"}\n')
+        # State paths exist only in the selected profile, not CD's environment.
+        return legacy, target, {'SELF_HEALING_PROFILE': str(consumer / 'profile.json')}
 
     def test_failed_first_monitor_cutover_recopies_newer_legacy_state_on_retry(self):
         legacy, target, env = self.install_real_monitor_release()
@@ -253,7 +273,7 @@ def migrate_state(config):
         self.write(legacy / 'latest-report.json', '{"timestamp":"after-rollback"}\n')
         result = self.deploy(**env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for name in ['known-errors.json', 'latest-report.json']:
+        for name in ['known-errors.json', 'latest-report.json', 'linear-outbox.json', 'p0-outbox.json']:
             self.assertEqual((target / name).read_text(), (legacy / name).read_text())
 
     def test_interrupted_first_monitor_cutover_removes_only_its_new_target(self):
