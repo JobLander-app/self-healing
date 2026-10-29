@@ -1,18 +1,3 @@
-# Self-healing loop VM (JOB-731 Phase 2 + observability v1).
-#
-# Creates a NEW parallel VM — the legacy `joblander-agents` VM is
-# deliberately NOT managed, imported or referenced here. Cutover from the
-# legacy VM is Phase 4 and happens only on explicit owner signal.
-#
-# Static external IP: the VM now also hosts the public observability
-# console (Grafana behind Caddy on `console_domain`), so the external IP
-# must be STABLE — it is the A-record target for `console_domain`. The
-# regional `google_compute_address` below is reserved and pinned with
-# prevent_destroy so a DNS'd IP cannot silently vanish. The console is the
-# ONLY public surface: 80/443 (Caddy) are the only firewall openings; the
-# dispatcher :4100, Prometheus :9090, Grafana :3000 and node_exporter :9100
-# all stay localhost-only. Everything else stays outbound-only (the loop
-# polls /health/output, calls Linear/Telegram/GitHub APIs) and SSH is IAP.
 
 # Boot disk declared as a separate resource (not inline) — same convention
 # as modules/livekit-vm in ai-voice-agent-python: disk identity survives
@@ -90,7 +75,8 @@ resource "google_compute_instance" "this" {
     startup-script = templatefile("${path.module}/../../../../init/init.sh", {
       project_id             = var.project_id
       self_healing_repo_url  = var.self_healing_repo_url
-      workspace_repo_url     = var.workspace_repo_url
+      consumer_profile       = var.consumer_profile
+      agent_user             = var.agent_user
       repo_branch            = var.repo_branch
       dispatcher_env_secret  = var.dispatcher_env_secret
       gh_token_secret        = var.gh_token_secret

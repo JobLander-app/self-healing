@@ -25,7 +25,7 @@ const realExecuteCodex = codex.executeCodex;
 const trace: typeof import("../src/trace") = require("../src/trace");
 const notify: typeof import("../src/notify") = require("../src/notify");
 const NOW = Date.parse("2026-09-10T14:00:00Z");
-const recent: SelectedCandidate = { id: "issue-1", identifier: "JOB-1", createdAt: "2026-09-09T10:00:00Z", updatedAt: "2026-09-10T10:00:00Z", reclaim: false };
+const recent: SelectedCandidate = { id: "issue-1", identifier: "APP-1", createdAt: "2026-09-09T10:00:00Z", updatedAt: "2026-09-10T10:00:00Z", reclaim: false };
 const boundary = { ...recent, createdAt: new Date(NOW - MAX_ISSUE_AGE_MS).toISOString() };
 let calls: string[];
 let notifications: string[];
@@ -88,7 +88,7 @@ test("valid recent manual wakeup passes its exact candidate into the session", a
   let selected: SelectedCandidate | undefined;
   mock.method(session, "runDispatchSession", async (_reason: string, candidate?: SelectedCandidate) => { selected = candidate; return {} as any; });
   assert.deepEqual(await poller.pollOnce("trigger"), { ran: true, note: "completed" });
-  assert.deepEqual(selected, recent);
+  assert.deepEqual(selected, {...recent, priority: 2, signature: undefined});
 });
 
 test("session entry refuses missing/old/future/malformed candidate for any reason", async () => {
@@ -126,7 +126,7 @@ test("expired candidate never starts fallback and retains accounting for its ear
   assert.equal(summaries[0].costUsd, 0.02);
   assert.deepEqual(alertCalls, ["accounting", "readiness"]);
   assert.equal(notifications.length, 1);
-  assert.match(notifications[0], /JOB-1: run FAILED/);
+  assert.match(notifications[0], /APP-1: run FAILED/);
   assert.match(notifications[0], /\$0.02/);
   assert.equal(session.isBusy(), false);
 });

@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "name": "JobLander",
+  "deployment": {
+    "agent_user": "joblander"
+  },
+  "targets": "targets.json",
+  "policy": "policy.md",
+  "monitor_adapter": "monitor.py",
+  "env": {
+    "GCP_PROJECT": "meet-assistant-6d8ad",
+    "LINEAR_TEAM": "JobLander",
+    "LINEAR_TEAM_ID": "b12df7a0-4845-47fd-be59-8f6d03d9ae8d",
+    "LINEAR_MONITOR_LABEL_ID": "3cf3f731-dccf-43fa-861e-cba73998b183",
+    "LINEAR_AGENT_CLAIMED_LABEL_ID": "79756c33-7f85-4da7-9789-0d5146399a0f",
+    "WATCH_LABEL_IDS": "3cf3f731-dccf-43fa-861e-cba73998b183,1d25b456-393f-4567-9980-e1bb98d3b069,636d11e1-7544-4755-bd8d-2446b248a9c6",
+    "WATCH_URL": "https://joblander-audio-engine-p26anqucmq-ew.a.run.app",
+    "WATCH_PATH": "/health/output?window_min=30",
+    "WATCH_THRESHOLD": "15",
+    "WATCH_STATE_FILE": "/home/joblander/.output-watch-state",
+    "WATCH_TG_ENV_FILE": "/home/joblander/.config/self-healing/telegram.env",
+    "WATCH_HMAC_SECRET": "HEALTH_OUTPUT_HMAC_KEY",
+    "SENTRY_ORG": "joblander-z2",
+    "SENTRY_PROJECT_ID": "4511020395069520",
+    "SENTRY_SERVICE": "joblander-app",
+    "SENTRY_TOKEN_SECRET": "joblander-sentry-monitor-token",
+    "TELEGRAM_ENV_SECRET": "self-healing-workspace-env",
+    "TG_CHAT_ID": "101333337",
+    "FIREBASE_ENABLED": "true",
+    "SENTRY_ENABLED": "true",
+    "AUTO_MERGE": "true",
+    "DRY_RUN": "false",
+    "TRACKED_REPOS": "JobLander-app/backend,JobLander-app/joblander.app,JobLander-app/chrome-extension,JobLander-app/email-service,JobLander-app/ai-voice-agent-python,JobLander-app/self-healing",
+    "MONITOR_LOCK_FILE": "/tmp/joblander-Monitor.lock",
+    "MONITOR_LEGACY_DIRS": "/home/joblander/workspace/teams/logs/monitoring:/home/joblander/joblander/workspace/teams/logs/monitoring",
+    "GIT_AUTHOR_NAME": "JobLander Self-Healing Agent",
+    "GIT_AUTHOR_EMAIL": "agent@joblander.app",
+    "CLOUD_FUNCTION_SERVICE": "email-service"
+  }
+}

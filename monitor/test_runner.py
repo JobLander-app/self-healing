@@ -14,6 +14,10 @@ import run_monitor as runner
 
 class MonitorRunnerTests(unittest.TestCase):
     def setUp(self):
+        labels = patch.object(runner, "decisions", return_value=[])
+        labels.start(); self.addCleanup(labels.stop)
+        env = patch.dict(os.environ, {"CONSUMER_POLICY_FILE": str(Path(__file__).resolve().parents[1] / "consumers/example/policy.md"), "LINEAR_TEAM": "Example", "TRACKED_REPOS": "example-org/backend", "DRY_RUN": "false"})
+        env.start(); self.addCleanup(env.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -66,7 +70,7 @@ class MonitorRunnerTests(unittest.TestCase):
         legacy = self.root / "source"
         legacy.mkdir()
         originals = {"known-errors.json": '{"patterns":[{"signature_match":"x"}]}',
-                     "latest-report.json": '{"actions":{"linear_created":["JOB-1"]}}',
+                     "latest-report.json": '{"actions":{"linear_created":["APP-1"]}}',
                      "2026-09-09T12.json": '{"archive":true}'}
         for name, content in originals.items():
             (legacy / name).write_text(content)
@@ -127,14 +131,14 @@ class MonitorRunnerTests(unittest.TestCase):
         self.assertEqual(report["actions"]["telegram_sent"], ["P0 exact"])
 
     def test_partial_linear_progress_is_saved_even_when_provider_fails(self):
-        actions = {"linear_created": ["JOB-42"], "linear_commented": [],
-                   "issue_by_signature": {"audio:failed": "JOB-42"}}
+        actions = {"linear_created": ["APP-42"], "linear_commented": [],
+                   "issue_by_signature": {"audio:failed": "APP-42"}}
         self.assertEqual(self.run_once(
             collector=self.collector(escalations=[{"action": "linear_create_if_no_dup"}]),
             session_runner=lambda config: {"error": "provider interrupted", "attempts": [], "actions": actions}), 1)
         report = json.loads((self.config.state_dir / "latest-report.json").read_text())
-        self.assertEqual(report["actions"]["linear_created"], ["JOB-42"])
-        self.assertEqual(report["error_groups"][0]["linear_issue"], "JOB-42")
+        self.assertEqual(report["actions"]["linear_created"], ["APP-42"])
+        self.assertEqual(report["error_groups"][0]["linear_issue"], "APP-42")
         result = json.loads((self.config.state_dir / "last-session.json").read_text())
         self.assertEqual(result["actions"], actions)
         self.assertFalse(result["heartbeatPublished"])
@@ -156,7 +160,7 @@ class MonitorRunnerTests(unittest.TestCase):
             self.assertEqual(batch["escalations"][0]["severity"], "P2")
             self.assertIn("prepared_at", batch["escalations"][0])
             return {"error": None, "attempts": [], "actions": {
-                "linear_created": ["JOB-42"], "linear_commented": [], "issue_by_signature": {"audio:failed": "JOB-42"}}}
+                "linear_created": ["APP-42"], "linear_commented": [], "issue_by_signature": {"audio:failed": "APP-42"}}}
         self.assertEqual(self.run_once(collector=self.collector(), session_runner=retry), 0)
         self.assertEqual(json.loads((self.config.state_dir / "linear-outbox.json").read_text()), {})
         session = Mock(side_effect=AssertionError("acked backlog must not replay"))
@@ -168,7 +172,7 @@ class MonitorRunnerTests(unittest.TestCase):
             "audio:failed": {"signature": "audio:failed", "action": "linear_create_if_no_dup"}})
         batch = runner.prepare_escalations(self.config, {
             "timestamp": runner.timestamp(), "escalations": [],
-            "cooldown_suppressed": [{"signature": "audio:failed", "prior_issue": "JOB-42"}]})
+            "cooldown_suppressed": [{"signature": "audio:failed", "prior_issue": "APP-42"}]})
         self.assertEqual(batch["escalations"], [])
 
     def test_success_marker_cannot_ack_a_batch_with_recorded_routing_errors(self):
@@ -198,9 +202,9 @@ class MonitorRunnerTests(unittest.TestCase):
         self.assertEqual(self.run_once(
             collector=self.collector(escalations=signals),
             session_runner=lambda config: {"error": "interrupted", "attempts": [], "actions": {
-                "linear_created": ["JOB-42"], "linear_commented": [], "issue_by_signature": {"created": "JOB-42", "invalid": "done"},
-                "pr_duplicates": [{"signature": "pr-duplicate", "url": "https://github.com/JobLander-app/backend/pull/42"},
-                                  {"signature": "invalid", "url": "https://github.com/JobLander-app/backend"}]}}), 1)
+                "linear_created": ["APP-42"], "linear_commented": [], "issue_by_signature": {"created": "APP-42", "invalid": "done"},
+                "pr_duplicates": [{"signature": "pr-duplicate", "url": "https://github.com/example-org/backend/pull/42"},
+                                  {"signature": "invalid", "url": "https://github.com/example-org/backend"}]}}), 1)
         self.assertEqual(set(json.loads((self.config.state_dir / "linear-outbox.json").read_text())), {"missing", "invalid"})
         result = json.loads((self.config.state_dir / "last-session.json").read_text())
         self.assertEqual(result["pendingSignatures"], ["invalid", "missing"])
@@ -220,7 +224,7 @@ from pathlib import Path
 prompt=sys.stdin.read()
 assert "Never claim work" in prompt
 assert Path("triage-summary.json").exists()
-Path("linear-actions.json").write_text(json.dumps({"linear_created":["JOB-42"],"linear_commented":[],"issue_by_signature":{"audio:failed":"JOB-42"}}))
+Path("linear-actions.json").write_text(json.dumps({"linear_created":["APP-42"],"linear_commented":[],"issue_by_signature":{"audio:failed":"APP-42"}}))
 print("operational log")
 print(json.dumps({"output":'[SESSION_END] {"type":"monitor","status":"success"}',"error":None,"attempts":[]}))
 ''')
@@ -232,7 +236,7 @@ print(json.dumps({"output":'[SESSION_END] {"type":"monitor","status":"success"}'
         with patch.object(runner, "provider_env", return_value=dict(os.environ)), patch.object(runner.subprocess, "Popen", side_effect=spawn):
             result = runner.run_session(self.config)
         self.assertIsNone(result["error"])
-        self.assertEqual(result["actions"]["linear_created"], ["JOB-42"])
+        self.assertEqual(result["actions"]["linear_created"], ["APP-42"])
 
     def test_command_only_provider_can_read_the_batch_and_persist_action_coverage(self):
         # Exercise the prompt's executable read contract with only a command
@@ -248,8 +252,8 @@ summary,end=decoder.raw_decode(read)
 previous,_=decoder.raw_decode(read[end:].lstrip())
 assert summary["escalations"][0]["signature"] == "audio:failed"
 assert previous["issue_by_signature"] == {}
-previous["linear_created"].append("JOB-42")
-previous["issue_by_signature"]["audio:failed"]="JOB-42"
+previous["linear_created"].append("APP-42")
+previous["issue_by_signature"]["audio:failed"]="APP-42"
 subprocess.run(["sh","-c",'printf "%s\\n" "$1" > linear-actions.json',"bookkeeping",json.dumps(previous)],check=True)
 print(json.dumps({"output":'[SESSION_END] {"type":"monitor","status":"success"}',"error":None,"attempts":[]}))
 ''')
@@ -262,8 +266,8 @@ print(json.dumps({"output":'[SESSION_END] {"type":"monitor","status":"success"}'
                 patch.object(runner.subprocess, "Popen", side_effect=spawn):
             result = runner.run_session(self.config)
         self.assertIsNone(result["error"])
-        self.assertEqual(result["actions"]["issue_by_signature"], {"audio:failed": "JOB-42"})
-        self.assertEqual(result["actions"]["linear_created"], ["JOB-42"])
+        self.assertEqual(result["actions"]["issue_by_signature"], {"audio:failed": "APP-42"})
+        self.assertEqual(result["actions"]["linear_created"], ["APP-42"])
 
     def test_completed_transport_preserves_failed_marker_reason_and_pending_escalation(self):
         # Reproduce the live failure: transport exit 0, but a failed monitor
@@ -330,8 +334,8 @@ print(json.dumps({"output":'[SESSION_END] {"type":"monitor","status":"success"}'
                 result = {"output": "[SESSION_END] " + json.dumps(marker), "error": None, "attempts": []}
                 def session(config):
                     provider = self.run_fixture_provider(result)
-                    provider["actions"] = {"linear_created": ["JOB-42"], "linear_commented": [],
-                                           "issue_by_signature": {"audio:failed": "JOB-42"}}
+                    provider["actions"] = {"linear_created": ["APP-42"], "linear_commented": [],
+                                           "issue_by_signature": {"audio:failed": "APP-42"}}
                     return provider
                 self.assertEqual(self.run_once(
                     collector=self.collector(escalations=[{"action": "linear_create_if_no_dup"}]),

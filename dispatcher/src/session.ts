@@ -9,14 +9,16 @@
  * time, guarded by the module-level `busy` lock.
  */
 
+import { closeFalsePositive } from "./falsePositives";
 import { accountingStatus } from "./accountingState";
 import { alertAccounting, alertProviderReadiness } from "./healthAlerts";
 import { executeClaude } from "./claude";
+import { executeOpenCode } from "./opencode";
 import { executeCodex } from "./codex";
 import { executeWithFallback } from "./fallback";
 import { availableToAttempt, providerOrder, updateProvider } from "./providerState";
 import type { ProviderAttempt } from "./providerTypes";
-import { config } from "./config";
+import { config, providerModel } from "./config";
 import { assertSelectedCandidate, CandidateEligibilityError, candidateInstruction, queuePolicy, type SelectedCandidate } from "./queue";
 import {
   traceEvent,
@@ -30,36 +32,15 @@ import {
 import { sendTelegram } from "./notify";
 import * as fs from "fs";
 import * as path from "path";
-// child_process / util imports removed: the dispatcher no longer resolves
-// LINEAR_API_KEY itself — the vendored linear MCP child does it via gcloud
-// Secret Manager (JOB-916). If other callers need execFile in future, re-add.
+
+const REPO_ROOT = path.resolve(__dirname, "..", "..");
+const FIREBASE_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "firebase", "index.js");
+const SENTRY_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "sentry", "index.js");
+const LINEAR_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "linear", "index.js");
 
 let busy = false;
 let currentTurnId: string | null = null;
 
-// Vendored stdio MCP servers live at the repo root (self-healing/mcp/*), one
-// level above the dispatcher package. __dirname at runtime is
-// <repo>/dispatcher/dist, so ../.. resolves to the repo root regardless of the
-// process CWD. These give the investigation session real Firestore reads
-// (firebase MCP) and Sentry issue lookups (sentry MCP) instead of only Bash.
-const REPO_ROOT = path.resolve(__dirname, "..", "..");
-const FIREBASE_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "firebase", "index.js");
-const SENTRY_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "sentry", "index.js");
-// Vendored self-hosted Linear MCP (mcp/linear). Replaces claude.ai's managed
-// Linear connector, whose OAuth login kept expiring — this reads a
-// never-expiring Linear API key (Secret Manager `linear-api-key`, injected into
-// the child env below). Gives the agent structured Linear access
-// (list_issues/get_issue/update_issue/create_comment/…) instead of raw
-// Bash+GraphQL.
-const LINEAR_MCP_ENTRY = path.join(REPO_ROOT, "mcp", "linear", "index.js");
-
-// NOTE: The dispatcher no longer resolves or injects LINEAR_API_KEY into the
-// linear MCP child's environment. The vendored mcp/linear/tools.js now fetches
-// its own key from Secret Manager via gcloud when no LINEAR_API_KEY* env var is
-// set — mirroring the sentry MCP's pattern. This eliminates the key from the
-// --mcp-config argv, where it was previously world-readable via `ps` (JOB-916).
-
-/** Pick named keys from process.env; silently skip undefined values. */
 function pickEnv(keys: readonly string[]): Record<string, string> {
   const env: Record<string, string> = {};
   for (const k of keys) {
@@ -69,27 +50,7 @@ function pickEnv(keys: readonly string[]): Record<string, string> {
   return env;
 }
 
-/**
- * Minimal base env shared by all MCP child processes.
- *
- * This is an ALLOWLIST, not a copy of process.env.  The parent dispatcher
- * carries secrets (CLAUDE_CODE_OAUTH_TOKEN, TG_BOT_TOKEN, TRIGGER_TOKEN, …)
- * that the MCP children do not need.  Passing process.env wholesale serialises
- * every secret into the --mcp-config argv, where it is visible to any user on
- * the machine via `ps` or /proc/<pid>/cmdline (JOB-916).
- *
- * Included:
- *   PATH / HOME      — required for `node`, `gcloud` binary lookup and ADC
- *                      credential file (~/.config/gcloud/).
- *   LANG / USER / …  — standard POSIX variables, harmless to include.
- *   NODE_ENV         — may affect library behaviour.
- *   GCP_PROJECT_ID   — all three MCP servers need the project ID.
- *   GOOGLE_*         — Application Default Credentials overrides (optional).
- *
- * Explicitly excluded:
- *   CLAUDE_CODE_OAUTH_TOKEN, TG_BOT_TOKEN, TRIGGER_TOKEN — dispatcher-only
- *   secrets; MCP children must never receive them.
- */
+
 function baseMcpEnv(): Record<string, string> {
   const env = pickEnv([
     "PATH",
@@ -100,6 +61,10 @@ function baseMcpEnv(): Record<string, string> {
     "SHELL",
     "NODE_ENV",
     "GCP_PROJECT_ID",
+    "LINEAR_API_KEY_SECRET",
+    "SENTRY_ORG",
+    "SENTRY_PROJECT_ID",
+    "SENTRY_TOKEN_SECRET",
   ]);
   // Always ensure GCP_PROJECT_ID is set (ADC project override).
   env.GCP_PROJECT_ID = env.GCP_PROJECT_ID || config.gcpProject;
@@ -110,22 +75,7 @@ function baseMcpEnv(): Record<string, string> {
   return env;
 }
 
-/**
- * Per-server env builders. Each passes only the base allowlist — no
- * credentials. Credentials are resolved by the MCP child processes themselves
- * via gcloud Secret Manager (the same fallback the sentry and linear MCPs
- * already implement), so they never appear in --mcp-config argv (JOB-916).
- *
- * firebase: uses ADC (admin.credential.applicationDefault()) when
- *           GCP_PRIVATE_KEY_BASE_64 is absent — which is always the case on
- *           the self-healing VM where the attached service account provides
- *           credentials via the metadata server.
- * sentry:   falls back to `gcloud secrets versions access` for SENTRY_TOKEN.
- * linear:   falls back to `gcloud secrets versions access` for LINEAR_API_KEY
- *           (mcp/linear/tools.js, added in this PR).
- *
- * Exported for unit tests (JOB-916 regression).
- */
+
 export function buildFirebaseMcpEnv(): Record<string, string> {
   return baseMcpEnv();
 }
@@ -136,6 +86,16 @@ export function buildSentryMcpEnv(): Record<string, string> {
 
 export function buildLinearMcpEnv(): Record<string, string> {
   return baseMcpEnv();
+}
+
+export function mcpEntries(): Record<string, string> {
+  return { linear: LINEAR_MCP_ENTRY,
+    ...(config.firebaseEnabled ? { firebase: FIREBASE_MCP_ENTRY } : {}),
+    ...(config.sentryEnabled ? { sentry: SENTRY_MCP_ENTRY } : {}) };
+}
+export function mcpServers(): Record<string, { command: string; args: string[]; env: Record<string, string> }> {
+  return Object.fromEntries(Object.entries(mcpEntries()).map(([name, entry]) =>
+    [name, { command: "node", args: [entry], env: baseMcpEnv() }]));
 }
 
 export function isBusy(): boolean {
@@ -149,7 +109,15 @@ export function getCurrentTurnId(): string | null {
 function loadSystemPrompt(): string {
   const claudeMdPath = path.join(process.cwd(), "CLAUDE.md");
   if (fs.existsSync(claudeMdPath)) {
-    return fs.readFileSync(claudeMdPath, "utf-8");
+    const policy = config.consumerPolicyFile ? fs.readFileSync(config.consumerPolicyFile, "utf-8") : "No consumer policy supplied.";
+    return fs.readFileSync(claudeMdPath, "utf-8") + `
+
+## Consumer policy
+${policy}
+
+Approved repositories: ${config.trackedRepos.join(", ")}
+AUTO_MERGE=${config.autoMerge}. When false, leave the PR for human review and report backlogged; never merge or deploy.
+`;
   }
   // Fail loud rather than run an unconstrained autonomous merger.
   throw new Error(
@@ -158,27 +126,13 @@ function loadSystemPrompt(): string {
 }
 
 function runInstruction(dryRun: boolean): string {
-  return `Это автономный poll-tick claude-code-vm-job-dispatcher.
-
-Выполни ровно ОДИН цикл по своей конституции (CLAUDE.md):
-1. Follow the MONITOR QUEUE CONTRACT and SELECTED CANDIDATE below. Only tickets with valid createdAt within the last 7 days (never future dates) are authorized. No exception for priority, active/stale claims, trigger, or fallback. A monitor label OR [Monitor] title prefix is also required; never reject a prefix-only candidate. Use agent-claimed and updatedAt to distinguish an abandoned claim from a human-held ticket, never the assignee.
-2. ${dryRun ? "DRY_RUN: re-read the candidate and investigate read-only. Report the ticket you WOULD claim; do not change its state, assignee, labels, or comments." : "Re-read the candidate and claim it once before investigation: set In Progress, assign yourself, and add agent-claimed while preserving existing labels. If the snapshot changed or the claim fails, exit no-work."}
-3. FRESHNESS GATE (Step 3.5 в конституции): тикет — это ГИПОТЕЗА о баге на момент создания, а не факт на момент починки. ПЕРЕД тем как чинить — заново подтверди, что баг ещё живой В ТЕКУЩЕМ коде (воспроизведи сигнатуру в свежем окне; проверь не пофикшено ли уже поздним деплоем/коммитом). Не воспроизводится → "stale". Уже решено другим коммитом/деплоем → "fixed-elsewhere". Не чини то, что не смог воспроизвести.
-4. INTENT GATE (Step 3.6 в конституции): даже если баг воспроизводится — сначала спроси change feed (см. блок "CHANGE FEED" ниже), не объясняется ли аномалия НАМЕРЕННЫМ изменением прода (декоммишен / деплой / cutover). Изменение объясняет её → НЕ чини, outcome "intentional", Linear → Canceled с указанием объясняющего изменения. Никогда не восстанавливай/не переподнимай ресурс, чьё намеренное удаление есть в change feed. Только уверенно НЕОБЪЯСНЁННУЮ аномалию чинишь. Ты фейлишь CLOSED.
-5. Иначе доведи тикет до терминального состояния СВОИМ решением (исправить+смержить, доказать что это не баг, или — только для реального тупика/неоднозначного intent-match — вернуть в Backlog с детальным комментарием).
-6. Один тикет за запуск. Заверши чисто.
-
-В САМОМ КОНЦЕ выведи ровно одну строку машиночитаемого маркера итога:
-[DISPATCH_RESULT] {"outcome":"fixed|not-a-bug|stale|fixed-elsewhere|intentional|backlogged|no-work","issue":"JOB-XXX или null","repo":"<repo или null>","pr":"<PR url или null>","note":"краткое описание (1 предложение)"}
-
-outcome:
-- "fixed" — реальный баг исправлен, PR смержен, Linear → Done
-- "not-a-bug" — доказано что это шум/transient/client-side, Linear → Done или Canceled
-- "stale" — баг больше не воспроизводится в свежем окне (перестал происходить), Linear → Canceled с доказательством "не наблюдается с <ts>"
-- "fixed-elsewhere" — баг был реальным, но уже устранён поздним коммитом/деплоем, Linear → Done со ссылкой на коммит/ревизию
-- "intentional" — аномалия объясняется намеренным изменением из change feed (Step 3.6), Linear → Canceled с указанием изменения, БЕЗ фикса
-- "backlogged" — честный тупик ИЛИ неоднозначный intent-match для человека, вернул в Backlog с деталями (единственный не-терминальный выход)
-- "no-work" — нечего брать в этот тик`;
+  return `Run exactly one investigation according to the constitution and selected candidate.
+${dryRun ? "DRY_RUN: investigate read-only; do not claim or write externally." : "Re-read and claim the selected ticket once, preserving labels."}
+Confirm freshness and intent before changing code. Obey AUTO_MERGE and the consumer policy.
+For proven false positives, return not-a-bug with concrete note and nonempty evidence; the host owns labeling and closure.
+Finish with [DISPATCH_RESULT] and valid JSON containing outcome, issue, repo, pr, note and evidence.
+Outcomes: fixed (merged), not-a-bug (proven noise), stale (no longer observed), fixed-elsewhere,
+intentional (explained change), backlogged (blocked or PR awaiting approval), no-work (candidate no longer eligible).`;
 }
 
 export function buildDispatchPrompt(input: {
@@ -198,6 +152,7 @@ interface DispatchResult {
   repo?: string;
   pr?: string;
   note?: string;
+  evidence?: string[];
 }
 
 /**
@@ -238,6 +193,7 @@ function parseDispatchResult(output: string): DispatchResult {
       repo: raw.repo && raw.repo !== "null" ? String(raw.repo) : undefined,
       pr: raw.pr && raw.pr !== "null" ? String(raw.pr) : undefined,
       note: raw.note ? String(raw.note) : undefined,
+      evidence: Array.isArray(raw.evidence) ? raw.evidence.filter((e): e is string => typeof e === "string") : undefined,
     };
   } catch {
     return { outcome: "unknown" };
@@ -250,33 +206,10 @@ function newTurnId(): string {
   return `dispatch-${stamp}-${rand}`;
 }
 
-/**
- * Build the lifecycle-observability Telegram for a completed run (JOB-731).
- * Returns null when the run should stay silent:
- *   - "no-work" ticks (a message every ~10 min would be spam; the poller
- *     pre-check already suppresses most of these before they even run), and
- *   - runs that never picked a ticket (no issueId) — e.g. a startup error —
- *     which would otherwise spam ⚠️ on every tick.
- *
- * Three visible outcomes, keyed off the structured RunSummary fields only
- * (no free-text parsing beyond what the run already structured):
- *   🚀 merged    — fixed+merged; deploy pending (auto-merge → Cloud Build
- *                  deploys main; the run does not wait for it).
- *   ✅ investigated — closed without a prod code change (not-a-bug/stale/
- *                    fixed-elsewhere).
- *   ⚠️ needs eyes — dead-end (backlogged) / error / timeout / unknown.
- * DRY_RUN runs are prefixed with "[DRY_RUN] ".
- */
+
 export function buildRunNotification(s: RunSummary): string | null {
   if (s.outcome === "no-work") return null;
 
-  // A run that ended in `error` ALWAYS notifies, even with no ticket attached.
-  // It used to be swallowed by the !issueId guard below, because an aborted run
-  // never prints the [DISPATCH_RESULT] marker that carries the issue id — so the
-  // most expensive failure mode was also the only silent one. In the week of
-  // 2026-07-21..28 four runs ended in `error` (three on the 60-turn cap, one on
-  // the 25-minute watchdog) costing $7.71 with not one Telegram sent. These are
-  // rare by construction, so they cannot spam.
   if (s.outcome !== "error" && !s.issueId) return null;
   if (s.outcome === "error") {
     const ticket = s.issueId ? `${s.issueId}: ` : "";
@@ -384,6 +317,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   let systemPrompt: string;
   try {
     systemPrompt = loadSystemPrompt();
+
   } catch (err) {
     busy = false;
     currentTurnId = null;
@@ -404,7 +338,7 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   }
 
   const dryRunBanner = config.dryRun
-    ? "\n\n## DRY_RUN ACTIVE (строго read-only, первый прогон)\nDRY_RUN=true. Это первый безопасный прогон — НИКАКИХ записей наружу. ЗАПРЕЩЕНО: `git push`, `gh pr create`, `gh pr merge`, любые Linear-мутации (update_issue/create_comment — в т.ч. claim в In Progress: НЕ клейми, просто укажи какой тикет ВЗЯЛ БЫ), любые правки known-errors.json. РАЗРЕШЕНО и ТРЕБУЕТСЯ: полностью расследовать (читать Linear, gcloud-логи `--project=meet-assistant-6d8ad`, код обеих сторон, при нужде воспроизвести локально), и если фикс нужен — написать его в локальном scratch-чекауте и показать `git diff`, но НЕ публиковать. В конце выведи подробно: выбранный тикет, вердикт (баг/не-баг + доказательство), какой фикс/PR ты СОЗДАЛ БЫ (с diff) либо почему это не баг. Итоговый [DISPATCH_RESULT] маркер обязателен.\n"
+    ? "\n\n## DRY_RUN ACTIVE\nRead-only external access. Do not claim, assign, label, comment, push, create PRs, merge or write suppressions. Investigate the selected issue using the configured project and approved repositories. Local scratch changes/tests are allowed; report the proposed diff and evidence without publishing. Emit DISPATCH_RESULT.\n"
     : "";
 
   // Freshness policy — concrete numbers from config so they stay tunable via
@@ -463,20 +397,18 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
         assertSelectedCandidate(candidate);
         const beforeStart = () => {
           assertSelectedCandidate(candidate);
-          recordAttemptStarted(turnId, provider, provider === "claude" ? config.claudeModel : config.codexModel);
-          traceEvent(turnId, "attempt_started", { id, provider, model: provider === "claude" ? config.claudeModel : config.codexModel });
+          recordAttemptStarted(turnId, provider, providerModel(provider));
+          traceEvent(turnId, "attempt_started", { id, provider, model: providerModel(provider) });
         };
+        if (provider === "opencode") return executeOpenCode({ id, beforeStart, prompt: attemptPrompt, model: config.openCodeModel,
+          entries: mcpEntries(), signal: abortController.signal, onTool: use => traceEvent(turnId, "tool_use", { provider, ...use }) });
         return provider === "codex"
           ? executeCodex({ id, beforeStart, prompt: attemptPrompt, model: config.codexModel,
               signal: abortController.signal,
-              entries: { firebase: FIREBASE_MCP_ENTRY, sentry: SENTRY_MCP_ENTRY, linear: LINEAR_MCP_ENTRY },
+              entries: mcpEntries(),
               onTool: use => traceEvent(turnId, "tool_use", { provider, ...use }) })
           : executeClaude({ id, beforeStart, prompt: attemptPrompt, abortController,
-              mcpServers: {
-                firebase: { command: "node", args: [FIREBASE_MCP_ENTRY], env: buildFirebaseMcpEnv() },
-                sentry: { command: "node", args: [SENTRY_MCP_ENTRY], env: buildSentryMcpEnv() },
-                linear: { command: "node", args: [LINEAR_MCP_ENTRY], env: buildLinearMcpEnv() },
-              },
+              mcpServers: mcpServers(),
               onMessage: msg => { for (const use of toolUsesFrom(msg)) traceEvent(turnId, "tool_use", { provider, ...use }); } });
       },
       record: attempt => {
@@ -517,7 +449,19 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   const prMatch = output.match(/https:\/\/github\.com\/[^\s)]+\/pull\/\d+/);
   const prUrl = parsed.pr || prMatch?.[0];
 
-  const note = sessionError ? `session error: ${sessionError}` : parsed.note || output.slice(0, 280).replace(/\s+/g, " ").trim();
+  let note = sessionError ? `session error: ${sessionError}` : parsed.note || output.slice(0, 280).replace(/\s+/g, " ").trim();
+
+  if (outcome === "not-a-bug" && !config.dryRun) {
+    busy = true; currentTurnId = turnId;
+    try {
+      if (parsed.issue !== candidate.identifier && parsed.issue !== candidate.id) throw new Error("Verdict does not name the selected ticket");
+      await closeFalsePositive(candidate, parsed.note || "", parsed.evidence || []);
+    }
+    catch (error) {
+      outcome = "backlogged";
+      note = `False positive not fully recorded: ${error instanceof Error ? error.message : "unknown failure"}. Decision reconciliation will retry.`;
+    } finally { busy = false; currentTurnId = null; }
+  }
 
   const summary: RunSummary = {
     turnId,
@@ -553,11 +497,6 @@ export async function runDispatchSession(reason: string, candidate?: SelectedCan
   // must notify before the retryable eligibility error is propagated.
   if (eligibilityError && !attempts.length) throw eligibilityError;
 
-  // Lifecycle observability (JOB-731, supersedes the 2026-06-08 "no Telegram"
-  // policy): one Telegram per run that actually did work — "acted upon" /
-  // "merged". no-work / no-ticket runs stay silent (see buildRunNotification).
-  // Fail-soft: sendTelegram already swallows its own errors, and we belt-and-
-  // suspenders around it so a TG failure can NEVER throw into the poll loop.
   await alertAccounting().catch(err => console.error("[session] accounting alert failed:", err));
   await alertProviderReadiness().catch(err => console.error("[session] readiness alert failed:", err));
   const notification = buildRunNotification(summary);

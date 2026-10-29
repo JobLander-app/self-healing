@@ -9,13 +9,14 @@ no longer inspected, so a planned deletion does not page as a coverage gap.
 The entry stays in the file, so the end of coverage remains reviewable.
 """
 from datetime import datetime, timezone
+import os
 import hashlib
 import json
 from pathlib import Path
 import re
 import subprocess
 
-TARGETS_FILE = Path(__file__).with_name("targets.json")
+TARGETS_FILE = Path(os.environ.get("MONITOR_TARGETS_FILE", Path(__file__).resolve().parents[1] / "consumers/example/targets.json"))
 NAME = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
 
 
@@ -38,14 +39,13 @@ def load_targets(path=None):
     value = json.loads(Path(path or TARGETS_FILE).read_text())
     if value.get("version") != 1 or not NAME.fullmatch(value.get("project", "")):
         raise ValueError("invalid monitoring target schema/project")
-    livekit = value["livekit"]
-    if (livekit.get("hosting") != "cloud" or not re.fullmatch(r"wss://[a-z0-9-]+\.livekit\.cloud", livekit.get("endpoint", ""))
+    livekit = value.get("livekit")
+    if livekit is not None and (livekit.get("hosting") != "cloud" or not re.fullmatch(r"wss://[a-z0-9-]+\.livekit\.cloud", livekit.get("endpoint", ""))
             or not NAME.fullmatch(livekit.get("config_service", "")) or not NAME.fullmatch(livekit.get("config_region", ""))):
         raise ValueError("invalid LiveKit target")
-    coverage_until(livekit)
+    if livekit is not None:
+        coverage_until(livekit)
     pools = value["voice_agents"]
-    if not pools:
-        raise ValueError("voice agent coverage cannot be empty")
     active = set()
     for pool in pools:
         if not all(NAME.fullmatch(pool.get(key, "")) for key in ("name", "region")):
@@ -86,7 +86,7 @@ def revision(targets):
 def voice_filter(targets):
     scopes = [f'(resource.labels.worker_pool_name="{p["name"]}" AND resource.labels.location="{p["region"]}")'
               for p in targets["voice_agents"]]
-    return 'resource.type="cloud_run_worker_pool" AND (' + " OR ".join(scopes) + ')'
+    return 'resource.type="cloud_run_worker_pool" AND (' + " OR ".join(scopes) + ')' if scopes else 'resource.type="cloud_run_worker_pool" AND resource.labels.worker_pool_name="__no_targets__"'
 
 
 def topology_signature(region, name):
@@ -96,8 +96,7 @@ def topology_signature(region, name):
 def ended_coverage(targets, now=None):
     """Targets past their reviewed end of coverage, shaped like retirements."""
     cloud = targets["livekit"]
-    candidates = [(cloud, cloud["config_region"], "livekit-config"),
-                  *((pool, pool["region"], pool["name"]) for pool in targets["voice_agents"])]
+    candidates = ([(cloud, cloud["config_region"], "livekit-config")] if cloud else []) + [(pool, pool["region"], pool["name"]) for pool in targets["voice_agents"]]
     return [{"name": name, "reason": target["until_reason"], "evidence": target["until_evidence"],
              "signature": topology_signature(region, name)}
             for target, region, name in candidates if not covered(target, now)]
@@ -146,7 +145,7 @@ def inspect_targets(targets, fetch=describe, now=None):
             pass
         observations.append(observation)
     cloud = targets["livekit"]
-    if not covered(cloud, now):
+    if cloud is None or not covered(cloud, now):
         return observations
     observation = {"kind": "livekit-config", "name": "livekit-config", "region": cloud["config_region"], "status": "UNKNOWN"}
     try:

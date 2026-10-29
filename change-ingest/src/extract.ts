@@ -113,10 +113,6 @@ export function gcpAuditExtract({ entry }: { entry: GcpAuditLogEntry }): Extract
   const ts = entry.timestamp ? Date.parse(entry.timestamp) : Number.NaN;
 
   const entities = entitiesFromResourceName(resourceName);
-  // The v1 `namespaces/<project>/services/<name>` shape carries no region, but
-  // the audit entry's resource labels do (`location`, verified on prod
-  // ReplaceService rows 2026-10-01). Without it a deploy cannot be matched to
-  // the region it went live in.
   const location = entry.resource?.labels?.location?.trim();
   if (
     location &&
@@ -205,13 +201,7 @@ export interface LinearIssueNode {
   closingComment?: string | null;
 }
 
-/**
- * Best-effort label → entity mapping. Convention (deterministic, documented in
- * README): a label of the form `type:id` (e.g. `region:australia-southeast1`,
- * `service:joblander-audio-engine`, `instance:lk-au-southeast1`, `repo:backend`)
- * maps straight to an EntityRef. Labels without a recognized `type:` prefix are
- * ignored (v1 stays shallow-but-correct — no guessing).
- */
+
 export function entitiesFromLinearLabels(labelNames: string[]): EntityRef[] {
   const known = new Set(["region", "service", "gcp_instance", "instance", "repo", "endpoint"]);
   const out: EntityRef[] = [];

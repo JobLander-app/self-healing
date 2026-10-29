@@ -15,8 +15,6 @@ test('defaults load', () => {
   assert.equal(c.resetMaxPerWindow, 3);
 });
 
-// The repo's own recurring bug (2026-07-28 review): an unvalidated number
-// became NaN, every comparison went false, and the check passed silently.
 test('a non-numeric threshold throws instead of becoming NaN', () => {
   assert.throws(() => loadConfig({ ...ENV, WATCHER_PAGE_SEC: 'ten minutes' }), /not an integer/);
 });

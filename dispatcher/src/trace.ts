@@ -124,7 +124,6 @@ export function recordRun(summary: RunSummary): void {
   traceEvent(summary.turnId, "run_summary", { ...summary });
   ring.unshift(summary);
   if (ring.length > RING_SIZE) ring.length = RING_SIZE;
-  // JOB-731: feed the monotonic Prometheus run counters (runs_total, cost_usd).
   incrementRunCounters(summary);
 }
 
@@ -171,7 +170,7 @@ function validUsage(value: unknown): boolean {
 }
 export function validAttempt(value: unknown): value is ProviderAttempt {
   const a = value as Partial<ProviderAttempt> | null;
-  return !!a && typeof a.id === "string" && ["claude", "codex"].includes(a.provider ?? "") &&
+  return !!a && typeof a.id === "string" && ["claude", "codex", "opencode"].includes(a.provider ?? "") &&
     typeof a.model === "string" && typeof a.startedAt === "string" && Number.isFinite(Date.parse(a.startedAt)) &&
     ["completed", "failed"].includes(a.status ?? "") && validUsage(a.usage) &&
     (a.estimatedCostUsd === null || (typeof a.estimatedCostUsd === "number" && Number.isFinite(a.estimatedCostUsd) && a.estimatedCostUsd >= 0)) &&

@@ -32,8 +32,8 @@ export const fetchSample = async ({
       (await secretReader({ secret: SECRETS.hmacKey, project: config.project })) ?? "";
     const ts = String(Math.floor((now ?? Date.now)() / 1000));
     const doFetch: FetchLike = fetchImpl ?? fetch;
-    const response = await doFetch(`${config.url}/health/output?window_min=30`, {
-      headers: { Authorization: buildAuthHeader({ ts, key }) },
+    const response = await doFetch(`${config.url}${config.path ?? "/health/output?window_min=30"}`, {
+      headers: { Authorization: buildAuthHeader({ ts, key, path: (config.path || "/health/output").split("?")[0] }) },
       signal: AbortSignal.timeout(90_000),
     });
     const bodyText = await response.text();

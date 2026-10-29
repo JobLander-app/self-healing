@@ -23,7 +23,7 @@ class NotifyTest(unittest.TestCase):
         data = 'OTHER=$(do-not-execute)\nexport TG_BOT_TOKEN="test-token"\nTG_CHAT_ID=\'42\'\n'
         with patch.dict(os.environ, {'TG_BOT_TOKEN': ''}, clear=True), patch.object(notify.subprocess, 'run', return_value=SimpleNamespace(stdout=data)) as run:
             self.assertEqual(notify.credentials(), ('test-token', '42'))
-            self.assertIn('--secret=self-healing-workspace-env', run.call_args.args[0])
+            self.assertIn('--secret=self-healing-telegram-env', run.call_args.args[0])
             self.assertFalse(run.call_args.kwargs.get('shell', False))
 
     def test_plain_text_delivery_requires_confirmed_message_id(self):

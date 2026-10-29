@@ -120,3 +120,9 @@ variable "canary_stale_seconds" {
   default     = 108000
   description = "How old the canary's proof of delivery may get before the watchdog pages (30h = one missed run plus slack)."
 }
+
+variable "instance_ready" {
+  description = "Instance identity output used only to order instance-level IAM after VM creation."
+  type        = string
+  default     = ""
+}

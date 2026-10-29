@@ -1,13 +1,4 @@
 'use strict';
-//
-// Configuration parsing for the watchdog.
-//
-// Every number is validated at the boundary and every failure is LOUD. The
-// self-healing repo has been burned three times by the opposite (2026-07-28
-// review): an unparsed env var became NaN, every comparison against it was
-// false, the check silently passed, and a detector built to catch silent
-// failure failed silently itself. A watchdog that no-ops because of a typo in
-// a Terraform variable is worse than no watchdog, because it looks alive.
 
 /** @throws if the value is missing, non-numeric, or out of range. */
 function intFromEnv(env, name, { min, max, fallback } = {}) {

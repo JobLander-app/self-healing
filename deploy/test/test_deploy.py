@@ -157,6 +157,13 @@ esac
         self.assertEqual((self.host / 'etc/grafana/dashboards/technical.json').read_text(), '{"version":"stale-installed"}\n')
         self.assertFalse((self.repo / '.deploying').exists())
 
+    def test_missing_consumer_contract_defers_without_touching_runtime(self):
+        result = self.deploy(SH_DIR='', DEPLOY_ENV_FILE=str(self.root/'absent-deploy.env'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('CD deferred', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.old)
+        self.assertFalse((self.root/'systemctl.log').exists())
+
     def test_build_failure_leaves_working_runtime_untouched(self):
         self.assert_rollback(self.deploy(FAIL_BUILD='1'))
         self.assertFalse((self.root / 'systemctl.log').exists())
@@ -223,7 +230,7 @@ def migrate_state(config):
     def install_real_monitor_release(self):
         self.git('reset', '-q', '--keep', self.new)
         # Run the real copy-once migration through actual transactional CD.
-        for name in ['run_monitor.py', 'topology.py', 'targets.json']:
+        for name in ['run_monitor.py', 'topology.py', 'false_positives.py']:
             source = SCRIPT.parents[2] / 'monitor' / name
             self.write(self.repo / 'monitor' / name, source.read_text())
         self.git('add', 'monitor')
@@ -236,7 +243,7 @@ def migrate_state(config):
         self.write(legacy / 'known-errors.json', '{"old-decision":"suppressed"}\n')
         self.write(legacy / 'latest-report.json', '{"timestamp":"before-cutover"}\n')
         target = home / '.local/state/self-healing/monitor'
-        return legacy, target, {'HOME': str(home), 'MONITOR_STATE_DIR': str(target)}
+        return legacy, target, {'HOME': str(home), 'MONITOR_STATE_DIR': str(target), 'MONITOR_LEGACY_DIRS': str(legacy)}
 
     def test_failed_first_monitor_cutover_recopies_newer_legacy_state_on_retry(self):
         legacy, target, env = self.install_real_monitor_release()
@@ -296,8 +303,6 @@ def migrate_state(config):
         self.write(self.host / 'etc/caddy/Caddyfile', self.INSTALLED_CADDYFILE)
 
     def test_a_release_keeps_the_chatwoot_vhost_the_host_declares(self):
-        # 2026-10-13: a release installed the console-only template and took
-        # chat.joblander.app down for an hour.
         self.install_caddy_template()
         result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test',
                              MOCK_META_CHATWOOT_DOMAIN='chat.example.test', MOCK_META_CHATWOOT_PORT='3100')
@@ -390,8 +395,6 @@ def migrate_state(config):
         return holder
 
     def test_a_watcher_tick_in_progress_delays_the_release_instead_of_deferring_it(self):
-        # 2026-10-13: the timer and the minute cron both fired at :00, and a
-        # fail-fast lock deferred every release.
         self.hold_watch_lock(4)
         result = self.deploy(DEPLOY_WATCH_WAIT_SEC='30')
         self.assertEqual(result.returncode, 0, result.stderr)

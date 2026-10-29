@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "project": "your-gcp-project",
+  "services": [
+    "your-service"
+  ],
+  "regions": [
+    "europe-west1"
+  ],
+  "cloud_run_services": [
+    "your-service"
+  ],
+  "cloud_functions": false,
+  "livekit": null,
+  "voice_agents": [],
+  "retired_resources": []
+}

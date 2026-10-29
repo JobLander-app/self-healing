@@ -6,12 +6,13 @@ import * as path from "node:path";
 import { accountingStatus } from "./accountingState";
 import { alertAccounting } from "./healthAlerts";
 import { readProviderPrompt } from "./promptInput";
-import { config } from "./config";
+import { config, providerModel } from "./config";
 import { executeClaude } from "./claude";
+import { executeOpenCode } from "./opencode";
 import { executeCodex } from "./codex";
 import { executeWithFallback } from "./fallback";
 import { providerOrder, availableToAttempt, updateProvider } from "./providerState";
-import { buildFirebaseMcpEnv, buildLinearMcpEnv, buildSentryMcpEnv, toolUsesFrom } from "./session";
+import { mcpEntries, mcpServers, toolUsesFrom } from "./session";
 import { hydrateFromDisk, recordAttempt, recordAttemptStarted, traceEvent } from "./trace";
 
 async function main() {
@@ -20,8 +21,7 @@ async function main() {
   hydrateFromDisk();
   await alertAccounting().catch(err => console.error("[provider-cli] accounting alert failed:", err));
   if (!accountingStatus().healthy) throw new Error("Accounting unavailable; no provider attempt started");
-  const root = path.resolve(__dirname, "../..");
-  const entries = Object.fromEntries(["firebase", "sentry", "linear"].map(name => [name, path.join(root, "mcp", name, "index.js")]));
+  const entries = mcpEntries();
   const turnId = `monitor-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.maxRunMs);
@@ -32,14 +32,12 @@ async function main() {
       canAttempt: availableToAttempt,
       execute: (provider, nextPrompt) => {
         const id = `${turnId}-${provider}`;
-        recordAttemptStarted(turnId, provider, provider === "claude" ? config.claudeModel : config.codexModel);
+        recordAttemptStarted(turnId, provider, providerModel(provider));
+        if (provider === "opencode") return executeOpenCode({ id, prompt: nextPrompt, model: config.openCodeModel, entries,
+          signal: controller.signal, onTool: tool => traceEvent(turnId, "tool_use", { provider, ...tool }) });
         return provider === "codex" ? executeCodex({ id, prompt: nextPrompt, model: config.codexModel, entries, signal: controller.signal,
           onTool: tool => traceEvent(turnId, "tool_use", { provider, ...tool }) }) : executeClaude({ id, prompt: nextPrompt, abortController: controller,
-          mcpServers: {
-            firebase: { command: "node", args: [entries.firebase], env: buildFirebaseMcpEnv() },
-            sentry: { command: "node", args: [entries.sentry], env: buildSentryMcpEnv() },
-            linear: { command: "node", args: [entries.linear], env: buildLinearMcpEnv() },
-          }, onMessage: msg => { for (const tool of toolUsesFrom(msg)) traceEvent(turnId, "tool_use", { provider, ...tool }); } });
+          mcpServers: mcpServers(), onMessage: msg => { for (const tool of toolUsesFrom(msg)) traceEvent(turnId, "tool_use", { provider, ...tool }); } });
       }, record: a => { recordAttempt(turnId, a); updateProvider(a); },
     });
     process.stdout.write(JSON.stringify({ turnId, output: result.output, error: result.error, attempts: result.results.map(r => r.attempt) }) + "\n");

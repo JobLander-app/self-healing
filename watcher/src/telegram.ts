@@ -1,16 +1,4 @@
-/**
- * JOB-731: direct plain-text Telegram pager.
- *
- * Incident (2026-07): the bash watcher paged through workspace notify.sh,
- * which always sends parse_mode=Markdown with no escaping. An enriched
- * regions string ("asia-south1:fail_slow (input alive (audio_in 5) ...)")
- * broke Telegram entity parsing (HTTP 400) and the P0 page was LOST.
- *
- * Fix: the watcher sends to api.telegram.org DIRECTLY with NO parse_mode
- * (a pager needs delivery, not formatting). A standalone helper resolves the
- * existing Secret Manager credential as fallback. If both paths fail, reject
- * so the durable outbox retries; other actions still continue.
- */
+/** Direct plain-text paging with a credential-helper fallback and durable retries. */
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -140,13 +128,7 @@ const notifyScriptRunner: NotifyScriptRunner = async ({ script, message }) => {
   await execFileAsync(script, [message], { timeout: 35_000 });
 };
 
-/**
- * The notifyOwner effect (JOB-731 pager path):
- *   1. direct plain-text Telegram send (primary),
- *   2. standalone plain-text helper (credentials from Secret Manager),
- *   3. both failed → one structured `PAGE_FAILED {json}` stdout line, no
- *      swallow: the outbox retries later and lets other actions continue.
- */
+
 export const buildNotifyOwner = ({
   config,
   env,

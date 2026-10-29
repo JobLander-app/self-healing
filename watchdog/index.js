@@ -1,27 +1,4 @@
 'use strict';
-//
-// Off-box watchdog + alert relay for the self-healing loop.
-//
-// WHY IT LIVES OUTSIDE THE VM (incident 2026-08-26).
-// Everything that was supposed to notice the VM was dead ran ON the VM, or
-// depended on the VM's network to report:
-//   - the watcher's heartbeat was shipped with `gcloud logging write`, which
-//     needs the network that had died;
-//   - the Cloud Monitoring dead-man alert on that heartbeat fired into an
-//     email channel that has never delivered a message, and its Telegram
-//     sibling posts Monitoring's incident JSON straight at api.telegram.org,
-//     which answers 400 every time;
-//   - and nothing at all could ACT. Recovery was a human noticing.
-// The result was six days of silence with prod unmonitored.
-//
-// This function is the layer with none of those dependencies: it runs on Cloud
-// Run (Functions gen2), reads the heartbeat from Cloud Logging, and can reset
-// the instance itself. It is fully deterministic — no model, no judgment, per
-// the single-provider rule in CLAUDE.md.
-//
-// Entry points:
-//   watchdog   — HTTP, invoked by Cloud Scheduler every 5 min (OIDC-authenticated).
-//   alertRelay — Pub/Sub, turns a Cloud Monitoring incident into a Telegram message.
 
 const functions = require('@google-cloud/functions-framework');
 const { loadConfig } = require('./config');

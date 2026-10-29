@@ -4,16 +4,10 @@ variable "project_id" {
 }
 
 variable "vm_name" {
-  description = <<-EOT
-    Instance name. Also used for the boot disk (`<vm_name>`) and as a
-    prefix for the service-account display name. Phase 2/3 convention:
-    `self-healing-1`. The legacy `joblander-agents` VM is NOT managed
-    here and must never be imported into this module (cutover = Phase 4,
-    owner signal only).
-  EOT
-  type        = string
-  default     = "self-healing-1"
+  type    = string
+  default = "self-healing-1"
 }
+
 
 variable "zone" {
   description = "Zone the VM lives in (e.g. `europe-west1-b`)."
@@ -82,24 +76,11 @@ variable "service_account_id" {
 }
 
 variable "secret_ids" {
-  description = <<-EOT
-    Secret Manager secret_ids the VM's SA gets `secretAccessor` on —
-    per-secret IAM instead of a project-wide secretmanager.secretAccessor
-    role (least privilege). All six existed in the project as of
-    2026-07-15 (verified via `gcloud secrets list`); granting IAM on a
-    nonexistent secret fails the apply, so anything not-yet-created goes
-    in `extra_secret_ids` instead.
-  EOT
+  description = "Existing secrets this VM may read; values never enter Terraform state."
   type        = list(string)
-  default = [
-    "self-healing-dispatcher-env",
-    "self-healing-trigger-token",
-    "HEALTH_OUTPUT_HMAC_KEY",
-    "linear-api-key",
-    "joblander-sentry-monitor-token",
-    "qa-test-user-password",
-  ]
+  default     = ["self-healing-dispatcher-env", "self-healing-trigger-token", "self-healing-output-hmac", "linear-api-key", "self-healing-telegram-env", "self-healing-gh-token", "claude-code-oauth-token"]
 }
+
 
 variable "extra_secret_ids" {
   description = <<-EOT
@@ -112,10 +93,11 @@ variable "extra_secret_ids" {
 }
 
 variable "logs_bucket" {
-  description = "GCS bucket the agents write session logs / reports to. SA gets objectAdmin on this bucket ONLY."
+  description = "Optional existing session-log bucket. Empty grants no bucket access."
   type        = string
-  default     = "joblander-agent-logs"
+  default     = ""
 }
+
 
 variable "alert_email" {
   description = "Email address for the module's monitoring notification channel (dead-man + meetings-saved backstop)."
@@ -123,16 +105,31 @@ variable "alert_email" {
 }
 
 variable "self_healing_repo_url" {
-  description = "HTTPS clone URL of this repo (cloned to /home/joblander/self-healing)."
+  description = "HTTPS clone URL of your self-healing fork."
   type        = string
-  default     = "https://github.com/JobLander-app/self-healing"
 }
 
-variable "workspace_repo_url" {
-  description = "HTTPS clone URL of the workspace repo (cloned to /home/joblander/workspace — dispatcher agents need its task-file dirs, notify.sh and the monitor launcher)."
+
+variable "consumer_profile" {
+  description = "Profile path relative to the self-healing checkout."
   type        = string
-  default     = "https://github.com/JobLander-app/workspace"
 }
+
+variable "agent_user" {
+  type    = string
+  default = "selfheal"
+  validation {
+    condition     = can(regex("^[a-z_][a-z0-9_-]{0,30}$", var.agent_user))
+    error_message = "agent_user must be a Linux account name."
+  }
+}
+
+variable "firebase_enabled" {
+  description = "Grant read-only Firestore access only when the Firebase integration is selected."
+  type        = bool
+  default     = false
+}
+
 
 variable "repo_branch" {
   description = "Branch init.sh checks out in all three repos."
@@ -174,20 +171,12 @@ variable "heartbeat_absence_seconds" {
   default     = 300
 }
 
-# ---- observability console (JOB-731 observability v1) -----------------------
 
 variable "console_domain" {
-  description = <<-EOT
-    Public FQDN the observability console is served on. Caddy issues a
-    Let's Encrypt cert for it and reverse-proxies to Grafana; Grafana's
-    root_url is set to https://<console_domain>. An A record pointing this
-    name at the reserved static IP must be created out-of-band (surfaced as
-    the `console_dns_record` output + a POST-INIT-TODO line — the owner adds
-    it via the Namecheap API, same precedent as *.mcp.joblander.app).
-  EOT
+  description = "FQDN of the Grafana console; its A record must point to console_static_ip."
   type        = string
-  default     = "self-healing.joblander.app"
 }
+
 
 variable "chatwoot_domain" {
   description = <<-EOT
@@ -273,4 +262,18 @@ variable "extra_notification_channel_ids" {
     passes the Pub/Sub->relay->Telegram channel here so these policies reach a
     human on a path that is verified end to end.
   EOT
+}
+
+variable "product_output_filter" {
+  description = "Optional application output backstop: Cloud Logging filter. Empty disables it."
+  type        = string
+  default     = ""
+}
+variable "product_output_metric_name" {
+  type    = string
+  default = "self_healing_product_output"
+}
+variable "product_output_absence_seconds" {
+  type    = number
+  default = 14400
 }

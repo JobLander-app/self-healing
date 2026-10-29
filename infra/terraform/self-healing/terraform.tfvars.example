@@ -1,0 +1,13 @@
+project_id       = "your-gcp-project"
+alert_email      = "ops@example.com"
+console_domain   = "healing.example.com"
+repo_url         = "https://github.com/your-org/self-healing"
+consumer_profile = "consumers/your-app/profile.json"
+agent_user       = "selfheal"
+firebase_enabled = false
+secret_ids = [
+  "self-healing-dispatcher-env", "self-healing-trigger-token", "self-healing-output-hmac",
+  "linear-api-key", "self-healing-telegram-env", "self-healing-gh-token", "claude-code-oauth-token",
+]
+# The VM module also grants its configured self-healing-grafana-admin secret.
+# The watchdog reads telegram-alert-bot-token and telegram-default-chat-id separately.

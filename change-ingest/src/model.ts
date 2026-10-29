@@ -22,13 +22,13 @@ export type ChangeSource = "github" | "deploy" | "gcp_audit" | "linear" | "notio
 export interface EntityRef {
   /** e.g. "gcp_instance" | "region" | "service" | "repo" — opaque to the store. */
   type: string;
-  /** e.g. "lk-au-southeast1" | "australia-southeast1" | "joblander-audio-engine". */
+
   id: string;
 }
 
 /** The persisted/served row shape (§2). `ts` = EFFECTIVE time in prod. */
 export interface ChangeEvent {
-  /** source-prefixed, stable, idempotent PK: `gh:owner/repo#12`, `audit:<insertId>`, `linear:JOB-710`. */
+
   id: string;
   source: string;
   /** fine-grained: pr_merged | instance_delete | run_deploy (successful create/update/replace) | run_deploy_failed | run_delete | iam_change | issue_status … */

@@ -15,7 +15,7 @@ export function codexUsage(value: unknown): TokenUsage {
 }
 export function codexEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const key of ["PATH", "HOME", "CODEX_HOME", "LANG", "USER", "LOGNAME", "SHELL", "TMPDIR", "CLOUDSDK_CONFIG", "GCP_PROJECT_ID", "GOOGLE_APPLICATION_CREDENTIALS", "SSL_CERT_FILE", "SSL_CERT_DIR"]) {
+  for (const key of ["PATH", "HOME", "CODEX_HOME", "LANG", "USER", "LOGNAME", "SHELL", "TMPDIR", "CLOUDSDK_CONFIG", "GCP_PROJECT_ID", "GOOGLE_APPLICATION_CREDENTIALS", "SSL_CERT_FILE", "SSL_CERT_DIR", "LINEAR_API_KEY_SECRET", "SENTRY_ORG", "SENTRY_PROJECT_ID", "SENTRY_TOKEN_SECRET"]) {
     if (source[key] !== undefined) env[key] = source[key];
   }
   env.GCP_PROJECT_ID = config.gcpProject;
@@ -58,7 +58,7 @@ export async function executeCodexSmoke(input: Omit<CodexInput, "entries">): Pro
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "shl-codex-probe-"));
   const env: NodeJS.ProcessEnv = { HOME: cwd, TMPDIR: cwd,
     CODEX_HOME: path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), ".codex-shl")) };
-  for (const key of ["PATH", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR"]) {
+  for (const key of ["PATH", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR", "LINEAR_API_KEY_SECRET", "SENTRY_ORG", "SENTRY_PROJECT_ID", "SENTRY_TOKEN_SECRET"]) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   const args = codexArgs({}, input.model).filter(arg => arg !== "--dangerously-bypass-approvals-and-sandbox");

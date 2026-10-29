@@ -31,6 +31,8 @@ export interface SelectedCandidate {
   createdAt: string;
   updatedAt: string;
   reclaim: boolean;
+  signature?: string;
+  priority?: number;
   /** Done + agent-claimed: run only the post-deploy verification (Step 4a.11b). */
   verify?: boolean;
 }
@@ -92,6 +94,7 @@ export function buildQueueFilter(team: string, staleClaimBefore: string, now = D
 export function isQueueCandidate(issue: QueueIssue, staleClaimBefore: string, now = Date.now()): boolean {
   if (!isRecentIssue(issue.createdAt, now)) return false;
   const labels = issue.labels.nodes.map((label) => label.name);
+  if (labels.includes("false-positive")) return false;
   if (!labels.includes(MONITOR_LABEL) && !issue.title.startsWith(MONITOR_PREFIX)) return false;
   if (!issue.description?.trim() || issue.children.nodes.length > 0) return false;
   if (!Number.isFinite(timestamp(issue.updatedAt))) return false;
@@ -112,6 +115,8 @@ export function selectCandidate(issues: QueueIssue[], staleClaimBefore: string, 
   return issue ? {
     id: issue.id,
     identifier: issue.identifier,
+    signature: issue.description?.match(/\*\*Signature:\*\*\s*`([^`\n]+)`/)?.[1],
+    priority: issue.priority,
     createdAt: issue.createdAt,
     updatedAt: issue.updatedAt,
     reclaim: issue.state.name === "In Progress",
@@ -128,6 +133,7 @@ export function queuePolicy(staleClaimMinutes: number, dryRun = false): string {
     `and updatedAt older than ${staleClaimMinutes} minutes; also ${VERIFY_STATE} ONLY with "${AGENT_CLAIMED_LABEL}" ` +
     `and updatedAt older than ${staleClaimMinutes} minutes, which is a merged fix awaiting post-deploy verification. ` +
     "Never infer ownership from assignee. " +
+    "Never select a ticket carrying false-positive. " +
     "Exclude parent tickets with children and tickets with no usable description. " +
     "Within the seven-day window only, sort Urgent > High > Medium > Low > unprioritized, then oldest createdAt. " +
     "Before claiming, re-read the issue and apply this contract to its CURRENT createdAt, state and labels using the current UTC time. Age is measured from createdAt only, never updatedAt. " +

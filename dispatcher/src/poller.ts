@@ -9,10 +9,11 @@
  * claim; we keep nothing in memory that we can't rebuild from a re-poll.
  */
 
+import { retryFalsePositives } from "./falsePositives";
 import * as cron from "node-cron";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { config } from "./config";
+import { config, LINEAR_API_KEY_SECRET } from "./config";
 import { isDeploymentInProgress } from "./deployment";
 import { buildQueueFilter, CandidateEligibilityError, type SelectedCandidate } from "./queue";
 import { readCandidate } from "./queueClient";
@@ -26,17 +27,6 @@ const execFileAsync = promisify(execFile);
 
 let task: cron.ScheduledTask | null = null;
 
-// ---------------------------------------------------------------------------
-// Linear pre-check (JOB-731).
-//
-// WHY: every poll tick used to spawn a full Claude agent run (5–7 turns,
-// ~$0.05–0.11) even when there were ZERO candidate tickets — measured 5
-// consecutive no-work runs on the live VM, ~144 ticks/day of pure subscription
-// burn. A read-only Linear queue scan selects the exact issue before starting an agent.
-//
-// FAIL CLOSED: no exact eligible ticket means no inference, including manual
-// triggers. Failed reads remain observable and durable wakeups retry later.
-// ---------------------------------------------------------------------------
 
 export type PrecheckOutcome = "skip" | "run" | "error";
 export interface PrecheckState {
@@ -63,7 +53,7 @@ async function resolveLinearApiKey(): Promise<string> {
   }
   const { stdout } = await execFileAsync(
     "gcloud",
-    ["secrets", "versions", "access", "latest", "--secret=linear-api-key", `--project=${config.gcpProject}`],
+    ["secrets", "versions", "access", "latest", `--secret=${LINEAR_API_KEY_SECRET}`, `--project=${config.gcpProject}`],
     { timeout: 15_000 },
   );
   const key = stdout.trim();
@@ -72,22 +62,7 @@ async function resolveLinearApiKey(): Promise<string> {
   return key;
 }
 
-/**
- * Build the Linear GraphQL IssueFilter object that defines "a monitor-origin
- * candidate". Exported so tests can inspect the shape without mocking the
- * network.
- *
- * A ticket qualifies if it satisfies EITHER:
- *   • carries the `monitor` label (normal path: watcher / healthcheck), OR
- *   • title starts with "[Monitor]" (human/tool filed it without the label).
- * Both alternatives are OR-ed inside a top-level `and` alongside the state
- * gate, so the two dimensions are independent. This keeps the pre-check filter
- * in exact sync with the agent constitution's Step-1 pick criteria — a
- * pre-check wider than the agent spawns sessions that return `no-work`,
- * burning subscription quota (2026-07-28: 21 consecutive such runs, ~$14/day).
- * JOB-915: fix for the label-only pre-check that silently dropped tickets
- * filed with the correct prefix but without the label.
- */
+
 export function buildPrecheckFilter(staleClaimBefore: string): object {
   return buildQueueFilter(config.linearTeam, staleClaimBefore);
 }
@@ -125,6 +100,8 @@ export async function pollOnce(reason: string): Promise<{ ran: boolean; note: st
   if (!accountingStatus().healthy) hydrateFromDisk();
   await alertAccounting().catch(err => console.error("[poller] accounting alert failed:", err));
   if (!accountingStatus().healthy) return { ran: false, note: "accounting unavailable" };
+  try { await retryFalsePositives(); }
+  catch (err) { lastPrecheck = { at: new Date().toISOString(), result: "error", error: `False-positive write pending: ${safeError(String(err))}` }; console.error("[poller]", lastPrecheck.error); return { ran: false, note: "false-positive-write-pending" }; }
   if (!providerOrder().some(p => availableToAttempt(p))) {
     return { ran: false, note: "all providers cooling down" };
   }

@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { readConfig, type WatchConfig } from "../src/config.js";
 import type { PostFetchLike } from "../src/telegram.js";
@@ -7,8 +8,7 @@ import {
   resolveTelegramCreds,
 } from "../src/telegram.js";
 
-/** The exact class of message that killed the real page (JOB-731): Markdown
- *  entities that never close — underscores, brackets, parens. */
+
 const BROKEN_MESSAGE =
   "URGENT P0 [output-watch]: /health/output = fail (HTTP 200). " +
   "Regions: asia-south1:fail_slow (input alive (audio_in 5) but 0 hints generated, _[broken (offset";
@@ -92,7 +92,7 @@ describe("resolveTelegramCreds", () => {
   });
 });
 
-describe("buildNotifyOwner — direct plain-text send (JOB-731)", () => {
+describe("buildNotifyOwner — direct plain-text send (APP-731)", () => {
   it("delivers a Markdown-breaking message directly with NO parse_mode", async () => {
     const { fetchImpl, calls } = okFetch();
     const runNotifyScript = vi.fn(async () => {});
@@ -215,9 +215,9 @@ describe("buildNotifyOwner — direct plain-text send (JOB-731)", () => {
   });
 });
 
-describe("readConfig — tgEnvFile (JOB-731)", () => {
+describe("readConfig — tgEnvFile (APP-731)", () => {
   it("defaults to standalone credential file and honors WATCH_TG_ENV_FILE", () => {
-    expect(readConfig({ env: {} }).tgEnvFile).toBe("/home/joblander/.config/self-healing/telegram.env");
+    expect(readConfig({ env: {} }).tgEnvFile).toBe(`${homedir()}/.config/self-healing/telegram.env`);
     expect(
       readConfig({ env: { WATCH_TG_ENV_FILE: "/custom/.env" } }).tgEnvFile,
     ).toBe("/custom/.env");

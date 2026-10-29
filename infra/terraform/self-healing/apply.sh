@@ -1,28 +1,7 @@
 #!/usr/bin/env bash
-#
-# The only sanctioned way to apply this root.
-#
-# WHY IT EXISTS. On 2026-09-02 `terraform apply` was run from a checkout that
-# predated the watchdog module. Terraform did exactly what it was told: the
-# module was absent from the configuration, so it DESTROYED it — service
-# account, IAM, both functions, the scheduler, the state bucket. The loop lost
-# its off-box recovery layer for twenty minutes, and only a stale local checkout
-# stood between "apply" and "delete the safety net".
-#
-# This is a repeat. The 2026-07-28 review recorded four wrong conclusions in one
-# week, three of them "from reading a local checkout five commits behind". The
-# difference is that reading stale code produces a wrong opinion, while applying
-# stale infrastructure-as-code produces a wrong production.
-#
-# So: this root is applied from a checkout that matches origin/main, or it is
-# not applied.
-#
-#   ./apply.sh              plan, confirm, apply
-#   ./apply.sh --auto       no confirmation (CI / automation)
-#   ./apply.sh --plan-only  plan and stop
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "${TF_ROOT:-$(dirname "$0")}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 AUTO=0
@@ -51,7 +30,7 @@ if [ "$LOCAL" != "$REMOTE" ]; then
 fi
 
 # ---- 2. no uncommitted infrastructure --------------------------------------
-DIRTY="$(git -C "$REPO_ROOT" status --porcelain -- infra/ | grep -v '\.terraform' || true)"
+DIRTY="$(git -C "$REPO_ROOT" status --porcelain -- infra/ consumers/ config/ init/ | grep -v '\.terraform' || true)"
 if [ -n "$DIRTY" ]; then
   die "uncommitted changes under infra/ — commit them, or you are applying something no review has seen:
 $DIRTY"

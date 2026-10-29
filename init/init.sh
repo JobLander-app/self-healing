@@ -1,27 +1,26 @@
 #!/usr/bin/env bash
 # =============================================================================
-# self-healing VM init (JOB-731 Phase 2)
+# Self-healing VM provisioning
 #
 # Rendered by Terraform templatefile() and attached as the GCE
 # metadata startup-script (infra/terraform/modules/self-healing-vm/main.tf).
-# Replaces init/legacy-startup-script.sh (kept for reference).
 #
-# IDEMPOTENT: safe to re-run any number of times —
-#   sudo google_metadata_script_runner startup
+# Re-runnable provisioning; it starts/restarts services.
+# Do not use a full startup rerun to migrate an active worker.
 #
 # TEMPLATEFILE RULES: this file is a Terraform template. Only the injected
 # template variables may use the bare "dollar-brace" form; every BASH
 # expansion must either be brace-less ($VAR) or double-dollar ($${VAR}).
 #
 # One-time steps init CANNOT do are collected into
-# /home/joblander/POST-INIT-TODO.md and printed at the end.
+# $AGENT_HOME/POST-INIT-TODO.md and printed at the end.
 # =============================================================================
 set -euo pipefail
 
 # ---- values injected by Terraform -------------------------------------------
 PROJECT_ID="${project_id}"
 SELF_HEALING_REPO_URL="${self_healing_repo_url}"
-WORKSPACE_REPO_URL="${workspace_repo_url}"
+CONSUMER_PROFILE="${consumer_profile}"
 REPO_BRANCH="${repo_branch}"
 DISPATCHER_ENV_SECRET="${dispatcher_env_secret}"
 GH_TOKEN_SECRET="${gh_token_secret}"
@@ -38,13 +37,14 @@ GRAFANA_ADMIN_SECRET="${grafana_admin_secret}"
 PROMETHEUS_VERSION=2.53.2
 NODE_EXPORTER_VERSION=1.8.2
 CODEX_VERSION=0.153.4
+OPENCODE_VERSION=1.18.33
 # -----------------------------------------------------------------------------
 
 export DEBIAN_FRONTEND=noninteractive
 LOG_FILE=/var/log/self-healing-init.log
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-AGENT_USER=joblander
+AGENT_USER="${agent_user}"
 AGENT_HOME=/home/$AGENT_USER
 TODO_FILE=$AGENT_HOME/POST-INIT-TODO.md
 TODO_TMP=$(mktemp)
@@ -93,6 +93,10 @@ fi
 command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
 if ! codex --version 2>/dev/null | grep -Fxq "codex-cli $CODEX_VERSION"; then
   npm install -g "@openai/codex@$CODEX_VERSION"
+fi
+
+if ! opencode --version 2>/dev/null | grep -Fxq "$OPENCODE_VERSION"; then
+  npm install -g "opencode-ai@$OPENCODE_VERSION"
 fi
 
 # ---- 5. observability stack packages -------------------------------------------
@@ -168,8 +172,7 @@ log "[6/11] user $AGENT_USER"
 id -u $AGENT_USER >/dev/null 2>&1 || useradd -m -s /bin/bash $AGENT_USER
 usermod -aG docker $AGENT_USER || true
 
-as_agent git config --global user.name "JobLander Self-Healing Agent"
-as_agent git config --global user.email "agent@joblander.app"
+
 
 # ---- 7. gh auth (fail-soft) -----------------------------------------------------
 log "[7/11] gh auth from Secret Manager ($GH_TOKEN_SECRET)"
@@ -203,26 +206,6 @@ clone_or_update() {
   fi
 }
 clone_or_update "$SELF_HEALING_REPO_URL" "$AGENT_HOME/self-healing"
-clone_or_update "$WORKSPACE_REPO_URL" "$AGENT_HOME/workspace"
-
-# workspace/.env (TG_BOT_TOKEN/TG_CHAT_ID for scripts/notify.sh — the watcher's
-# Telegram pager). Untracked on the legacy VM; snapshotted to Secret Manager
-# 2026-07-16. Without it every page dies with "ENV_FILE not found" (found
-# during TEST-PLAN stage-2 prep — exactly the gap class the fire drill exists for).
-if [ -d "$AGENT_HOME/workspace" ]; then
-  if gcloud secrets versions access latest \
-    --secret="self-healing-workspace-env" --project="$PROJECT_ID" \
-    > "$AGENT_HOME/workspace/.env.tmp" 2>/dev/null; then
-    mv "$AGENT_HOME/workspace/.env.tmp" "$AGENT_HOME/workspace/.env"
-    chown $AGENT_USER:$AGENT_USER "$AGENT_HOME/workspace/.env"
-    chmod 600 "$AGENT_HOME/workspace/.env"
-    log "workspace/.env rendered from secret 'self-healing-workspace-env'"
-  else
-    rm -f "$AGENT_HOME/workspace/.env.tmp"
-    add_todo "could not render workspace/.env — notify.sh (Telegram paging) will FAIL"
-  fi
-fi
-
 SH_DIR=$AGENT_HOME/self-healing
 if [ ! -d "$SH_DIR" ]; then
   add_todo "self-healing repo absent — dispatcher/watcher/cron steps were SKIPPED entirely; fix clone and re-run init"
@@ -231,6 +214,27 @@ fi
 # ---- 9. dispatcher + watcher ------------------------------------------------------
 if [ -d "$SH_DIR" ]; then
   log "[9/11] dispatcher .env + builds"
+  PROFILE="$SH_DIR/$CONSUMER_PROFILE"
+  python3 "$SH_DIR/config/run.py" --profile "$PROFILE" --check
+  install -d -m 755 /etc/self-healing
+  ln -sfn "$PROFILE" /etc/self-healing/profile.json
+  python3 - "$PROFILE" "$SH_DIR" "$AGENT_USER" <<'PYDEPLOY'
+import json, shlex, sys
+from pathlib import Path
+profile, repo, user = sys.argv[1:]
+values = json.loads(Path(profile).read_text())["env"]
+settings = {"SH_DIR": repo, "AGENT_USER": user, "SELF_HEALING_PROFILE": profile,
+            "DEPLOY_MONITOR_LOCK": values.get("MONITOR_LOCK_FILE", "/tmp/self-healing-monitor.lock")}
+Path("/etc/self-healing/deploy.env").write_text("".join(k+"="+shlex.quote(v)+"\n" for k,v in settings.items()))
+PYDEPLOY
+  chmod 644 /etc/self-healing/deploy.env
+  as_agent python3 "$SH_DIR/config/run.py" -- bash -c 'git config --global user.name "$GIT_AUTHOR_NAME"; git config --global user.email "$GIT_AUTHOR_EMAIL"'
+  DEPLOY_DIR=$(mktemp -d)
+  cp -R "$SH_DIR/deploy/." "$DEPLOY_DIR/"
+  while IFS= read -r template; do
+    python3 "$SH_DIR/config/render.py" "$PROFILE" "$template" "$template"
+  done < <(find "$DEPLOY_DIR/systemd" "$DEPLOY_DIR/cron" "$DEPLOY_DIR/grafana" -type f)
+
   # Subscription credentials refresh in place; never overwrite an existing cache.
   install -d -m 700 -o $AGENT_USER -g $AGENT_USER "$AGENT_HOME/.codex-shl"
   install -d -m 700 -o $AGENT_USER -g $AGENT_USER "$AGENT_HOME/.agents/skills/yeet"
@@ -255,11 +259,6 @@ if [ -d "$SH_DIR" ]; then
     add_todo "could not render dispatcher/.env from secret '$DISPATCHER_ENV_SECRET' — dispatcher will not start"
   fi
 
-  # dispatcher build. dist/ is no longer committed (2026-07-28): a tracked build
-  # artifact drifts from src on every VM build, which leaves the checkout
-  # permanently dirty and makes the automated `git reset --hard` in
-  # deploy/bin/self-healing-deploy.sh unsafe. Built from src here and on every
-  # deploy, exactly like watcher and change-ingest.
   if [ -f "$SH_DIR/dispatcher/tsconfig.json" ]; then
     (cd "$SH_DIR/dispatcher" && as_agent npm ci && as_agent npx tsc) \
       || add_todo "dispatcher build failed — check npm/tsc output in $LOG_FILE"
@@ -309,7 +308,7 @@ if [ -d "$SH_DIR" ]; then
     /var/log/self-healing-monitor /var/log/self-healing-monitor/turns \
     "$AGENT_HOME/.local/state/self-healing"
   MONITOR_STATE_READY=1
-  as_agent python3 "$SH_DIR/monitor/run_monitor.py" --migrate-only || {
+  as_agent python3 "$SH_DIR/config/run.py" -- python3 "$SH_DIR/monitor/run_monitor.py" --migrate-only || {
     MONITOR_STATE_READY=0
     add_todo "monitor state migration failed or monitor is busy — rerun init after checking the shared Monitor lock; dispatcher start deferred"
   }
@@ -318,7 +317,7 @@ if [ -d "$SH_DIR" ]; then
   # (run still works — trace is fail-soft — but /feed history dies on restart).
   mkdir -p /var/log/job-dispatcher/turns
   chown -R $AGENT_USER:$AGENT_USER /var/log/job-dispatcher
-  install -m 644 "$SH_DIR/deploy/systemd/claude-code-vm-job-dispatcher.service" \
+  install -m 644 "$DEPLOY_DIR/systemd/claude-code-vm-job-dispatcher.service" \
     /etc/systemd/system/claude-code-vm-job-dispatcher.service
   systemctl daemon-reload
   systemctl enable claude-code-vm-job-dispatcher.service
@@ -332,8 +331,8 @@ if [ -d "$SH_DIR" ]; then
   # change-ingest: SQLite data dir + systemd unit (localhost :4200 change feed).
   mkdir -p /var/lib/self-healing
   chown -R $AGENT_USER:$AGENT_USER /var/lib/self-healing
-  if [ -f "$SH_DIR/deploy/systemd/self-healing-change-ingest.service" ]; then
-    install -m 644 "$SH_DIR/deploy/systemd/self-healing-change-ingest.service" \
+  if [ -f "$DEPLOY_DIR/systemd/self-healing-change-ingest.service" ]; then
+    install -m 644 "$DEPLOY_DIR/systemd/self-healing-change-ingest.service" \
       /etc/systemd/system/self-healing-change-ingest.service
     systemctl daemon-reload
     systemctl enable self-healing-change-ingest.service
@@ -345,35 +344,32 @@ if [ -d "$SH_DIR" ]; then
     fi
   fi
 
-  # Memory-capping slice + the netwatch timer that repairs a dead DHCP lease.
-  # Both exist because of the 2026-08-26 six-day blindness — see
-  # docs/POSTMORTEM-2026-08-26-network-blackout.md and deploy/systemd/selfheal.slice.
-  install -m 644 "$SH_DIR/deploy/systemd/selfheal.slice" /etc/systemd/system/selfheal.slice
-  install -m 644 "$SH_DIR/deploy/systemd/selfheal-netwatch.service" /etc/systemd/system/selfheal-netwatch.service
-  install -m 644 "$SH_DIR/deploy/systemd/selfheal-netwatch.timer" /etc/systemd/system/selfheal-netwatch.timer
-  install -m 644 "$SH_DIR/deploy/systemd/selfheal-harden.service" /etc/systemd/system/selfheal-harden.service
-  install -m 644 "$SH_DIR/deploy/systemd/selfheal-harden.timer" /etc/systemd/system/selfheal-harden.timer
+  install -m 644 "$DEPLOY_DIR/systemd/selfheal.slice" /etc/systemd/system/selfheal.slice
+  install -m 644 "$DEPLOY_DIR/systemd/selfheal-netwatch.service" /etc/systemd/system/selfheal-netwatch.service
+  install -m 644 "$DEPLOY_DIR/systemd/selfheal-netwatch.timer" /etc/systemd/system/selfheal-netwatch.timer
+  install -m 644 "$DEPLOY_DIR/systemd/selfheal-harden.service" /etc/systemd/system/selfheal-harden.service
+  install -m 644 "$DEPLOY_DIR/systemd/selfheal-harden.timer" /etc/systemd/system/selfheal-harden.timer
   systemctl daemon-reload
 
   # Host hardening: KeepConfiguration=dhcp, earlyoom, user-slice cap, timer enable.
-  "$SH_DIR/deploy/bin/self-healing-harden.sh" \
+  SH_DIR="$SH_DIR" AGENT_USER="$AGENT_USER" "$SH_DIR/deploy/bin/self-healing-harden.sh" \
     || add_todo "host hardening reported failures — run $SH_DIR/deploy/bin/self-healing-harden.sh by hand and read its output"
 
-  # whole-crontab install: deploy/cron/self-healing.crontab OWNS joblander's crontab
-  crontab -u $AGENT_USER "$SH_DIR/deploy/cron/self-healing.crontab"
+  # whole-crontab install: deploy/cron/self-healing.crontab owns the dedicated agent user's crontab
+  crontab -u $AGENT_USER "$DEPLOY_DIR/cron/self-healing.crontab"
   log "crontab installed for $AGENT_USER"
 
   # CD timer. Installed LAST in this block so the units it restarts already
   # exist. From here on a merge to origin/main reaches this VM on its own —
   # before this, nothing rebuilt or restarted anything after a merge, and the
   # dispatcher ran a five-day-old build of its own already-merged fix.
-  if [ -f "$SH_DIR/deploy/systemd/self-healing-deploy.service" ]; then
+  if [ -f "$DEPLOY_DIR/systemd/self-healing-deploy.service" ]; then
     chmod 755 "$SH_DIR/deploy/bin/self-healing-deploy.sh"
     touch /var/log/self-healing-deploy.log
     chown $AGENT_USER:$AGENT_USER /var/log/self-healing-deploy.log
-    install -m 644 "$SH_DIR/deploy/systemd/self-healing-deploy.service" \
+    install -m 644 "$DEPLOY_DIR/systemd/self-healing-deploy.service" \
       /etc/systemd/system/self-healing-deploy.service
-    install -m 644 "$SH_DIR/deploy/systemd/self-healing-deploy.timer" \
+    install -m 644 "$DEPLOY_DIR/systemd/self-healing-deploy.timer" \
       /etc/systemd/system/self-healing-deploy.timer
     systemctl daemon-reload
     systemctl enable --now self-healing-deploy.timer \
@@ -400,9 +396,9 @@ if [ -d "$SH_DIR" ]; then
   chmod 0755 /var/lib/node_exporter /var/lib/node_exporter/textfile
 
   # Prometheus + node_exporter systemd units (binaries installed in step 5).
-  install -m 0644 "$SH_DIR/deploy/systemd/prometheus.service" \
+  install -m 0644 "$DEPLOY_DIR/systemd/prometheus.service" \
     /etc/systemd/system/prometheus.service
-  install -m 0644 "$SH_DIR/deploy/systemd/node_exporter.service" \
+  install -m 0644 "$DEPLOY_DIR/systemd/node_exporter.service" \
     /etc/systemd/system/node_exporter.service
 
   # Prometheus scrape config.
@@ -412,16 +408,16 @@ if [ -d "$SH_DIR" ]; then
   # Grafana provisioning (datasources + dashboard provider) + dashboards dir.
   mkdir -p /etc/grafana/provisioning/datasources \
     /etc/grafana/provisioning/dashboards /etc/grafana/dashboards
-  install -m 0644 "$SH_DIR/deploy/grafana/provisioning/datasources/prometheus.yml" \
+  install -m 0644 "$DEPLOY_DIR/grafana/provisioning/datasources/prometheus.yml" \
     /etc/grafana/provisioning/datasources/prometheus.yml
   # Linear datasource (Infinity) — powers the Technical dashboard's incident
   # timeline (the real [Monitor] tickets, which live in Linear not Prometheus).
-  install -m 0644 "$SH_DIR/deploy/grafana/provisioning/datasources/linear.yml" \
+  install -m 0644 "$DEPLOY_DIR/grafana/provisioning/datasources/linear.yml" \
     /etc/grafana/provisioning/datasources/linear.yml
-  install -m 0644 "$SH_DIR/deploy/grafana/provisioning/dashboards/dashboards.yml" \
+  install -m 0644 "$DEPLOY_DIR/grafana/provisioning/dashboards/dashboards.yml" \
     /etc/grafana/provisioning/dashboards/dashboards.yml
   # Dashboard JSONs (business + technical). Glob may not match; keep going.
-  cp -f "$SH_DIR"/deploy/grafana/dashboards/*.json /etc/grafana/dashboards/ 2>/dev/null || true
+  cp -f "$DEPLOY_DIR"/grafana/dashboards/*.json /etc/grafana/dashboards/ 2>/dev/null || true
 
   # Infinity datasource plugin — the "Linear" datasource above is of this type.
   # Without it the incident timeline panel has no datasource. Idempotent: skip
@@ -439,7 +435,7 @@ if [ -d "$SH_DIR" ]; then
   fi
 
   # Grafana main config: render __CONSOLE_DOMAIN__ then install (root:grafana 0640).
-  sed "s/__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN/g" "$SH_DIR/deploy/grafana/grafana.ini" \
+  sed "s/__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN/g" "$DEPLOY_DIR/grafana/grafana.ini" \
     > /etc/grafana/grafana.ini
   chown root:grafana /etc/grafana/grafana.ini
   chmod 0640 /etc/grafana/grafana.ini
@@ -449,19 +445,6 @@ if [ -d "$SH_DIR" ]; then
   sed "s/__CONSOLE_DOMAIN__/$CONSOLE_DOMAIN/g" "$SH_DIR/deploy/caddy/Caddyfile" \
     > /etc/caddy/Caddyfile
 
-  # Optional second vhost: Chatwoot, consolidated onto this VM on 2026-09-14 so
-  # its own e2-small could be retired. Appended here rather than baked into the
-  # template because the template is shared by every VM this module builds, and
-  # a Chatwoot vhost on a host that chat.joblander.app does NOT resolve to would
-  # fail the ACME HTTP-01 challenge on a loop and burn Let's Encrypt rate limit.
-  # Empty CHATWOOT_DOMAIN (the default) renders nothing.
-  #
-  # Without this block the vhost exists only as a hand-edit of
-  # /etc/caddy/Caddyfile, and the next `terraform apply` silently wipes it,
-  # taking customer support offline. The block comes from the same renderer
-  # every release uses (self-healing-deploy.sh reads the domain from the
-  # chatwoot-domain instance metadata), so a deploy cannot install a
-  # Caddyfile without it either.
   if [ -n "$CHATWOOT_DOMAIN" ]; then
     bash "$SH_DIR/deploy/bin/render-chatwoot-vhost.sh" "$CHATWOOT_DOMAIN" "$CHATWOOT_UPSTREAM_PORT" \
       >> /etc/caddy/Caddyfile
@@ -490,8 +473,10 @@ DROPIN
       >> "$GRAFANA_ENV_FILE" )
     log "grafana admin password seeded from secret '$GRAFANA_ADMIN_SECRET'"
   else
-    add_todo "Grafana admin password NOT seeded (secret '$GRAFANA_ADMIN_SECRET' missing/unreadable) — admin stays default admin/admin. Create the secret, ensure it is granted to the VM SA (grafana_admin_secret), re-run init."
+    systemctl stop grafana-server || true
+    add_todo "Grafana admin password NOT seeded (secret '$GRAFANA_ADMIN_SECRET' missing/unreadable) — do not expose the console until credentials have been set. Create the secret, ensure it is granted to the VM SA (grafana_admin_secret), re-run init."
   fi
+  [ -n "$GRAFANA_ADMIN_PW" ] || { log "Refusing to start the public console without its admin secret"; exit 1; }
   unset GRAFANA_ADMIN_PW
 
   # Linear API key for the Infinity "Linear" datasource (incident timeline).

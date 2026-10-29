@@ -12,8 +12,8 @@ def credentials():
     if not values.get('TG_BOT_TOKEN') or not values.get('TG_CHAT_ID'):
         result = subprocess.run([
             'gcloud', 'secrets', 'versions', 'access', 'latest',
-            '--secret=' + os.environ.get('SH_NOTIFY_SECRET', 'self-healing-workspace-env'),
-            '--project=' + os.environ.get('GCP_PROJECT', 'meet-assistant-6d8ad'),
+            '--secret=' + os.environ.get('SH_NOTIFY_SECRET', os.environ.get('TELEGRAM_ENV_SECRET', 'self-healing-telegram-env')),
+            '--project=' + os.environ.get('GCP_PROJECT', ''),
         ], capture_output=True, text=True, timeout=15, check=True)
         for line in result.stdout.splitlines():
             key, sep, value = line.strip().removeprefix('export ').partition('=')

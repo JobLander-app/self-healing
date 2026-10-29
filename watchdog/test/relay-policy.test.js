@@ -39,8 +39,8 @@ test('an all-clear is dropped when its alarm was never sent', () => {
 });
 
 test('an all-clear is sent when its alarm was sent', () => {
-  const opened = decideDelivery({ ...base, policyName: 'JobLander Cloud Run 5xx Alert', state: 'open' });
-  const closed = decideDelivery({ ...base, policyName: 'JobLander Cloud Run 5xx Alert', state: 'closed', nowMs: NOW + 120_000, store: opened.store });
+  const opened = decideDelivery({ ...base, policyName: 'Example Cloud Run 5xx Alert', state: 'open' });
+  const closed = decideDelivery({ ...base, policyName: 'Example Cloud Run 5xx Alert', state: 'closed', nowMs: NOW + 120_000, store: opened.store });
   assert.equal(closed.send, true);
 });
 
@@ -58,7 +58,7 @@ test('the canary is delivered silently and does not disturb per-policy state', (
 });
 
 test('P0 detection matches how this project names its policies', () => {
-  assert.equal(isP0('P0: No meetings saved for 4h (product-level STT outage) — JOB-651'), true);
+  assert.equal(isP0('P0: No meetings saved for 4h (product-level STT outage) — APP-651'), true);
   assert.equal(isP0('P1: self-healing WATCHDOG silent 20 min'), false);
   assert.equal(isP0('LiveKit Voice Agent Errors'), false);
   assert.equal(isP0(undefined), false);

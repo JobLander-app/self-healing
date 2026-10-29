@@ -42,11 +42,10 @@ export const buildLinearTicket = ({
   httpCode: string;
   regions: string;
 }): { title: string; description: string } => ({
-  title: `[Monitor] /health/output=${status} — product output regression (backend)`,
+  title: `[Monitor] /health/output=${status} — product output regression`,
   description:
-    `Fast output-watch (JOB-670) tripped on the codified product-output invariant (JOB-668).\n\n` +
+    `The output watcher detected a sustained product-output failure.\n\n` +
     `- status: **${status}** (HTTP ${httpCode})\n- regions: ${regions}\n\n` +
-    `Meaning: input is alive but hints/output are not flowing (or the detector could not measure = fail-closed). ` +
-    `This is the JOB-651 class (errors green, output dead). Investigate the STT->LLM->hint path / recent deploy; ` +
-    `a rollback may be the fix rather than a code change.`,
+    `Input may be alive while output is missing, or the detector could not measure it. ` +
+    `Investigate the configured output contract and recent deployments using the consumer policy.`,
 });

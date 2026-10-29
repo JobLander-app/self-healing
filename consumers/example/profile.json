@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "Example application",
+  "deployment": {
+    "agent_user": "selfheal"
+  },
+  "targets": "targets.json",
+  "policy": "policy.md",
+  "env": {
+    "GCP_PROJECT": "your-gcp-project",
+    "LINEAR_TEAM": "Example",
+    "LINEAR_TEAM_ID": "00000000-0000-4000-8000-000000000001",
+    "LINEAR_MONITOR_LABEL_ID": "00000000-0000-4000-8000-000000000002",
+    "LINEAR_AGENT_CLAIMED_LABEL_ID": "00000000-0000-4000-8000-000000000003",
+    "WATCH_URL": "https://app.example.com",
+    "WATCH_PATH": "/health/output?window_min=30",
+    "WATCH_THRESHOLD": "3",
+    "WATCH_HMAC_SECRET": "self-healing-output-hmac",
+    "TG_CHAT_ID": "REPLACE_ME",
+    "TELEGRAM_ENV_SECRET": "self-healing-telegram-env",
+    "TRACKED_REPOS": "your-org/your-app",
+    "FIREBASE_ENABLED": "false",
+    "SENTRY_ENABLED": "false",
+    "AUTO_MERGE": "false",
+    "DRY_RUN": "true",
+    "GIT_AUTHOR_NAME": "Self-Healing Agent",
+    "GIT_AUTHOR_EMAIL": "self-healing@example.com"
+  }
+}

@@ -21,7 +21,7 @@ output "console_static_ip" {
 output "console_dns_record" {
   description = <<-EOT
     DNS record to create out-of-band (owner, via the Namecheap API). Format
-    is a ready-to-read `<name> A <ip>` line, e.g. `console.joblander.app A
+    is a ready-to-read `<name> A <ip>` line, e.g. `console.example.com A
     34.x.y.z`. Namecheap's setHosts REPLACES all records — GET the full host
     list first, append this A record, then set the complete list.
   EOT

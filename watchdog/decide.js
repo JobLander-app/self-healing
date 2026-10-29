@@ -57,15 +57,6 @@ const BOOTING = 'booting';
  * @param {object} input.cfg
  */
 function decide({ nowMs, watcherAgeSec: rawWatcherAgeSec, dispatcherAgeSec: rawDispatcherAgeSec, canaryAgeSec = null, sinceStartSec = null, instanceStatus, state, cfg }) {
-  // A heartbeat written before the current boot says nothing about this boot.
-  // A VM started after a long stop has stale heartbeats by definition until its
-  // crons tick, and judging it by them reset a fresh boot on 2026-10-13 four
-  // minutes after it came up. So a stream is aged from the later of its last
-  // heartbeat and the instance start: a fresh boot gets its full thresholds,
-  // and a stream that never reports after boot still goes dead on uptime.
-  // A missing heartbeat only means "none in the lookback", so it is aged from
-  // the boot only when the boot is inside the lookback; otherwise it stays
-  // null and reads as before.
   const bootInLookback = sinceStartSec !== null && sinceStartSec <= cfg.lookbackSec;
   const sinceBoot = (age) => (sinceStartSec === null ? age
     : age === null ? (bootInLookback ? sinceStartSec : null)

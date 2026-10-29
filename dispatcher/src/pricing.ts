@@ -1,18 +1,4 @@
-/**
- * Explicit Claude price table for runs that end without an SDK `result`.
- *
- * The SDK reports `total_cost_usd` only on its `result` message. A run the
- * watchdog aborts never receives one, so before this table existed its cost
- * was recorded as null with 0 turns although it ran for 40 minutes: 6 of the 8
- * watchdog-aborted runs in the 7 days to 2026-10-01 were recorded that way,
- * and those 8 runs' real spend recomputed from the session transcripts was
- * $31.22 against $8.08 recorded.
- *
- * The rates are USD per million tokens. They reproduce the SDK's own
- * `total_cost_usd` exactly for run dispatch-2026-10-01T12-10-01-204Z-iessyc
- * ($2.8344, see test/pricing.test.ts). Only models verified that way are
- * listed: an unknown model prices to null instead of a guess.
- */
+/** USD per million tokens; unknown models remain unpriced. Estimates are not invoices. */
 import type { TokenUsage } from "./providerTypes";
 
 interface Rates { input: number; cacheWrite: number; cacheRead: number; output: number }

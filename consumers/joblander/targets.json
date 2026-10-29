@@ -94,5 +94,22 @@
         "URGENT P0: voice-agent:lk-au-southeast1:"
       ]
     }
-  ]
+  ],
+  "services": [
+    "joblander-app",
+    "joblander-audio-engine",
+    "email-service"
+  ],
+  "regions": [
+    "europe-west1",
+    "us-central1",
+    "australia-southeast1",
+    "asia-south1"
+  ],
+  "cloud_run_services": [
+    "joblander-app",
+    "joblander-audio-engine",
+    "email-service"
+  ],
+  "cloud_functions": true
 }

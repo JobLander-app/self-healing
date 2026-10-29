@@ -11,16 +11,16 @@ afterEach(() => { mock.restoreAll(); });
 const CUTOFF = "2026-09-09T12:00:00Z";
 function issue(overrides: Partial<QueueIssue> = {}): QueueIssue {
   return {
-    id: "issue-1", identifier: "JOB-1", title: "[Monitor] Audio failed", description: "Observed error signature",
+    id: "issue-1", identifier: "APP-1", title: "[Monitor] Audio failed", description: "Observed error signature",
     priority: 2, createdAt: "2026-09-05T00:00:00Z", updatedAt: "2026-09-09T11:00:00Z",
     state: { name: "Backlog" }, labels: { nodes: [] }, children: { nodes: [] }, ...overrides,
   };
 }
 
 test("prefix-only backlog tickets select an exact candidate instead of an empty label-only queue", () => {
-  const backlog = Array.from({ length: 51 }, (_, i) => issue({ id: `issue-${i}`, identifier: `JOB-${i + 1}` }));
+  const backlog = Array.from({ length: 51 }, (_, i) => issue({ id: `issue-${i}`, identifier: `APP-${i + 1}` }));
   const selected = selectCandidate(backlog, CUTOFF);
-  assert.equal(selected?.identifier, "JOB-1");
+  assert.equal(selected?.identifier, "APP-1");
   assert.equal(selected?.reclaim, false);
   assert.match(candidateInstruction(selected!), /exact candidate/);
   assert.match(candidateInstruction(selected!), /without the monitor label/);
@@ -69,7 +69,7 @@ test("a Done ticket that still carries a stale agent-claimed label is selected f
 });
 
 test("the Linear filter also asks for stale agent-claimed Done tickets", () => {
-  const filter = buildQueueFilter("JobLander", CUTOFF) as { and: Array<{ or: Array<Record<string, unknown>> }> };
+  const filter = buildQueueFilter("Example", CUTOFF) as { and: Array<{ or: Array<Record<string, unknown>> }> };
   const done = filter.and[1].or[2] as { and: Array<Record<string, unknown>> };
   assert.deepEqual(done.and, [
     { state: { name: { eq: "Done" } } },
@@ -88,8 +88,8 @@ test("terminal, parent, and descriptionless tickets never spawn an investigation
 
 test("selection ranks priority before age, handles unprioritized and deduplicates", () => {
   const low = issue({ id: "low", priority: 4, createdAt: "2026-09-03T00:00:00Z" });
-  const urgent = issue({ id: "urgent", identifier: "JOB-2", priority: 1, createdAt: "2026-09-05T00:00:00Z" });
-  const olderUrgent = issue({ id: "old-urgent", identifier: "JOB-3", priority: 1, createdAt: "2026-09-04T00:00:00Z" });
+  const urgent = issue({ id: "urgent", identifier: "APP-2", priority: 1, createdAt: "2026-09-05T00:00:00Z" });
+  const olderUrgent = issue({ id: "old-urgent", identifier: "APP-3", priority: 1, createdAt: "2026-09-04T00:00:00Z" });
   const unprioritized = issue({ id: "none", priority: 0, createdAt: "2026-09-03T00:00:00Z" });
   assert.equal(selectCandidate([low, urgent, olderUrgent, unprioritized, urgent], CUTOFF)?.id, "old-urgent");
   assert.equal(selectCandidate([unprioritized, low], CUTOFF)?.id, "low");
@@ -101,12 +101,12 @@ function response(nodes: QueueIssue[], hasNextPage = false, endCursor: string | 
 
 test("read-only polling drains pages and hands off the oldest urgent issue from a later page", async () => {
   const requests: Array<{ query: string; variables: { after: string | null } }> = [];
-  const candidate = await readCandidate({ key: "test", team: "JobLander", staleClaimBefore: CUTOFF,
+  const candidate = await readCandidate({ key: "test", team: "Example", staleClaimBefore: CUTOFF,
     fetchImpl: async (_url, init) => {
       requests.push(JSON.parse(String(init?.body)));
       return requests.length === 1
         ? response([issue({ id: "later", priority: 3 })], true, "page-2")
-        : response([issue({ id: "urgent", identifier: "JOB-2", priority: 1 })]);
+        : response([issue({ id: "urgent", identifier: "APP-2", priority: 1 })]);
     },
   });
   assert.equal(candidate?.id, "urgent");
@@ -123,12 +123,12 @@ test("incomplete or invalid queue reads throw instead of asserting the queue is 
     async () => response([issue()], true, "same-cursor"),
   ];
   for (const fetchImpl of inputs) {
-    await assert.rejects(readCandidate({ key: "test", team: "JobLander", staleClaimBefore: CUTOFF, fetchImpl }));
+    await assert.rejects(readCandidate({ key: "test", team: "Example", staleClaimBefore: CUTOFF, fetchImpl }));
   }
 });
 
 test("a confirmed queue containing only protected tickets produces no candidate", async () => {
-  assert.equal(await readCandidate({ key: "test", team: "JobLander", staleClaimBefore: CUTOFF,
+  assert.equal(await readCandidate({ key: "test", team: "Example", staleClaimBefore: CUTOFF,
     fetchImpl: async () => response([issue({ state: { name: "In Progress" } })]),
   }), null);
 });
@@ -156,7 +156,7 @@ test("hard seven-day boundary is inclusive and rejects old, future and malformed
     new Date(NOW + 1).toISOString(), "invalid", "2026-09-08", "2026-02-30T00:00:00Z", undefined]) {
     assert.equal(isRecentIssue(createdAt), false, String(createdAt));
   }
-  const filter = buildQueueFilter("JobLander", CUTOFF) as { createdAt: object };
+  const filter = buildQueueFilter("Example", CUTOFF) as { createdAt: object };
   assert.deepEqual(filter.createdAt, { gte: exact, lte: new Date(NOW).toISOString() });
 });
 
@@ -169,7 +169,7 @@ test("old high-priority and stale active claims cannot starve recent issues or u
 
 test("candidate that ages beyond the limit while awaiting Linear is discarded locally", async () => {
   const createdAt = new Date(NOW - MAX_ISSUE_AGE_MS).toISOString();
-  const candidate = await readCandidate({ key: "test", team: "JobLander", staleClaimBefore: CUTOFF,
+  const candidate = await readCandidate({ key: "test", team: "Example", staleClaimBefore: CUTOFF,
     fetchImpl: async () => {
       mock.method(Date, "now", () => NOW + 1);
       return response([issue({ createdAt })]);
@@ -182,4 +182,12 @@ test("prompt forbids missing-candidate discovery and every old-ticket exception"
   assert.match(candidateInstruction(), /STOP without discovery/);
   assert.match(queuePolicy(30), /Older tickets are forbidden regardless of priority, updatedAt, active state, stale claim, manual trigger, or provider retry/);
   assert.match(queuePolicy(30), /createdAt only, never updatedAt/);
+});
+
+
+test("a false-positive label excludes even an otherwise eligible stale claim", () => {
+  for (const state of ["To Do", "Backlog", "In Progress", "Done"]) {
+    assert.equal(isQueueCandidate(issue({state: {name: state}, labels: {nodes: [
+      {name: "monitor"}, {name: "agent-claimed"}, {name: "false-positive"}]} }), CUTOFF), false);
+  }
 });

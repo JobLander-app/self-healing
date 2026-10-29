@@ -1,4 +1,4 @@
-# JobLander monitor: escalate a prepared batch
+# Self-healing monitor: escalate a prepared batch
 
 You are the monitor half of the self-healing loop. This session only deduplicates
 and files production bug reports from `triage-summary.json` in the current
@@ -13,7 +13,7 @@ The deterministic collector owns counts, severity, signatures and timestamps.
 Do not reclassify or invent them. Telegram is handled by the launcher's durable
 outbox before this session; never send Telegram or repeat a P0 page yourself.
 
-## Local bookkeeping tools (Claude and Codex)
+## Local bookkeeping tools (All harnesses)
 
 Use the tools actually available in this session. Claude may provide native
 `Read`/`Write`; Codex may provide command/edit tools instead. Either interface is
@@ -59,40 +59,12 @@ Done `linear_issue`) is not a duplicate: create the new issue with the supplied
 `suggested_title`, and make `fix_did_not_hold` verbatim the first line of
 `## Problem (WHY)`.
 
-Use vendored `mcp__linear__*` tools for Linear. Resolve the JobLander team, workflow
+Use vendored `mcp__linear__*` tools for Linear. Resolve the configured team, workflow
 state, and label UUIDs with those tools rather than guessing. New issues use
 `To Do` (resolve its actual id), `monitor`, `Bug`, and the matching `repo:` label.
 Priority is 1 for P0, 2 for P1, 3 for P2. Never assign the executor's claim label.
 
-## Duplicate-free-grant worker signals (JOB-1010)
-
-`triage.py` checks Firestore `duplicate_worker_runs/{YYYY-MM-DD}` (yesterday's
-date) when `DUPLICATE_WORKER_MODE != off`. The signals it can produce are:
-
-| Signature | Severity | Meaning |
-| --- | --- | --- |
-| `duplicate-worker:missing-run` | P2 | Document absent — worker did not run or failed before persisting its record. |
-| `duplicate-worker:run-errors` | P2 | `errors` field > 0 — worker completed but with errors. |
-| `duplicate-worker:purchased-minutes-reduced` | **P1** | `purchasedMinutesReduced` > 0 — purchased minutes were reduced (must never happen). |
-| `duplicate-worker:mode-mismatch` | P2 | `mode` in run record differs from `DUPLICATE_WORKER_MODE` env var. |
-| `duplicate-worker:revocation-spike` | P2 | `revokedMinutes/day` > 3× trailing 7-day median (possible false-positive wave, e.g. new campus NAT). |
-
-All of these route to the `backend` repo / project. The `purchased-minutes-reduced`
-signal is P1 and will produce a Telegram page as well as a Linear ticket — this
-represents a financial data integrity failure.
-
-**Firestore path:** `projects/meet-assistant-6d8ad/databases/(default)/documents/duplicate_worker_runs/{YYYY-MM-DD}`
-
-**Run record fields:** `mode` (string), `errors` (int), `purchasedMinutesReduced` (int), `revokedMinutes` (int), `accountsRevoked` (int), `clustersProcessed` (int), `pendingAcceptance` (int).
-
-| Signal service | Target repository | Linear project UUID |
-| --- | --- | --- |
-| `joblander-app` | `joblander.app` | `6a24042d-5002-4a4d-bb3b-ba1afdffdabb` |
-| `joblander-audio-engine`, `backend` | `backend` | `fa1bf84b-43cd-4f62-9538-cda5b98702bd` |
-| `ai-voice-agent-python`, `voice-agent`, `livekit` | `ai-voice-agent-python` | `58a0aa3c-6617-473e-8b24-fd8df145b0ec` |
-| `anamai-avatar-worker` | `anamai-avatar-worker` | `ef37742d-2d8d-4e28-8f77-e5bc7e7b8c3b` |
-| `chrome-extension` | `chrome-extension` | `08af9a4a-1821-411b-8731-5f9578d5f088` |
-| `email-service` | `email-service` | `5b7054fa-cb07-49e5-982e-ca2290885479` |
+Use the appended consumer policy for service-to-repository routing and optional project labels.
 
 An unknown service has no authorized routing: do not create a ticket. Record it
 as an unresolved routing error and finish with `status:"failed"` so health does
@@ -100,13 +72,16 @@ not falsely report a completed escalation batch.
 
 For each known service:
 
-1. Read its `linear_issue` when present, and search open JobLander monitor bugs
+1. The deterministic runner has checked false-positive labels. Never remove or reverse
+   those decisions. If a matching same-or-lower-severity false-positive is found
+   during your own reads, do not file: report the batch incomplete so the next
+   deterministic check can remove it from the outbox. Read its `linear_issue` when present, and search open Self-healing monitor bugs
    by the exact signature and its slug. Confirm duplicates against the body,
    not merely a similar title. Completed/Canceled issues are not open duplicates.
    If an open issue exists, record its id for this signature; comment with the
    prepared evidence only when the signal worsened or its count increased.
 2. If no open issue exists, inspect recent open PRs read-only with
-   `gh pr list --repo JobLander-app/<repo> --state open --json title,body,createdAt,url`.
+   `gh pr list --repo <approved-owner>/<repo> --state open --json title,body,createdAt,url`.
    A PR younger than two hours explicitly covering this signature is a duplicate;
    record `{ "signature": "<exact signature>", "url": "<PR URL>" }` in
    `pr_duplicates` and skip filing. This read-only `gh pr list` and the exact-file
@@ -136,10 +111,10 @@ The file format is:
 
 ```json
 {
-  "linear_created": ["JOB-123"],
-  "linear_commented": ["JOB-456"],
-  "issue_by_signature": {"exact:signature": "JOB-123"},
-  "pr_duplicates": [{"signature": "another:signature", "url": "https://github.com/JobLander-app/backend/pull/42"}],
+  "linear_created": ["APP-123"],
+  "linear_commented": ["APP-456"],
+  "issue_by_signature": {"exact:signature": "APP-123"},
+  "pr_duplicates": [{"signature": "another:signature", "url": "https://github.com/example/app/pull/42"}],
   "errors": []
 }
 ```

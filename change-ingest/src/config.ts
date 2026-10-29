@@ -22,17 +22,7 @@ export interface TrackedRepo {
 }
 
 function parseTrackedRepos(raw: string | undefined): TrackedRepo[] {
-  const src =
-    raw && raw.trim().length > 0
-      ? raw
-      : // Default: the five JobLander repos the dispatcher already clones.
-        [
-          "JobLander-app/backend",
-          "JobLander-app/joblander.app",
-          "JobLander-app/chrome-extension",
-          "JobLander-app/email-service",
-          "JobLander-app/ai-voice-agent-python",
-        ].join(",");
+  const src = raw || "";
   return src
     .split(",")
     .map((s) => s.trim())
@@ -52,11 +42,11 @@ export const config = {
   // dispatcher's :4100, Prometheus :9090, Grafana :3000 (§6).
   ingestPort: parseInt(process.env.INGEST_PORT || "4200", 10),
 
-  // GCP project — constant across all JobLander infra.
-  gcpProject: process.env.GCP_PROJECT || "meet-assistant-6d8ad",
+  // GCP project selected by the consumer profile.
+  gcpProject: process.env.GCP_PROJECT || "",
 
   // Linear team whose issue-close events we ingest as `decision` changes.
-  linearTeam: process.env.LINEAR_TEAM || "JobLander",
+  linearTeam: process.env.LINEAR_TEAM || "",
 
   // Repos polled for merged PRs (§3.3).
   trackedRepos: parseTrackedRepos(process.env.TRACKED_REPOS),
@@ -127,7 +117,7 @@ async function resolveSecret({ envVar, secretName }: { envVar: string; secretNam
 let cachedLinearKey = "";
 export async function resolveLinearApiKey(): Promise<string> {
   if (cachedLinearKey) return cachedLinearKey;
-  cachedLinearKey = await resolveSecret({ envVar: "LINEAR_API_KEY", secretName: "linear-api-key" });
+  cachedLinearKey = await resolveSecret({ envVar: "LINEAR_API_KEY", secretName: process.env.LINEAR_API_KEY_SECRET || "linear-api-key" });
   return cachedLinearKey;
 }
 

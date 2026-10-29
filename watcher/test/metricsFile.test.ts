@@ -9,7 +9,7 @@ import {
   writeWatcherMetrics,
 } from "../src/metricsFile.js";
 
-describe("watcher Prometheus textfile writer (JOB-731)", () => {
+describe("watcher Prometheus textfile writer (APP-731)", () => {
   it("renders valid Prometheus 0.0.4 text: HELP+TYPE+value per metric", () => {
     const out = renderWatcherMetrics({
       now: 1_700_000_000_000,

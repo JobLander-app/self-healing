@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { buildRealEffects } from "../src/effects.js";
 import { readConfig } from "../src/config.js";
@@ -13,7 +14,7 @@ it("reconciles an accepted create after a lost response without another mutation
   vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
     const body = JSON.parse(init.body);
     if (body.query.startsWith("query")) {
-      return new Response(JSON.stringify({ data: { issues: { nodes: created ? [{ identifier: "JOB-999" }] : [] } } }));
+      return new Response(JSON.stringify({ data: { issues: { nodes: created ? [{ identifier: "APP-999" }] : [] } } }));
     }
     mutations++;
     expect(body.variables.i.id).toBe(input.incidentId);
@@ -21,7 +22,7 @@ it("reconciles an accepted create after a lost response without another mutation
     throw new Error("response lost after commit");
   }));
   await expect(effects().createLinearTicket(input)).rejects.toThrow("response lost");
-  expect(await effects().createLinearTicket(input)).toBe("JOB-999");
+  expect(await effects().createLinearTicket(input)).toBe("APP-999");
   expect(mutations).toBe(1);
 });
 

@@ -31,10 +31,10 @@ export function parseProviderState(value: unknown): ProviderState | null {
 }
 function state(): Record<Provider, ProviderState> {
   if (states) return states;
-  states = { claude: { status: "unknown" }, codex: { status: "unknown" } };
+  states = { claude: { status: "unknown" }, codex: { status: "unknown" }, opencode: { status: "unknown" } };
   try {
     const saved = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-    for (const provider of ["claude", "codex"] as const) {
+    for (const provider of ["claude", "codex", "opencode"] as const) {
       const parsed = parseProviderState(saved?.[provider]);
       if (parsed) states[provider] = parsed;
     }
@@ -94,7 +94,7 @@ export function providerState(provider: Provider): ProviderState {
   }
 }
 export function providerOrder(): Provider[] {
-  return config.codexEnabled ? ["claude", "codex"] : ["claude"];
+  return ["claude", ...(config.codexEnabled ? ["codex" as const] : []), ...(config.openCodeEnabled ? ["opencode" as const] : [])];
 }
 export function stateForAttempt(attempt: ProviderAttempt): ProviderState | null {
   if (attempt.providerSkipped) return null; // preserve the original cooldown/evidence

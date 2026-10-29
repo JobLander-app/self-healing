@@ -30,13 +30,13 @@ export function startApi(): Promise<void> {
     res.json({
       name: "claude-code-vm-job-dispatcher",
       version: "1.0.0",
-      description: "Autonomous JobLander Linear ticket fixer — self-poll, no human in the loop",
+      description: "Consumer-configured incident investigation and repair",
       endpoints: ["/health", "/live", "/ready", "/status", "/trigger", "/feed", "/metrics"],
     });
   });
 
   return new Promise((resolve) => {
-    app.listen(config.httpPort, "0.0.0.0", () => {
+    app.listen(config.httpPort, "127.0.0.1", () => {
       console.log(`[api] HTTP server on :${config.httpPort}`);
       resolve();
     });

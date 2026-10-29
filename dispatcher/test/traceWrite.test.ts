@@ -31,7 +31,7 @@ test("assistant tool_use blocks reach the JSONL trace file", async () => {
       content: [
         { type: "text", text: "looking" },
         { type: "tool_use", name: "Bash", input: { command: "gcloud logging read" } },
-        { type: "tool_use", name: "mcp__linear__update_issue", input: { id: "JOB-1" } },
+        { type: "tool_use", name: "mcp__linear__update_issue", input: { id: "APP-1" } },
       ],
     },
   };

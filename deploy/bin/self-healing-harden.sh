@@ -20,8 +20,8 @@
 #      installed by init.sh / the CD script).
 set -uo pipefail
 
-SH_DIR="${SH_DIR:-/home/joblander/self-healing}"
-AGENT_USER="${AGENT_USER:-joblander}"
+SH_DIR="${SH_DIR:-/home/selfheal/self-healing}"
+AGENT_USER="${AGENT_USER:-selfheal}"
 
 # Single-flight. selfheal-harden.timer and deploy/bin/self-healing-deploy.sh can
 # invoke this script at the same moment; both stage config through fixed .new
@@ -70,14 +70,6 @@ harden_dhcp_lease() {
   dropdir="$target"
   mkdir -p "$dropdir"
   cat >"$dropdir/10-keep-dhcp-lease.conf.new" <<'CONF'
-# Managed by deploy/bin/self-healing-harden.sh — do not edit on the VM.
-#
-# 2026-08-26: a DHCPv4 renewal on ens4 timed out while the host was thrashing.
-# systemd-networkd marked the link Failed and, when the lease expired ~1h
-# later, removed the address. The VM lost every network path for six days
-# while every daemon on it kept running. GCE reserves this instance's internal
-# IP for the life of the instance, so keeping the address across a failed
-# renewal is strictly safer here than surrendering it.
 [Network]
 KeepConfiguration=dhcp
 CONF
@@ -128,7 +120,7 @@ CONF
 # ---- 3. cap the agent user's cron work --------------------------------------
 # The dispatcher is a system unit and is capped by its own Slice=. The other
 # large consumer is the hourly monitor session (a `claude` CLI run) which cron
-# starts as user joblander — that lands in user-1001.slice, outside any cap.
+# starts as the agent user — that lands in user-1001.slice, outside any cap.
 #
 # 1.75 GB, measured: the user slice peaked at 463 MB on its first full day
 # under caps. The first cut reserved 2.5 GB on no evidence at all, which on an
@@ -136,13 +128,11 @@ CONF
 # thing whose absence started this whole incident.
 harden_user_slice() {
   local uid dropdir
-  uid="$(id -u "${AGENT_USER:-joblander}" 2>/dev/null)" || return 1
+  uid="$(id -u "${AGENT_USER:-selfheal}" 2>/dev/null)" || return 1
   [ -n "$uid" ] || return 1
   dropdir="/etc/systemd/system/user-$uid.slice.d"
   mkdir -p "$dropdir"
   cat >"$dropdir/10-selfheal-memory.conf.new" <<CONF
-# Managed by deploy/bin/self-healing-harden.sh — do not edit on the VM.
-# See docs/POSTMORTEM-2026-08-26-network-blackout.md.
 [Slice]
 MemoryAccounting=yes
 MemoryHigh=1536M
