@@ -10,7 +10,8 @@ validate both the generic root and any changed consumer root. Do not apply.
 
 The false-positive tests cover exact signatures, severity overrides, archived
 pagination, removed labels, queue exclusion, atomic ticket updates and interrupted
-delivery. Harness tests use synthetic executables/events and do not consume paid
+delivery, 24-hour/30-day boundaries, independent confirmation counts, duplicate
+rejection, cycle reset and stable retry timestamps. Harness tests use synthetic executables/events and do not consume paid
 model access. Deployment tests inject failures and verify exact rollback.
 
 Before production enablement separately demonstrate actual provider authentication,

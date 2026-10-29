@@ -11,7 +11,7 @@ process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }));
 const { applyFalsePositive, closeFalsePositive, retryFalsePositives } = require("../src/falsePositives") as typeof import("../src/falsePositives");
 const candidate = { id: "issue", identifier: "APP-1", signature: "api:eu:noise", priority: 3,
   createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), reclaim: false };
-const decision = { candidate, reason: "The request is an expected rejected scanner probe.", evidence: ["src/auth.ts:42 and logs at 2026-10-29T12:00Z"] };
+const decision = { candidate, decidedAt: "2026-10-29T12:00:00.000Z", reason: "The request is an expected rejected scanner probe.", evidence: ["src/auth.ts:42 and logs at 2026-10-29T12:00Z"] };
 function client(options: { fail?: boolean; team?: string; signature?: string } = {}) {
   const calls: Array<{query: string; variables: any}> = [];
   let description = `Original evidence\n**Signature:** \`${options.signature || candidate.signature}\``;
@@ -19,8 +19,8 @@ function client(options: { fail?: boolean; team?: string; signature?: string } =
     calls.push({ query, variables });
     if (query.includes("workflowStates")) return { issueLabels: { nodes: [{ id: "fp", team: { id: "team" } }] }, workflowStates: { nodes: [{id: "canceled"}] } };
     if (query.includes("issueUpdate")) {
-      if (options.fail) { options.fail = false; throw new Error("response lost"); }
       description = variables.input.description;
+      if (options.fail) { options.fail = false; throw new Error("response lost"); }
       return { issueUpdate: {success: true} };
     }
     return { issue: { id: "issue", priority: 3, description, team: {id: options.team || "team"}, labels: {nodes: [{id: "monitor", name: "monitor"}, {id: "claim", name: "agent-claimed"}]} } };
@@ -38,6 +38,7 @@ test("original evidence, verdict, label and canceled state are written atomicall
   assert.equal(input.stateId, "canceled");
   assert.ok(input.description.startsWith("Original evidence"));
   assert.ok(input.description.includes(decision.evidence[0]));
+  assert.ok(input.description.includes(decision.decidedAt));
   assert.equal(writes[1].variables.input.description, input.description);
 });
 test("changed signature/team or missing evidence refuses a suppression write", async () => {
@@ -54,4 +55,6 @@ test("failed write is replayed from local outbox without a new model run", async
   assert.ok(JSON.parse(fs.readFileSync(path.join(root, "false-positive-outbox.json"), "utf8")).issue);
   await retryFalsePositives(mock.request);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "false-positive-outbox.json"), "utf8")), {});
+  const writes = mock.calls.filter(c => c.query.includes("issueUpdate"));
+  assert.equal(writes[0].variables.input.description, writes[1].variables.input.description);
 });

@@ -8,7 +8,7 @@ import type { SelectedCandidate } from "./queue";
 type Linear = (query: string, variables: object) => Promise<any>;
 const exec = promisify(execFile);
 const file = () => path.join(path.dirname(config.logDir), "false-positive-outbox.json");
-interface Decision { candidate: SelectedCandidate; reason: string; evidence: string[] }
+interface Decision { candidate: SelectedCandidate; reason: string; evidence: string[]; decidedAt: string }
 
 export const linearRequest: Linear = async (query, variables) => {
   const key = process.env.LINEAR_API_KEY || (await exec("gcloud", ["secrets", "versions", "access", "latest",
@@ -43,6 +43,7 @@ export async function applyFalsePositive(decision: Decision, request: Linear = l
   if (reason.trim().length < 20 || !evidence.length || evidence.some(e => !e.trim())) {
     throw new Error("A false-positive verdict requires a reason and concrete evidence");
   }
+  if (!Number.isFinite(Date.parse(decision.decidedAt))) throw new Error("Invalid false-positive decision time");
   const data = await request(`query($id:String!){issue(id:$id){id description priority team{id} labels{nodes{id name}}}}`, { id: candidate.id });
   const issue = data.issue;
   const signature = issue?.description?.match(/\*\*Signature:\*\*\s*\x60([^\x60\n]+)\x60/)?.[1];
@@ -64,7 +65,7 @@ export async function applyFalsePositive(decision: Decision, request: Linear = l
   // when the server commits a write but its response is lost.
   const marker = "<!-- self-healing:false-positive -->";
   const description = (issue.description || "").split(marker)[0].trimEnd() +
-    `\n\n${marker}\n### False-positive decision\n${reason}\n\nEvidence:\n` + evidence.map(e => `- ${e}`).join("\n");
+    `\n\n${marker}\n### False-positive decision\n**Verdict recorded at:** \`${decision.decidedAt}\`\n\n${reason}\n\nEvidence:\n` + evidence.map(e => `- ${e}`).join("\n");
   const labels = [...new Set([...issue.labels.nodes.filter((l: any) => l.name !== "agent-claimed").map((l: any) => l.id), label])];
   const changed = await request(`mutation($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success}}`,
     { id: candidate.id, input: { stateId: state, labelIds: labels, description } });
@@ -83,7 +84,7 @@ export async function closeFalsePositive(candidate: SelectedCandidate, reason: s
   if (reason.trim().length < 20 || !evidence.length || evidence.some(e => !e.trim())) throw new Error("A false-positive verdict requires reason and evidence");
   return serialized(async () => {
     const pending = read();
-    pending[candidate.id] = { candidate, reason, evidence };
+    pending[candidate.id] ??= { candidate, reason, evidence, decidedAt: new Date().toISOString() };
     save(pending);
     await applyFalsePositive(pending[candidate.id], request);
     delete pending[candidate.id];
@@ -97,6 +98,11 @@ export async function retryFalsePositives(request: Linear = linearRequest): Prom
   return serialized(async () => {
     const pending = read();
     for (const [id, decision] of Object.entries(pending)) {
+      // Upgrade older delivery files once; retries keep the same decision time.
+      if (!decision.decidedAt) {
+        decision.decidedAt = new Date().toISOString();
+        save(pending);
+      }
       await applyFalsePositive(decision, request);
       delete pending[id];
       save(pending);

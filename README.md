@@ -87,10 +87,14 @@ narratives live in Git history rather than reusable code comments.
    not establish recovery.
 
 Every proven false positive gets a reason, evidence, `false-positive` label and
-Canceled state on the **original ticket**. The dispatcher skips that label; the
-monitor does not file the same signature again at equal/lower severity, including
-from a pending delivery queue. Old and archived labeled tickets still count.
-A higher severity or P0 is not hidden. Remove the label to re-enable investigation.
+Canceled state on the **original ticket**. The dispatcher skips that label.
+For the exact signature at equal/lower severity, the first and second confirmed
+verdicts each pause filing for **24 hours**. A recurrence after the pause gets a
+new investigation. The third independent verdict suppresses filing for **30 days**;
+after expiry, the next investigation starts a new cycle. Duplicate tickets filed
+during a pause do not count or extend it. Archived tickets retain the history.
+P0 and increased severity bypass suppression. Removing a label withdraws that
+verdict; remove all applicable labels to reset the history immediately.
 Linear read/write failures defer work; a local delivery outbox retries interrupted
 updates without another model run. This breaks the investigate → close → re-file
 loop without adding a separate database.

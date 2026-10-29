@@ -59,6 +59,9 @@ filings. No separate database is needed. The small local delivery outbox handles
 lost responses/restarts; it does not replace Linear as the source of decisions.
 If Linear cannot be read, filing waits; urgent pages still run.
 
-Suppression is exact and bounded by the ticket's priority. P0 and an increase in
-severity bypass it. Remove the label to deliberately re-investigate. Do not use
-this verdict for a stale report or an already fixed real bug.
+The host persists the verdict timestamp before delivery; a retry cannot restart
+the pause. The first two independent verdicts pause exact-signature filing for
+24 hours each; the third pauses it for 30 days, then the confirmation cycle resets.
+Only new tickets filed after the prior pause count. P0 and increased severity
+bypass suppression. Removing a label withdraws that verdict from history.
+Do not use this verdict for a stale report or an already fixed real bug.

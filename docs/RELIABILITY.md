@@ -7,8 +7,9 @@ heartbeat evidence and can reset only its configured VM within a bounded budget.
 
 Durable outboxes preserve paging, filing and false-positive writes over transient
 API/provider failures. False positives live on Linear tickets; an exact matching
-label suppresses future filing, not merely another dispatcher attempt. Changed
-severity and P0 bypass suppression. Queue selection, age limits and accounting
+label pauses future filing for 24 hours on confirmations one and two, then 30 days
+on confirmation three. Only investigations filed after the prior pause count;
+expiry of the long pause resets the cycle. Increased severity and P0 bypass it. Queue selection, age limits and accounting
 checks happen outside model reasoning.
 
 Memory cgroups contain runaway investigations. Network recovery has bounded

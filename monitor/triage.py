@@ -884,6 +884,7 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String, $team: String!)
       updatedAt
       completedAt
       canceledAt
+      labels { nodes { name } }
       description
       attachments(first: 20) { nodes { url metadata } }
     }
@@ -934,6 +935,10 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String, $team: String!)
 
     cooldowns = {}
     for node in nodes:
+        # False-positive decisions have their own independent-confirmation clock.
+        # A late duplicate closure must not restart a separate canceled cooldown.
+        if any(label.get("name") == "false-positive" for label in (node.get("labels") or {}).get("nodes", [])):
+            continue
         desc = node.get("description") or ""
         # Extract the exact signature from the factory-ready ticket body:
         # "**Signature:** `service:region:slug`"

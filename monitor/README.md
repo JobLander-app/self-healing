@@ -12,10 +12,16 @@ failure; the freshness gate checks last-seen time.
 
 Before escalation the monitor reads all `false-positive` labeled tickets in its
 Linear team, including archived ones. Exact canonical `**Signature:**` strings
-at the same/lower severity are suppressed; P0 and severity increases remain
-eligible. The same check prunes durable pending filings before an agent starts.
+at the same/lower severity are suppressed for 24 hours after each of the first
+two confirmed verdicts and 30 days after the third. Count independent investigations,
+not events: a ticket must have been created after the previous pause ended.
+Duplicate/old tickets cannot advance the count or extend the pause. After the
+30-day window, the next verdict starts a new cycle. Closed labeled tickets use
+the host's stable decision time (legacy tickets use their terminal timestamp).
+Reopened or undated tickets do not authorize suppression. P0 and severity increases
+remain eligible. The same check prunes durable pending filings before an agent starts.
 A failed/incomplete label scan defers filing, while urgent pages still run.
-Removing the label re-enables detection. Stale and fixed incidents use separate,
+Removing a label withdraws that verdict; remove all matching labels to reset. Stale and fixed incidents use separate,
 short cooldowns; they are not permanent false positives.
 
 Existing `known-errors.json` files are read for migration compatibility. New
