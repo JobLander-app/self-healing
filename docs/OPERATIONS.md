@@ -28,8 +28,11 @@ Preserve the dispatcher `usage-ledger.jsonl`, provider state, false-positive
 outbox, auth caches and monitor state across upgrades/reboots. The false-positive
 file is only interrupted-write delivery state; Linear labels remain authoritative.
 Inspect `false-positive-write-pending` and fix tracker access before resuming.
-Do not delete a pending verdict just to silence an error. Reconcile any human
-change of ticket signature/priority before retrying it.
+Do not delete a pending verdict just to silence an error. Decisions invalidated
+by ticket signature/priority/team edits move to `false-positive-conflicts.json`
+beside the outbox, with evidence and a reason. They apply no suppression and no
+longer block unrelated work. Reconcile these records with the current ticket;
+do not replay an obsolete snapshot. Preserve this conflict file in backups too.
 
 Back up the persistent disk/state and the change feed using consistent SQLite
 backups. Test restoration. Trace rotation must not truncate the accounting ledger;

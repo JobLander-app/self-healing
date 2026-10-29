@@ -9,6 +9,8 @@ type Linear = (query: string, variables: object) => Promise<any>;
 const exec = promisify(execFile);
 const file = () => path.join(path.dirname(config.logDir), "false-positive-outbox.json");
 interface Decision { candidate: SelectedCandidate; reason: string; evidence: string[]; decidedAt: string }
+interface Conflict { decision: Decision; reason: string; quarantinedAt: string }
+class SnapshotConflict extends Error {}
 
 export const linearRequest: Linear = async (query, variables) => {
   const key = process.env.LINEAR_API_KEY || (await exec("gcloud", ["secrets", "versions", "access", "latest",
@@ -21,19 +23,19 @@ export const linearRequest: Linear = async (query, variables) => {
   return body.data;
 };
 
-function read(): Record<string, Decision> {
-  if (!fs.existsSync(file())) return {};
-  const data = JSON.parse(fs.readFileSync(file(), "utf8"));
+function read<T = Decision>(target = file()): Record<string, T> {
+  if (!fs.existsSync(target)) return {};
+  const data = JSON.parse(fs.readFileSync(target, "utf8"));
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid false-positive outbox");
   return data;
 }
 
-function save(data: Record<string, Decision>): void {
-  fs.mkdirSync(path.dirname(file()), { recursive: true });
-  const fd = fs.openSync(file() + ".tmp", "w", 0o600);
+function save(data: Record<string, unknown>, target = file()): void {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const fd = fs.openSync(target + ".tmp", "w", 0o600);
   try { fs.writeFileSync(fd, JSON.stringify(data)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-  fs.renameSync(file() + ".tmp", file());
-  const dir = fs.openSync(path.dirname(file()), "r");
+  fs.renameSync(target + ".tmp", target);
+  const dir = fs.openSync(path.dirname(target), "r");
   try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
 }
 
@@ -49,7 +51,7 @@ export async function applyFalsePositive(decision: Decision, request: Linear = l
   const signature = issue?.description?.match(/\*\*Signature:\*\*\s*\x60([^\x60\n]+)\x60/)?.[1];
   if (issue?.id !== candidate.id || issue.team?.id !== LINEAR_TEAM_ID ||
       signature !== candidate.signature || (candidate.priority && issue.priority !== candidate.priority)) {
-    throw new Error("False-positive source ticket changed; refusing suppression");
+    throw new SnapshotConflict("False-positive source ticket changed; refusing suppression");
   }
   const routing = await request(`query($team:ID!){issueLabels(filter:{name:{eq:"false-positive"}}){nodes{id team{id}}} workflowStates(filter:{team:{id:{eq:$team}},type:{eq:"canceled"}}){nodes{id}}}`, { team: issue.team.id });
   let label = routing.issueLabels.nodes.find((l: any) => !l.team || l.team.id === issue.team.id)?.id;
@@ -103,7 +105,18 @@ export async function retryFalsePositives(request: Linear = linearRequest): Prom
         decision.decidedAt = new Date().toISOString();
         save(pending);
       }
-      await applyFalsePositive(decision, request);
+      try {
+        await applyFalsePositive(decision, request);
+      } catch (error) {
+        if (!(error instanceof SnapshotConflict)) throw error;
+        // Human edits invalidate this snapshot permanently. Preserve evidence
+        // before removing it from retries, without blocking unrelated tickets.
+        const destination = path.join(path.dirname(file()), "false-positive-conflicts.json");
+        const conflicts = read<Conflict>(destination);
+        conflicts[id] = { decision, reason: error.message, quarantinedAt: new Date().toISOString() };
+        save(conflicts, destination);
+        console.warn(`[false-positive] ${decision.candidate.identifier}: changed ticket; decision quarantined`);
+      }
       delete pending[id];
       save(pending);
     }

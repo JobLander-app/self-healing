@@ -58,6 +58,9 @@ same signature again, including old and archived tickets. It also prunes pending
 filings. No separate database is needed. The small local delivery outbox handles
 lost responses/restarts; it does not replace Linear as the source of decisions.
 If Linear cannot be read, filing waits; urgent pages still run.
+An obsolete pending decision (changed ticket signature, priority or team) is
+saved in `false-positive-conflicts.json` for operator review and removed from
+retries. It cannot suppress the changed ticket or block unrelated investigations.
 
 The host persists the verdict timestamp before delivery; a retry cannot restart
 the pause. The first two independent verdicts pause exact-signature filing for
