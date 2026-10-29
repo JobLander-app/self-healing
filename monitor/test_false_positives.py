@@ -155,3 +155,55 @@ class FalsePositiveTests(unittest.TestCase):
                                                 session_runner=session, publisher=lambda _: False), 1)
             pager.assert_called_once_with('urgent')
             session.assert_not_called()
+
+    def collect_tick(self, directory, count, rules):
+        group = {'signature': 'api:eu:noise', 'service': 'api', 'region': 'eu', 'count': count,
+                 'first_seen': runner.timestamp(), 'last_seen': runner.timestamp(), 'sample_message': 'noise'}
+        with contextlib.ExitStack() as stack:
+            for name, value in [('STATE_DIR', directory), ('ADAPTER', None), ('collection_errors', []),
+                                ('TARGETS', {'services': ['api']})]:
+                stack.enter_context(patch.object(triage, name, value))
+            stack.enter_context(patch.object(triage, 'inspect_targets', return_value=[]))
+            stack.enter_context(patch.object(triage, 'collect_cloud_run', side_effect=lambda groups: groups.update({group['signature']: group})))
+            stack.enter_context(patch.object(triage, 'collect_cloud_functions'))
+            stack.enter_context(patch.object(triage, 'collect_sentry'))
+            stack.enter_context(patch.object(triage, 'decisions', return_value=rules))
+            stack.enter_context(patch.object(triage, 'collect_closed_signature_cooldowns', return_value={}))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            triage.main()
+        return (json.loads((Path(directory) / 'triage-summary.json').read_text()),
+                json.loads((Path(directory) / 'latest-report.json').read_text()))
+
+    def test_suppressed_observations_still_detect_growth_to_p0(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rule = self.rule(priority=2)
+            rule['decided_at'] = rule['created_at'] = datetime.now(timezone.utc)
+            summary, report = self.collect_tick(directory, 150, [rule])
+            self.assertEqual(summary['escalations'], [])
+            self.assertEqual(report['error_groups'][0]['count'], 150)
+            self.assertEqual(report['error_groups'][0]['suppressed'], 'false-positive')
+            self.assertEqual(report['services']['api']['status'], 'HEALTHY')
+            summary, report = self.collect_tick(directory, 400, [rule])
+            self.assertEqual(len(summary['p0_alerts']), 1)
+            self.assertEqual(summary['escalations'][0]['severity'], 'P0')
+            self.assertEqual(report['error_groups'][0]['diff_status'], 'worsened')
+            self.assertIsNone(report['error_groups'][0]['suppressed'])
+            self.assertEqual(report['services']['api']['status'], 'DEGRADED')
+
+    def test_stable_p2_is_reinvestigated_when_pause_expires(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rule = self.rule()
+            rule['decided_at'] = rule['created_at'] = datetime.now(timezone.utc)
+            summary, _ = self.collect_tick(directory, 10, [rule])
+            self.assertEqual(summary['escalations'], [])
+            rule['decided_at'] = rule['created_at'] = datetime.now(timezone.utc) - timedelta(hours=25)
+            summary, _ = self.collect_tick(directory, 10, [rule])
+            self.assertEqual(summary['escalations'][0]['action'], 'linear_create_if_no_dup')
+
+    def test_legacy_known_error_rules_also_cannot_hide_growth_to_p0(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner.write_json(Path(directory) / 'known-errors.json', {'patterns': [{'signature_match': 'api:*'}]})
+            summary, _ = self.collect_tick(directory, 150, [])
+            self.assertEqual(summary['escalations'], [])
+            summary, _ = self.collect_tick(directory, 400, [])
+            self.assertEqual(len(summary['p0_alerts']), 1)

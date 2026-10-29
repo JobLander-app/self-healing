@@ -510,6 +510,7 @@ def diff_with_previous(groups, state_dir):
             else:
                 g["diff_status"] = "recurring"
             g["linear_issue"] = old[sig].get("linear_issue")
+            g["recheck_after_suppression"] = bool(old[sig].get("suppressed"))
         g.setdefault("linear_issue", None)
         summary["total_errors"] += g["count"]
         summary["by_region"][g["region"]] = summary["by_region"].get(g["region"], 0) + g["count"]
@@ -1001,7 +1002,7 @@ def build_escalations(final_groups, cooldowns=None):
     p0_alerts, escalations = [], []
     for g in final_groups:
         sev, status = g.get("severity"), g.get("diff_status")
-        if status == "resolved":
+        if status == "resolved" or g.get("suppressed"):
             continue
         item = {k: g.get(k) for k in ("signature", "service", "region", "count",
                                       "first_seen", "last_seen", "severity",
@@ -1097,12 +1098,13 @@ def build_escalations(final_groups, cooldowns=None):
             item["action"] = "linear_create_if_no_dup"
         elif sev == "P1" and status == "recurring":
             item["action"] = "linear_ensure_open_issue"
-        elif refile_after_fix and sev in ("P1", "P2"):
+        elif (refile_after_fix or g.get("recheck_after_suppression")) and sev in ("P1", "P2"):
             # A recurrence right after the deploy is usually still in the
             # previous report (pre-fix events share the 2h window), so its
             # diff_status is `recurring`/`improved`, which would otherwise be
             # report_only. The prior ticket is Done, so this files a new one.
-            # P3 stays report_only, as for any other P3 signal.
+            # An expired suppression also needs a new investigation even when
+            # its retained count is stable. P3 stays report_only.
             item["action"] = "linear_create_if_no_dup"
         elif sev == "P2" and status == "new":
             item["action"] = "linear_create_if_no_dup"
@@ -1155,15 +1157,24 @@ def main():
         collect_sentry(groups)
 
     assign_severity(groups, *context)
+    final_groups, summary = diff_with_previous(groups, STATE_DIR)
+    # Growth can promote P1 to P0. Suppression must use that final severity,
+    # while the report retains observations to detect growth during a pause.
+    active = {g["signature"]: g for g in final_groups if g["diff_status"] != "resolved"}
+    eligible = filter_known(active, STATE_DIR)
+    legacy_suppressed = set(active) - set(eligible)
     false_positives = []
     try:
-        groups, false_positives = filter_groups(groups, decisions())
+        eligible, false_positives = filter_groups(eligible, decisions())
     except Exception:
         # The runner defers filing when it cannot recheck labels; P0 pages remain live.
         collection_errors.append({"cmd": "false-positive labels", "informational": True,
                                   "error": "Linear decision lookup unavailable; filing will retry"})
-    groups = filter_known(groups, STATE_DIR)
-    final_groups, summary = diff_with_previous(groups, STATE_DIR)
+    for group in final_groups:
+        signature = group["signature"]
+        group["suppressed"] = ("known-error" if signature in legacy_suppressed else
+                               "false-positive" if signature in active and signature not in eligible else None)
+    summary["suppressed_groups"] = sum(bool(g["suppressed"]) for g in final_groups)
     cooldowns = collect_closed_signature_cooldowns()
     p0_alerts, escalations = build_escalations(final_groups, cooldowns)
 
@@ -1178,7 +1189,8 @@ def main():
         # error groups — DEGRADED if any active P0/P1 group, else HEALTHY.
         def service_status(svc_name):
             sev = {g.get("severity") for g in final_groups
-                   if g.get("service") == svc_name and g.get("diff_status") != "resolved"}
+                   if g.get("service") == svc_name and g.get("diff_status") != "resolved"
+                   and not g.get("suppressed")}
             return "DEGRADED" if sev & {"P0", "P1"} else "HEALTHY"
 
         services = {

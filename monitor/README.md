@@ -20,6 +20,10 @@ Duplicate/old tickets cannot advance the count or extend the pause. After the
 the host's stable decision time (legacy tickets use their terminal timestamp).
 Reopened or undated tickets do not authorize suppression. P0 and severity increases
 remain eligible. The same check prunes durable pending filings before an agent starts.
+Suppression runs after growth-based severity escalation. Reports retain suppressed
+observations (marked with `suppressed`) so worsening signals are still detected;
+they do not degrade service health or create actions while suppression applies.
+When a pause expires, a stable P2 signal is eligible for investigation again.
 A failed/incomplete label scan defers filing, while urgent pages still run.
 Removing a label withdraws that verdict; remove all matching labels to reset. Stale and fixed incidents use separate,
 short cooldowns; they are not permanent false positives.
