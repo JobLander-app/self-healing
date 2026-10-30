@@ -1,0 +1,7 @@
+{
+  "project": "meet-assistant-6d8ad",
+  "zone": "europe-west1-b",
+  "instance": "self-healing-1",
+  "provider": "projects/255174193709/locations/global/workloadIdentityPools/github-actions/providers/github",
+  "service_account": "self-healing-deploy@meet-assistant-6d8ad.iam.gserviceaccount.com"
+}

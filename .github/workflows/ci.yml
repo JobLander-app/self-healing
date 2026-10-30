@@ -99,7 +99,7 @@ jobs:
           # Every root-run script under deploy/bin, not just the CD one: the
           # hardening and netwatch scripts can restart networking and reboot
           # the host, so a quoting bug in them is an outage too.
-          shellcheck deploy/bin/*.sh infra/terraform/self-healing/apply.sh
+          shellcheck deploy/bin/*.sh consumers/joblander/provision-profile.sh infra/terraform/self-healing/apply.sh
 
       - name: Transactional deploy failure tests
         run: python3 -m unittest discover -s deploy/test -p 'test_*.py' -v
