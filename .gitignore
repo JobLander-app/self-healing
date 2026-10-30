@@ -26,3 +26,4 @@ backend.hcl
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+gha-creds-*.json

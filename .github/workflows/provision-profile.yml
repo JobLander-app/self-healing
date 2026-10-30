@@ -1,0 +1,59 @@
+name: Provision production profile
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provision-production-profile
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    if: github.repository == 'JobLander-app/self-healing' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read consumer release target
+        id: target
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          target = json.loads(Path('consumers/joblander/release.json').read_text())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in target.items():
+                  assert '\n' not in value
+                  print(f'{key}={value}', file=output)
+          PY
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ steps.target.outputs.project }}
+          workload_identity_provider: ${{ steps.target.outputs.provider }}
+          service_account: ${{ steps.target.outputs.service_account }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Install profile contract through IAP
+        env:
+          PROJECT: ${{ steps.target.outputs.project }}
+          ZONE: ${{ steps.target.outputs.zone }}
+          INSTANCE: ${{ steps.target.outputs.instance }}
+        run: |
+          gcloud compute ssh "profile-ci@$INSTANCE" --project="$PROJECT" --zone="$ZONE" \
+            --tunnel-through-iap --ssh-key-expire-after=30m --quiet \
+            --command="sudo -n bash -s -- '$GITHUB_SHA'" < consumers/joblander/provision-profile.sh
+      - name: Verify the normal deployment timer activates this release
+        env:
+          PROJECT: ${{ steps.target.outputs.project }}
+          ZONE: ${{ steps.target.outputs.zone }}
+          INSTANCE: ${{ steps.target.outputs.instance }}
+        run: |
+          gcloud compute ssh "profile-ci@$INSTANCE" --project="$PROJECT" --zone="$ZONE" \
+            --tunnel-through-iap --ssh-key-expire-after=30m --quiet \
+            --command="sudo -n python3 - '$GITHUB_SHA' /home/joblander/self-healing joblander" \
+            < deploy/bin/verify-release.py

@@ -22,6 +22,7 @@ jobs:
         run: |
           terraform fmt -check -recursive -diff
           terraform -chdir=../../consumers/joblander/terraform fmt -check -diff
+          terraform -chdir=../../consumers/joblander/deploy-access fmt -check -diff
       - name: validate module (self-healing-vm)
         run: |
           terraform -chdir=modules/self-healing-vm init -backend=false -input=false
@@ -34,3 +35,7 @@ jobs:
         run: |
           terraform -chdir=../../consumers/joblander/terraform init -backend=false -input=false
           terraform -chdir=../../consumers/joblander/terraform validate
+      - name: validate deployment access bootstrap
+        run: |
+          terraform -chdir=../../consumers/joblander/deploy-access init -backend=false -input=false
+          terraform -chdir=../../consumers/joblander/deploy-access validate
