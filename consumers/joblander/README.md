@@ -54,7 +54,6 @@ terraform -chdir=consumers/joblander/deploy-access init
 terraform -chdir=consumers/joblander/deploy-access plan -out=access.tfplan
 # Inspect: identity/IAP API activation, a dedicated account, custom role and additive IAM grants.
 terraform -chdir=consumers/joblander/deploy-access apply access.tfplan
-gh workflow run provision-profile.yml --ref main
 ```
 
 Apply only the reviewed commit and inspected plan. This separate bootstrap state
@@ -70,9 +69,34 @@ protect `main` and review workflow changes accordingly. See Google's
 [keyless authentication](https://github.com/google-github-actions/auth) and
 [IAP SSH documentation](https://cloud.google.com/compute/docs/connect/ssh-using-iap).
 
+Before activating the profile, update the old VM startup metadata: its previous
+installer copies service templates verbatim and cannot handle portable profiles
+on a later reboot. The one-time Cloud Build migration consumes an exact reviewed
+GitHub commit and uses the existing build identity; no new broad project grants
+are added to the GitHub provisioning identity.
+
+```sh
+# Run from a clean, synchronized main checkout after review and green CI.
+gcloud builds submit https://github.com/JobLander-app/self-healing \
+  --git-source-revision="$(git rev-parse HEAD)" \
+  --config=consumers/joblander/terraform/cloudbuild-migration.yaml \
+  --project=meet-assistant-6d8ad --region=europe-west1
+# After the build succeeds:
+gh workflow run provision-profile.yml --ref main
+```
+
+The build plans and validates before applying the same saved plan. It permits
+only the new dashboard/three metrics, startup-script metadata, and wording-only
+agent/alert updates required by the existing state moves. It rejects replacement,
+deletion, changes to any other VM field, alert thresholds/routes, and unrelated
+resources. Terraform targets include both old/new moved addresses; this is an
+exceptional migration, not a general deployment recipe. It does not run startup
+scripts or reboot the host. The separate GitHub workflow then publishes the
+profile contract and the ordinary VM timer performs runtime activation.
+
 The workflow waits for the existing deployment timer and requires the expected
 commit, active services, healthy accounting, readable change feed and a cleared
 transaction for a full minute. It reports provider readiness separately: old
 provider evidence is not proof of a new successful model session. Check new
-monitor/watcher heartbeats and runtime logs after deployment. The GCP dashboard
-and other Terraform resources remain a separate reviewed infrastructure rollout.
+monitor/watcher heartbeats and runtime logs after deployment. Unrelated Terraform
+changes, including watchdog build-artifact updates, are intentionally deferred.
