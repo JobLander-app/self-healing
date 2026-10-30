@@ -69,6 +69,11 @@ protect `main` and review workflow changes accordingly. See Google's
 [keyless authentication](https://github.com/google-github-actions/auth) and
 [IAP SSH documentation](https://cloud.google.com/compute/docs/connect/ssh-using-iap).
 
+The IAM subject includes immutable owner/repository IDs. Verify the actual prefix
+with `gh api repos/JobLander-app/self-healing/actions/oidc/customization/sub`
+before changing this binding; the old name-only subject does not match this repo.
+See [GitHub's immutable subject format](https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims).
+
 Before activating the profile, update the old VM startup metadata: its previous
 installer copies service templates verbatim and cannot handle portable profiles
 on a later reboot. The one-time Cloud Build migration consumes an exact reviewed
