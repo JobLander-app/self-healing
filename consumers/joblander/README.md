@@ -52,13 +52,16 @@ Before its first run, bootstrap the keyless CI identity from `deploy-access/`:
 ```sh
 terraform -chdir=consumers/joblander/deploy-access init
 terraform -chdir=consumers/joblander/deploy-access plan -out=access.tfplan
-# Inspect: only a dedicated service account, custom role and additive IAM grants.
+# Inspect: identity/IAP API activation, a dedicated account, custom role and additive IAM grants.
 terraform -chdir=consumers/joblander/deploy-access apply access.tfplan
 gh workflow run provision-profile.yml --ref main
 ```
 
 Apply only the reviewed commit and inspected plan. This separate bootstrap state
-contains no VM/disk/startup-script resources. The existing identity pool is reused;
+contains no VM/disk/startup-script resources. It explicitly enables IAM,
+IAM Credentials, Security Token Service and IAP before configuring access, and
+never disables those shared APIs on
+teardown. The existing identity pool is reused;
 only this repository's `main` token can impersonate the new account. The account
 can discover compute resources, install an expiring SSH key on this VM, connect
 through its IAP tunnel and act as its runtime identity. It cannot reset/delete the
