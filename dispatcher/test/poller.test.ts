@@ -1,17 +1,9 @@
-// Regression test for JOB-915: the pre-check filter must accept tickets that
-// carry the `[Monitor]` title prefix but NOT the `monitor` label, as well as
-// the normal label-only path. Before this fix, only the label was checked, so
-// tickets filed by a human (or external tool) without the label were silently
-// ignored — precheckCandidates() returned "skip" and no session was spawned.
-//
-// We test the pure filter-builder (`buildPrecheckFilter`) rather than the full
-// network call, so no mocking of `fetch` is required.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 // Set required env vars before importing config-dependent modules.
-process.env.LINEAR_TEAM = "JobLander";
-process.env.GCP_PROJECT = "meet-assistant-6d8ad";
+process.env.LINEAR_TEAM = "Example";
+process.env.GCP_PROJECT = "example-project";
 process.env.LINEAR_API_KEY = "test-key"; // avoids Secret Manager call
 process.env.LOG_DIR = "/tmp";
 
@@ -39,7 +31,7 @@ test("filter accepts tickets by monitor label (existing behaviour)", () => {
   assert.ok(labelBranch, "filter must include a branch matching label name 'monitor'");
 });
 
-test("filter accepts tickets by [Monitor] title prefix (JOB-915 regression)", () => {
+test("filter accepts tickets by [Monitor] title prefix (APP-915 regression)", () => {
   const filter = buildPrecheckFilter(STALE) as Record<string, unknown>;
   const andClauses = filter["and"] as Array<Record<string, unknown>>;
   const labelOrTitle = andClauses[0] as { or: unknown[] };

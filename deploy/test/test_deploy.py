@@ -1,5 +1,6 @@
 """Run actual CD against isolated Git + fake host commands; never touch a VM."""
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -157,6 +158,13 @@ esac
         self.assertEqual((self.host / 'etc/grafana/dashboards/technical.json').read_text(), '{"version":"stale-installed"}\n')
         self.assertFalse((self.repo / '.deploying').exists())
 
+    def test_missing_consumer_contract_defers_without_touching_runtime(self):
+        result = self.deploy(SH_DIR='', DEPLOY_ENV_FILE=str(self.root/'absent-deploy.env'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('CD deferred', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD').strip(), self.old)
+        self.assertFalse((self.root/'systemctl.log').exists())
+
     def test_build_failure_leaves_working_runtime_untouched(self):
         self.assert_rollback(self.deploy(FAIL_BUILD='1'))
         self.assertFalse((self.root / 'systemctl.log').exists())
@@ -222,21 +230,40 @@ def migrate_state(config):
 
     def install_real_monitor_release(self):
         self.git('reset', '-q', '--keep', self.new)
+        home = self.root / 'agent-home'
+        legacy = home / 'workspace/teams/logs/monitoring'
+        target = home / '.local/state/self-healing/monitor'
         # Run the real copy-once migration through actual transactional CD.
-        for name in ['run_monitor.py', 'topology.py', 'targets.json']:
+        for name in ['run_monitor.py', 'topology.py', 'false_positives.py']:
             source = SCRIPT.parents[2] / 'monitor' / name
             self.write(self.repo / 'monitor' / name, source.read_text())
-        self.git('add', 'monitor')
+        for name in ['run.py', 'profile.py', 'render.py']:
+            self.write(self.repo / 'config' / name, (SCRIPT.parents[2] / 'config' / name).read_text())
+        consumer = self.repo / 'consumers/test'
+        profile = json.loads((SCRIPT.parents[2] / 'consumers/example/profile.json').read_text())
+        profile['env'].update({
+            'GCP_PROJECT': 'ci-project', 'LINEAR_TEAM': 'Test',
+            'LINEAR_TEAM_ID': '11111111-1111-1111-1111-111111111111',
+            'LINEAR_MONITOR_LABEL_ID': '22222222-2222-2222-2222-222222222222',
+            'LINEAR_AGENT_CLAIMED_LABEL_ID': '33333333-3333-3333-3333-333333333333',
+            'WATCH_URL': 'https://app.test.invalid', 'TG_CHAT_ID': '1', 'TRACKED_REPOS': 'test/app',
+            'GIT_AUTHOR_EMAIL': 'self-healing@test.invalid',
+            'MONITOR_STATE_DIR': str(target), 'MONITOR_LEGACY_DIRS': str(legacy),
+        })
+        self.write(consumer / 'profile.json', json.dumps(profile))
+        self.write(consumer / 'targets.json', '{"project":"ci-project"}')
+        self.write(consumer / 'policy.md', 'Test consumer policy')
+        self.git('add', 'monitor', 'config', 'consumers')
         self.git('commit', '-qm', 'standalone monitor release')
         self.new = self.git('rev-parse', 'HEAD').strip()
         self.git('push', '-q', 'origin', 'main')
         self.git('reset', '-q', '--keep', self.old)
-        home = self.root / 'agent-home'
-        legacy = home / 'workspace/teams/logs/monitoring'
         self.write(legacy / 'known-errors.json', '{"old-decision":"suppressed"}\n')
         self.write(legacy / 'latest-report.json', '{"timestamp":"before-cutover"}\n')
-        target = home / '.local/state/self-healing/monitor'
-        return legacy, target, {'HOME': str(home), 'MONITOR_STATE_DIR': str(target)}
+        self.write(legacy / 'linear-outbox.json', '{"pending-incident":{"severity":"P2"}}\n')
+        self.write(legacy / 'p0-outbox.json', '{"pending-page":"Urgent incident"}\n')
+        # State paths exist only in the selected profile, not CD's environment.
+        return legacy, target, {'SELF_HEALING_PROFILE': str(consumer / 'profile.json')}
 
     def test_failed_first_monitor_cutover_recopies_newer_legacy_state_on_retry(self):
         legacy, target, env = self.install_real_monitor_release()
@@ -246,7 +273,7 @@ def migrate_state(config):
         self.write(legacy / 'latest-report.json', '{"timestamp":"after-rollback"}\n')
         result = self.deploy(**env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for name in ['known-errors.json', 'latest-report.json']:
+        for name in ['known-errors.json', 'latest-report.json', 'linear-outbox.json', 'p0-outbox.json']:
             self.assertEqual((target / name).read_text(), (legacy / name).read_text())
 
     def test_interrupted_first_monitor_cutover_removes_only_its_new_target(self):
@@ -296,8 +323,6 @@ def migrate_state(config):
         self.write(self.host / 'etc/caddy/Caddyfile', self.INSTALLED_CADDYFILE)
 
     def test_a_release_keeps_the_chatwoot_vhost_the_host_declares(self):
-        # 2026-10-13: a release installed the console-only template and took
-        # chat.joblander.app down for an hour.
         self.install_caddy_template()
         result = self.deploy(DEPLOY_CONSOLE_DOMAIN='console.example.test',
                              MOCK_META_CHATWOOT_DOMAIN='chat.example.test', MOCK_META_CHATWOOT_PORT='3100')
@@ -390,8 +415,6 @@ def migrate_state(config):
         return holder
 
     def test_a_watcher_tick_in_progress_delays_the_release_instead_of_deferring_it(self):
-        # 2026-10-13: the timer and the minute cron both fired at :00, and a
-        # fail-fast lock deferred every release.
         self.hold_watch_lock(4)
         result = self.deploy(DEPLOY_WATCH_WAIT_SEC='30')
         self.assertEqual(result.returncode, 0, result.stderr)

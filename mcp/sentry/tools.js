@@ -2,10 +2,10 @@ import { z } from "zod";
 import { execFileSync } from "child_process";
 
 // Same constants the deterministic monitor (monitor/triage.py) uses.
-const SENTRY_ORG = "joblander-z2";
-const SENTRY_PROJECT_ID = "4511020395069520";
-const SENTRY_SECRET = "joblander-sentry-monitor-token";
-const GCP_PROJECT = (process.env.GCP_PROJECT_ID || "meet-assistant-6d8ad").trim();
+const SENTRY_ORG = process.env.SENTRY_ORG || "";
+const SENTRY_PROJECT_ID = process.env.SENTRY_PROJECT_ID || "";
+const SENTRY_SECRET = process.env.SENTRY_TOKEN_SECRET || "sentry-monitor-token";
+const GCP_PROJECT = (process.env.GCP_PROJECT_ID || process.env.GCP_PROJECT || "").trim();
 const FETCH_TIMEOUT_MS = 20000;
 const CHARACTER_LIMIT = 200000;
 
@@ -132,7 +132,7 @@ export function registerTools(server) {
     "sentry_list_issues",
     {
       title: "List Sentry Issues",
-      description: `List recent unresolved Sentry issues for the joblander-app frontend project.
+      description: `List recent unresolved Sentry issues for the configured project.
 
 Args:
   - query (string, optional): Sentry search query. Default: "is:unresolved".
@@ -195,14 +195,14 @@ Error Handling:
       description: `Get one Sentry issue by id, together with its latest event (stacktrace-bearing detail).
 
 Args:
-  - issueId (string, required): Sentry issue id (numeric) or shortId (e.g. "JOBLANDER-APP-1A2B").
+  - issueId (string, required): Sentry issue id (numeric) or shortId (e.g. "APP-1A2B").
 
 Returns:
   { "issue": {full issue object}, "latestEvent": {event object or null}, "latestEventError": string|null }
 
 Examples:
   - By numeric id: { "issueId": "4511020395069520" }
-  - By short id: { "issueId": "JOBLANDER-APP-1A2B" }
+  - By short id: { "issueId": "APP-1A2B" }
 
 Error Handling:
   - "404" — no issue with that id.

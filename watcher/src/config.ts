@@ -1,36 +1,32 @@
-/** Env-driven config with the same defaults as watcher/output-watch.sh. */
+/** Runtime configuration supplied by a consumer profile. */
+import { homedir } from "node:os";
 export interface WatchConfig {
   url: string;
+  path?: string;
   project: string;
   threshold: number;
   stateFile: string;
   notifyScript: string;
-  /** .env file with TG_BOT_TOKEN/TG_CHAT_ID for the direct Telegram pager (JOB-731). */
+
   tgEnvFile: string;
   triggerUrl: string;
   /** DISPATCH_TOKEN env override (falls back to Secret Manager when unset). */
   dispatchToken: string | null;
-  /**
-   * Prometheus textfile-collector target (JOB-731). Each tick writes this
-   * `.prom` file for node_exporter to expose. If its directory does not exist
-   * (node_exporter not installed), the write is skipped silently — fail-soft.
-   */
+
   metricsFile: string;
   dryRun: boolean;
   forceBad: boolean;
 }
 
-/** Linear routing — identical IDs to the bash watcher. */
+/** Routing shared with the dispatcher through the consumer profile. */
 export const LINEAR = {
-  jobTeam: "b12df7a0-4845-47fd-be59-8f6d03d9ae8d",
-  lblMonitor: "3cf3f731-dccf-43fa-861e-cba73998b183",
-  lblBug: "1d25b456-393f-4567-9980-e1bb98d3b069",
-  lblRepoBackend: "636d11e1-7544-4755-bd8d-2446b248a9c6",
+  teamId: process.env.LINEAR_TEAM_ID || "",
+  labels: (process.env.WATCH_LABEL_IDS || process.env.LINEAR_MONITOR_LABEL_ID || "").split(",").filter(Boolean),
 } as const;
 
 export const SECRETS = {
-  hmacKey: "HEALTH_OUTPUT_HMAC_KEY",
-  linearKey: "linear-api-key",
+  hmacKey: process.env.WATCH_HMAC_SECRET || "self-healing-output-hmac",
+  linearKey: process.env.LINEAR_API_KEY_SECRET || "linear-api-key",
   triggerToken: "self-healing-trigger-token",
 } as const;
 
@@ -40,13 +36,14 @@ const parseThreshold = ({ raw }: { raw: string | undefined }): number => {
 };
 
 export const readConfig = ({ env }: { env: NodeJS.ProcessEnv }): WatchConfig => ({
-  url: env.WATCH_URL ?? "https://joblander-audio-engine-p26anqucmq-ew.a.run.app",
-  project: env.WATCH_PROJECT ?? "meet-assistant-6d8ad",
+  url: env.WATCH_URL ?? "",
+  path: env.WATCH_PATH ?? "/health/output?window_min=30",
+  project: env.WATCH_PROJECT ?? env.GCP_PROJECT ?? "",
   threshold: parseThreshold({ raw: env.WATCH_THRESHOLD }),
-  stateFile: env.WATCH_STATE_FILE ?? "/home/joblander/.output-watch-state",
+  stateFile: env.WATCH_STATE_FILE ?? `${homedir()}/.output-watch-state`,
   notifyScript:
-    env.WATCH_NOTIFY_SCRIPT ?? "/home/joblander/self-healing/deploy/bin/self-healing-notify.py",
-  tgEnvFile: env.WATCH_TG_ENV_FILE ?? "/home/joblander/.config/self-healing/telegram.env",
+    env.WATCH_NOTIFY_SCRIPT ?? "",
+  tgEnvFile: env.WATCH_TG_ENV_FILE ?? `${homedir()}/.config/self-healing/telegram.env`,
   triggerUrl: env.WATCH_TRIGGER_URL ?? "http://localhost:4100/trigger",
   dispatchToken:
     env.DISPATCH_TOKEN !== undefined && env.DISPATCH_TOKEN.length > 0
@@ -54,6 +51,6 @@ export const readConfig = ({ env }: { env: NodeJS.ProcessEnv }): WatchConfig => 
       : null,
   metricsFile:
     env.WATCH_METRICS_FILE ?? "/var/lib/node_exporter/textfile/selfheal_watcher.prom",
-  dryRun: env.DRY_RUN === "1",
+  dryRun: env.DRY_RUN !== "false" && env.DRY_RUN !== "0",
   forceBad: env.FORCE_BAD === "1",
 });

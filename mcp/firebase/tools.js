@@ -10,7 +10,7 @@ export function initFirebase() {
   if (admin.apps.length > 0) return;
 
   const projectId =
-    (process.env.GCP_PROJECT_ID || "meet-assistant-6d8ad").trim();
+    (process.env.GCP_PROJECT_ID || process.env.GCP_PROJECT || "").trim();
   const keyB64 = (process.env.GCP_PRIVATE_KEY_BASE_64 || "").trim();
 
   if (keyB64) {

@@ -44,13 +44,13 @@ export function buildAuIncident({ now = Date.now() }: { now?: number } = {}): Ex
     timestamp: deleteTs,
     protoPayload: {
       methodName: "v1.compute.instances.delete",
-      resourceName: "projects/meet-assistant-6d8ad/zones/australia-southeast1-a/instances/lk-au-southeast1",
-      authenticationInfo: { principalEmail: "agent@joblander.app" },
+      resourceName: "projects/example-project/zones/australia-southeast1-a/instances/lk-au-southeast1",
+      authenticationInfo: { principalEmail: "agent@example.com" },
     },
   };
 
   const linearIssue: LinearIssueNode = {
-    identifier: "JOB-AU1",
+    identifier: "APP-AU1",
     title: "Decommission lk-au / AU region",
     description: "AU has no backend serving traffic; retire the lk-au-southeast1 LiveKit VM and stop monitoring it.",
     updatedAt: decisionTs,

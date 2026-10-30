@@ -1,147 +1,56 @@
-# Monitor and executor live in self-healing
+# Monitor
 
-`monitor/` owns deterministic collection, escalation lifecycle, and the monitor
-prompt. `dispatcher/` owns execution and the shared Claude/Codex subscription
-provider adapter. There is no separate monitor repository or runtime dependency
-on the workspace launcher, manager prompt, `.mcp.json`, or git updates.
+The hourly runner holds one process lock, collects deterministic evidence, pages
+urgent incidents, and gives only a prepared escalation batch to the shared
+Claude/Codex/OpenCode provider runner. The monitor agent can deduplicate/file
+issues and record delivery receipts; it cannot claim repair work or change code.
 
-The existing hourly cron still invokes `monitor/run-monitor-session.sh`. Its
-Python runner holds `/tmp/joblander-Monitor.lock`, the same lock as the retired
-workspace launcher, throughout collection, state migration and escalation.
-Deploy activation also waits for that lock. Do not add a second cron.
+Cloud Run collection is limited to the consumer's services and regions. Sentry
+and product adapters are optional. Logs retain observation time, counting window,
+revision and redacted evidence. A seven-day Sentry count does not prove current
+failure; the freshness gate checks last-seen time.
 
-1. Collect and classify deterministically with `triage.py`.
-   LiveKit uses Cloud since 2026-09-19; retired SFU VM HTTP and disk checks
-   are removed. Voice-agent error, stage, timeout, avatar and latency collectors
-   query the three regional Cloud Run worker pools, including JSON `level` errors
-   when GCP severity is absent. LiveKit is reported as managed; this is not a
-   synthetic end-to-end SFU health check. Pending HTTP/disk and VM log alerts for
-   the four retired hosts are discarded; unrelated durable alerts remain pending.
-   Sentry collection fetches unresolved issues and locally rejects explicit
-   non-error categories, performance types and informational/warning levels before inference.
-   Missing classification fields stay eligible; the real title replaces an absent
-   exception type. The prepared evidence preserves the seven-day counting window.
-   Cloud Run request logs without a message retain HTTP status, method, route,
-   revision and trace evidence. Request signatures distinguish statuses and routes
-   but stay stable across revisions; URL credentials, query and fragment are omitted.
-   Real HTTP 5xx events still count toward the existing escalation thresholds.
-   A recently closed [Monitor] ticket puts its signature in cooldown (Done 6h,
-   Canceled 12h). The dispatcher ends its run at the merge, so this is also where
-   a failed fix is noticed: when the Done ticket has a merged GitHub PR attached in
-   Linear and the signature's `last_seen` is after the fix went live, the cooldown
-   is bypassed (`cooldown_override.reason = "recurred-after-fix"`) and a P1/P2 is
-   re-filed with "fix did not hold" in its title and first line. For a Cloud Run
-   log signal from one real region the evidence is the revision that logged the
-   latest error: its sequence number (`svc-00285-xyz`) must be higher than every
-   revision seen running in that region in the 48h before the merge (an older
-   one is still the old code, e.g. while a `--no-traffic` deploy waits for its
-   traffic switch, or after a rollback); its first error then counts. For Sentry,
-   which has no revision, the fix-live time is
-   the first `run_deploy` of the signature's service (Sentry: `joblander-app`)
-   since the PR's `mergedAt` (the dispatcher merges before it closes the ticket),
-   counting only a long-running operation's terminal entry, in the change-ingest feed (`CHANGE_FEED_URL`): for a regional
-   signature only a successful deploy recorded in that region counts (failed
-   calls are `run_deploy_failed`); for Sentry, a deploy in every production region
-   (`REGIONS`), timed at the latest of those first deploys. Only a tracked deploy counts: with the feed unreachable or
-   showing no deploy, the event may still come from the old revision, so the
-   cooldown is kept. Only Cloud Run log and Sentry signals qualify: voice-agent worker pools,
-   Cloud Functions and the snapshot signals (`duplicate-worker:`,
-   `monitor-topology:`) have no tracked deploy or no real event time. Those, Done
-   without a merged PR, Canceled, recurrence before the deploy and any lookup
-   failure keep the cooldown.
-2. Persist prepared P0 pages to `p0-outbox.json`, deliver verbatim through Telegram,
-   and remove only acknowledged deliveries. Failed deliveries retry next launch,
-   even if the next collection fails. A crash after delivery can repeat a page;
-   preserving delivery takes precedence over suppressing every duplicate.
-3. Persist escalations in `linear-outbox.json` until each signature has a recorded
-   Linear issue or structured GitHub PR duplicate outcome. A success marker with
-   empty or partial actions never clears the batch; acknowledge completed items
-   individually and retain missing outcomes. This
-   retains a new P2 across a quota failure even when the next collection calls it
-   recurring. Fresh cooldown decisions remove suppressed pending signals.
-   If both current escalations and this backlog are empty, skip all model execution and OAuth resolution. Write
-   a fresh successful session result; a quiet run is healthy.
-4. Otherwise invoke `dispatcher/dist/providerCli.js` with the compact local prompt
-   and prepared files in an isolated runtime directory. It uses the same verified
-   provider configuration, MCP tools, fallback policy and usage journal as the
-   executor. The monitor must never claim tickets or repair code.
-   The supported services and their six Linear projects are listed in
-   `prompt.md`. An unmapped service remains pending with an explicit routing
-   error; it cannot create a ticket in a guessed project.
-5. Commit successful and partial actions to `latest-report.json`; record completion/failure in
-   `last-session.json`. Publish a Cloud Logging heartbeat only after successful
-   collection and completion of required actions, including P0 delivery.
+Before escalation the monitor reads all `false-positive` labeled tickets in its
+Linear team, including archived ones. Exact canonical `**Signature:**` strings
+at the same/lower severity are suppressed for 24 hours after each of the first
+two confirmed verdicts and 30 days after the third. Count independent investigations,
+not events: a ticket must have been created after the previous pause ended.
+Duplicate/old tickets cannot advance the count or extend the pause. After the
+30-day window, the next verdict starts a new cycle. Closed labeled tickets use
+the host's stable decision time (legacy tickets use their terminal timestamp).
+Reopened or undated tickets do not authorize suppression. P0 and severity increases
+remain eligible. The same check prunes durable pending filings before an agent starts.
+Suppression runs after growth-based severity escalation. Reports retain suppressed
+observations (marked with `suppressed`) so worsening signals are still detected;
+they do not degrade service health or create actions while suppression applies.
+When a pause expires, a stable P2 signal is eligible for investigation again.
+A failed/incomplete label scan defers filing, while urgent pages still run.
+Removing a label withdraws that verdict; remove all matching labels to reset. Stale and fixed incidents use separate,
+short cooldowns; they are not permanent false positives.
 
-State defaults to `/home/joblander/.local/state/self-healing/monitor`, outside
-the checkout. `MONITOR_STATE_DIR` can override it. On the first launch, while the
-shared lock is held, copy the old workspace `teams/logs/monitoring` directory
-atomically into the new location. Existing reports, archives and `known-errors`
-are preserved byte for byte; the old tree is retained. Deployment must perform
-this migration under its monitor lock before starting the dispatcher, which can
-write new suppressions. Do not pre-create the final state directory. Later launches never
-overwrite the new state from that historical copy. Rolling back code requires
-pointing the older launcher at the current `MONITOR_STATE_DIR` so newly recorded
-actions and suppressions are not lost.
-If the first deployment fails during activation, CD removes only the new state
-target recorded as absent before that transaction. The resumed legacy launcher
-keeps its old tree current, and a later retry copies those newer files. A state
-directory that already existed before deployment is preserved during rollback.
-Bootstrap uses `python3 monitor/run_monitor.py --migrate-only` before starting
-the dispatcher. This command refuses a busy monitor lock and performs no
-collection, credential resolution, delivery or inference.
+Existing `known-errors.json` files are read for migration compatibility. New
+verdicts belong on Linear tickets, not new wildcard file rules. Reviewed retired
+targets also remove obsolete queued pages/filings, with an audit record.
 
-Provider configuration comes from the self-healing dispatcher's rendered `.env`
-and process environment. Monitor overrides `LOG_DIR` to
-`/var/log/self-healing-monitor/turns` (`MONITOR_LOG_DIR`) to keep provider state and
-the durable usage ledger separate from the concurrently running dispatcher.
-Telegram uses `TG_BOT_TOKEN`/`TG_CHAT_ID` or the existing Secret Manager secret
-`self-healing-workspace-env`; its historical name does not require a workspace
-file. Never put credentials in the prompt, MCP configuration or logs.
+Cloud Run/Sentry recurrence after a tracked deployed fix can bypass the Done
+cooldown. The monitor requires deployment/revision evidence: an old revision
+still logging errors is not evidence the fix failed. Other origins receive a
+later dispatcher verification run.
 
-`MONITOR_HEARTBEAT success` is written to log id `self-healing-monitor`. The
-Terraform `monitor_dead_man` policy alerts on two hours without successful
-completion, through the existing notification channels. It never resets the VM.
-`last-session.json` also explains failed or quiet runs locally. Prometheus
-`selfheal_monitor_*` textfile metrics include latest status and per-provider/model
-actual token totals from the durable attempt ledger. Missing provider usage is
-counted separately and never represented as zero tokens or a fabricated bill.
+State lives in `MONITOR_STATE_DIR`: reports, Linear/page outboxes and delivery
+receipts. The runner writes atomic files, preserves failures across restarts and
+emits a successful heartbeat only when the cycle finishes. Back up this directory
+and the dispatcher's ledger/outboxes. Run through `config/run.py`; do not install
+a second independent hourly scheduler.
 
-Validation: `python3 -m unittest discover -s monitor -p 'test_*.py' -v`.
-Unit tests inject collection, delivery and provider execution; they never contact
-production or start an inference session.
+Dry-run reports and metrics live under `MONITOR_STATE_DIR/dry-run/`. Preview cycles
+do not alter live baselines/outboxes or publish production heartbeats. Switching
+to live mode therefore evaluates fresh observations against the last live baseline,
+not against preview activity. Inspect the preview's `triage-summary.json` and
+`last-session.json` before enabling writes.
 
-## Infrastructure lifecycle
-
-`targets.json` is the reviewed monitoring contract: expected regional worker
-pools, the LiveKit Cloud endpoint used by the app, and explicit retired resource
-scopes with effective dates and evidence. Update this contract in the same
-migration rollout, before removing old resources. Add and verify replacements
-before retiring their predecessors. Never derive expected coverage from the
-set of currently running VMs or from whichever resources emitted recent logs.
-
-When a target's shutdown is scheduled, give it `until` (an ISO timestamp with a
-timezone) plus `until_reason` and `until_evidence` (an https link), and merge
-that before the deletion. After `until` the target is no longer inspected, so
-the planned deletion does not file a coverage ticket. Keep the entry instead of
-deleting it: the end of coverage stays reviewable in the contract, and
-`voice_agents` must stay non-empty either way (validation only rejects removing
-every pool, not removing one). The JobLander
-closure uses this: the LiveKit config check ends when the site left Cloud Run
-(JOB-1232), and the voice-agent worker pools end at the Practice cutoff,
-2026-10-19T12:00Z (JOB-1231).
-
-Every collection checks the expected worker deployments and the app's actual
-LIVEKIT_URL. It records a policy revision and each observation in the report.
-Missing permissions, missing resources and failed lookups remain UNKNOWN;
-deployment disagreement is DRIFT/NOT_READY. These generate a P2 monitoring
-configuration investigation, never a synthetic HTTP 0 P0. Actual production
-error spikes retain their existing P0/P1 thresholds. Cloud control-plane Ready
-and an endpoint match do not claim successful end-to-end voice calls.
-
-Explicit retirements also filter both durable outboxes, including delivery
-retries after collection failure. Before removal, the original item, reason,
-evidence and policy revision are saved in `retired-outbox.json`. Unknown scopes
-and replacement hosts remain eligible. Invalid policy fails before any removal
-or delivery; pending work is preserved. CI rejects empty voice coverage,
-active/retired overlap, ambiguous retirement prefixes and future retirements.
-Python code does not need edits to retire another resource or change a pool.
+```sh
+python3 -m unittest discover -s monitor -p 'test_*.py'
+PYTHONPATH=monitor python3 config/run.py --profile consumers/joblander/profile.json -- \
+  python3 -m unittest discover -s consumers/joblander/test -p 'test_*.py'
+```

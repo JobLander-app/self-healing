@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { readConfig } from "../src/config.js";
 import { signRequest } from "../src/hmac.js";
@@ -87,14 +88,14 @@ describe("FORCE_BAD hook", () => {
   });
 });
 
-describe("readConfig defaults (parity with output-watch.sh)", () => {
-  it("uses the bash defaults when env is empty", () => {
+describe("readConfig portable defaults", () => {
+  it("requires consumer routing and defaults to dry run", () => {
     const defaults = readConfig({ env: {} as NodeJS.ProcessEnv });
-    expect(defaults.url).toBe("https://joblander-audio-engine-p26anqucmq-ew.a.run.app");
-    expect(defaults.project).toBe("meet-assistant-6d8ad");
+    expect(defaults.url).toBe("");
+    expect(defaults.project).toBe("");
     expect(defaults.threshold).toBe(3);
-    expect(defaults.stateFile).toBe("/home/joblander/.output-watch-state");
-    expect(defaults.dryRun).toBe(false);
+    expect(defaults.stateFile).toBe(`${homedir()}/.output-watch-state`);
+    expect(defaults.dryRun).toBe(true);
     expect(defaults.forceBad).toBe(false);
     expect(defaults.dispatchToken).toBeNull();
   });

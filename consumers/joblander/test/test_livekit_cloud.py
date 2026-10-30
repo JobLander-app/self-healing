@@ -14,6 +14,16 @@ import triage
 class LiveKitCloudTests(unittest.TestCase):
     def setUp(self):
         triage.collection_errors.clear()
+        labels = patch.object(runner, "decisions", return_value=[])
+        labels.start()
+        self.addCleanup(labels.stop)
+        # A unit test must fail locally too if a newly added path escapes mocks.
+        network = patch("urllib.request.urlopen", side_effect=AssertionError("unexpected network access"))
+        network.start()
+        self.addCleanup(network.stop)
+        commands = patch("subprocess.run", side_effect=AssertionError("unexpected external command"))
+        commands.start()
+        self.addCleanup(commands.stop)
 
     def test_worker_json_errors_keep_region_and_escalation_without_gcp_severity(self):
         entry = {"resource": {"type": "cloud_run_worker_pool", "labels": {
@@ -22,7 +32,7 @@ class LiveKitCloudTests(unittest.TestCase):
             "timestamp": triage.utcnow_iso()}
         groups = {}
         with patch.object(triage, "gcloud_logging_read", return_value=[entry] * 11) as fetch:
-            triage.collect_voice_agent_errors(groups)
+            triage.ADAPTER.collect_voice_agent_errors(groups)
         query = fetch.call_args.args[0]
         self.assertIn("jsonPayload.level", query)
         self.assertIn(triage.VOICE_AGENT_LOG_FILTER, query)
@@ -35,11 +45,11 @@ class LiveKitCloudTests(unittest.TestCase):
 
     def test_all_voice_collectors_use_active_worker_pools(self):
         with patch.object(triage, "gcloud_logging_read", return_value=[]) as fetch:
-            triage.collect_voice_agent_errors({})
-            triage.collect_stage_errors({})
-            triage.collect_audio_timeouts({})
-            triage.collect_anam_failures({})
-            triage.collect_transcription_delay({})
+            triage.ADAPTER.collect_voice_agent_errors({})
+            triage.ADAPTER.collect_stage_errors({})
+            triage.ADAPTER.collect_audio_timeouts({})
+            triage.ADAPTER.collect_anam_failures({})
+            triage.ADAPTER.collect_transcription_delay({})
         self.assertEqual(fetch.call_count, 5)
         for call in fetch.call_args_list:
             self.assertIn(triage.VOICE_AGENT_LOG_FILTER, call.args[0])
@@ -48,11 +58,12 @@ class LiveKitCloudTests(unittest.TestCase):
     def run_main(self, observations, previous_groups=()):
         with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
             runner.write_json(Path(directory) / "latest-report.json", {"error_groups": list(previous_groups)})
+            stack.enter_context(patch.object(triage, "decisions", return_value=[]))
             stack.enter_context(patch.object(triage, "STATE_DIR", directory))
             stack.enter_context(patch.object(triage, "inspect_targets", return_value=observations))
             stack.enter_context(patch.object(triage, "gcloud_logging_read", return_value=[]))
             stack.enter_context(patch.object(triage, "collect_sentry"))
-            stack.enter_context(patch.object(triage, "check_duplicate_worker"))
+            stack.enter_context(patch.object(triage.ADAPTER, "check_duplicate_worker"))
             stack.enter_context(patch.object(triage, "collect_closed_signature_cooldowns", return_value={}))
             stack.enter_context(patch.object(triage, "run_cmd", side_effect=AssertionError("unexpected probe")))
             stack.enter_context(patch.object(triage.subprocess, "run", side_effect=AssertionError("unexpected SSH")))
@@ -92,7 +103,7 @@ class LiveKitCloudTests(unittest.TestCase):
                    for region in ["europe-west1", "asia-south1"] * 2]
         groups = {}
         with patch.object(triage, "gcloud_logging_read", return_value=entries):
-            count = triage.collect_anam_failures(groups)
+            count = triage.ADAPTER.collect_anam_failures(groups)
         triage.assign_severity(groups, {}, 0, anam_count=count)
         group = groups["voice-agent:all:anam-avatar-start-failed"]
         self.assertEqual((group["region"], group["count"], group["severity"]), ("all", 4, "P2"))

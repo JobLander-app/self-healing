@@ -1,24 +1,4 @@
 'use strict';
-//
-// What the alert relay is allowed to put on someone's phone.
-//
-// WHY THIS EXISTS. Repointing every policy in the project at a channel that
-// actually delivers (2026-09-02) turned five silent policies into five loud
-// ones overnight, and the owner's verdict on the result was "это было оч плохо".
-// A channel nobody reads is worth as little as a channel that never delivers —
-// the failure this whole change set started from. So delivery is not the end of
-// the job; volume control is part of it.
-//
-// The rules:
-//   * P0 always goes through, open and closed, no cooldown. If we ever suppress
-//     a P0 we have rebuilt the original outage.
-//   * Everything else is rate-limited per policy. Repeats inside the cooldown
-//     are counted, not dropped: the next message that does go out says how many
-//     it stands for.
-//   * A "closed" for a non-P0 alert is only worth sending if its "open" was
-//     sent. An all-clear for an alarm you never heard is pure noise.
-//   * A canary is delivered silently (Telegram disable_notification) — it must
-//     prove the whole path end to end without buzzing anyone.
 
 const P0 = /\bP0\b/i;
 

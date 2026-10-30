@@ -1,78 +1,10 @@
-# self-healing loop crontab for user `joblander` (JOB-731 Phase 2).
-# Installed WHOLESALE by init/init.sh: `crontab -u joblander <this file>` —
-# it owns the entire crontab; hand edits on the VM are lost on re-init.
-#
-# Legacy reference: deploy/cron/joblander-agents.crontab.snapshot (old VM, as-found).
+# Installed as the dedicated agent user's entire crontab. Edit the profile, not the host copy.
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+WATCH_NOTIFY_SCRIPT=__AGENT_HOME__/self-healing/deploy/bin/self-healing-notify.py
 
-# Standalone pager helper uses the existing Telegram secret; no workspace checkout.
-WATCH_NOTIFY_SCRIPT=/home/joblander/self-healing/deploy/bin/self-healing-notify.py
-
-# Consecutive bad samples (= minutes) before the watcher pages. Default in
-# watcher/src/config.ts is 3; measured evidence says 3 is far too low.
-#
-# 12 days of per-minute heartbeats (17,254 samples, /home/joblander/output-watch.log),
-# last 7 days: 36 bad episodes — 7 crossed the threshold and paged, 29 died before it.
-#   paged-episode duration : min 3m / median 4m / MAX 13m
-#   page -> recovery       : min 1m / median 2m / MAX 11m
-# All 7 pages were investigated by the dispatcher and ALL 7 were false positives
-# (JOB-796/798/806/807/809/814/854 — every one closed not-a-bug or stale). Precision
-# of this pager over the week was zero, at ~$8 of investigation cost.
-#
-# No bad episode in the whole 12-day log lasted longer than 13 minutes, and every
-# single one self-resolved. A 15-minute threshold therefore suppresses all 36
-# episodes — including all 7 pages — while costing at most 15 minutes of detection
-# delay on a real outage. The failure class this pager exists for (JOB-651: silent
-# total STT outage) ran 19 HOURS, so 15 minutes is noise against it.
-#
-# This is a mitigation, not the fix. The root cause is that /health/output cannot
-# distinguish "audio present but nobody is being interviewed" from "pipeline dead" —
-# both produce zero hints. backend#332 fixed the gate-suppression class (1 of the 7);
-# the remaining 4 need a transcript-stage discriminator. Revisit this value once
-# that lands.
-WATCH_THRESHOLD=15
-
-# Watcher tick (JOB-670): product-output pager, every minute.
-# The `&& gcloud logging write ...` chain ships the heartbeat to Cloud Logging
-# ONLY on exit 0 — a crashed tick writes no heartbeat, which is exactly what
-# the Terraform dead-man alert (WATCHER_HEARTBEAT absent 5 min) catches.
-# Log id `self-healing-watcher` must match var.heartbeat_log_id in
-# infra/terraform/modules/self-healing-vm/variables.tf.
-#
-# --- ROLE HANDED OVER (TEST-PLAN stage 3, 2026-07-16): this VM is the LIVE
-# pager; the legacy VM's watcher cron line is commented out. Stage 4 (2026-07-17):
-# trigger targets THIS VM's dispatcher (default localhost:4100) — full loop local.
-* * * * * cd /home/joblander/self-healing/watcher && /usr/bin/flock -n /home/joblander/.output-watch.lock /usr/bin/node dist/tick.js >> /home/joblander/output-watch.log 2>&1 && touch /home/joblander/.watcher-last-ok && gcloud logging write self-healing-watcher "WATCHER_HEARTBEAT tick ok" --severity=INFO >/dev/null 2>&1
-
-# The `touch` above is a LOCAL heartbeat and lands BEFORE the Cloud Logging
-# write on purpose. On 2026-08-26 the tick kept succeeding every minute for six
-# days while `gcloud logging write` failed silently — the VM had lost its DHCP
-# address, so the only heartbeat the system had needed the very thing that was
-# broken. The file mtime tells a later investigator "the watcher was alive, the
-# network was not", which is the difference between a 5-minute fix and a
-# six-day outage. selfheal-netwatch.timer is what actually repairs it.
-
-# Hourly monitor: self-contained collection + escalation in the same repo as
-# the executor. Its own runner skips inference on empty batches, migrates old
-# state once, and publishes a success heartbeat consumed by monitor_dead_man.
-# --- ROLE HANDED OVER (stage 3M, 2026-07-17): this VM runs the hourly monitor;
-# the legacy VM's hourly cron is commented out. State (teams/logs/monitoring)
-# was copied from the legacy VM before handover. Runs from THIS repo.
-0 * * * * systemd-cat -t joblander-monitor /home/joblander/self-healing/monitor/run-monitor-session.sh
-
-# --- CWS crons: ENABLED AT CUTOVER (Phase 4) ---------------------------------
-# The legacy joblander-agents VM still runs these; enabling here too would
-# double-run them. Uncomment only on the owner's cutover signal.
-# 0 8 * * * /home/joblander/cws-recon/run.sh >> /home/joblander/cws-recon/cron.log 2>&1
-# 5 8 * * 1 bash /home/joblander/workspace/scripts/run-cws-metrics.sh >> /home/joblander/workspace/reports/cws-rankings/cron.log 2>&1
-
-# Dispatcher liveness → Cloud Logging, every 5 min. The watcher heartbeat only
-# proves the VM and cron are alive; the dispatcher could be dead (crash-looped,
-# hit its cgroup ceiling, wedged mid-run) with the heartbeat still ticking, and
-# nothing outside the box would know. The off-box watchdog alerts on the
-# absence of this line — see infra/terraform/modules/self-healing-watchdog.
-#
-# peak= is the dispatcher cgroup's memory.peak (world-readable, no sudo). The
-# first memory caps were sized by guesswork; this makes the next adjustment a
-# query instead of an argument. It resets on every restart of the unit, so a
-# series of these is a per-incarnation high-water mark, not a lifetime one.
-*/5 * * * * curl -sf --max-time 10 http://localhost:4100/health 2>/dev/null | grep -q '"status":"ok"' && gcloud logging write self-healing-dispatcher "DISPATCHER_HEARTBEAT ok peak=$(cat /sys/fs/cgroup/selfheal.slice/claude-code-vm-job-dispatcher.service/memory.peak 2>/dev/null || echo 0)" --severity=INFO >/dev/null 2>&1
+# Write the external heartbeat only after a successful tick.
+* * * * * cd __AGENT_HOME__/self-healing/watcher && /usr/bin/flock -n __AGENT_HOME__/.output-watch.lock /usr/bin/python3 ../config/run.py -- /usr/bin/node dist/tick.js >> __AGENT_HOME__/output-watch.log 2>&1 && touch __AGENT_HOME__/.watcher-last-ok && /usr/bin/python3 ../config/run.py -- bash -c 'gcloud logging write self-healing-watcher "WATCHER_HEARTBEAT tick ok" --project="$GCP_PROJECT" --severity=INFO' >/dev/null 2>&1
+0 * * * * systemd-cat -t self-healing-monitor __AGENT_HOME__/self-healing/monitor/run-monitor-session.sh
+*/5 * * * * curl -sf --max-time 10 http://localhost:4100/health 2>/dev/null | grep -q '"status":"ok"' && /usr/bin/python3 __AGENT_HOME__/self-healing/config/run.py -- bash -c 'gcloud logging write self-healing-dispatcher "DISPATCHER_HEARTBEAT ok" --project="$GCP_PROJECT" --severity=INFO' >/dev/null 2>&1
+* * * * * /usr/bin/python3 __AGENT_HOME__/self-healing/config/run.py -- /usr/bin/python3 __AGENT_HOME__/self-healing/deploy/bin/publish-events.py >> __AGENT_HOME__/self-healing-events.log 2>&1

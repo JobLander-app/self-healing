@@ -1,14 +1,5 @@
 #!/usr/bin/env bash
-# Prints the Caddy vhost for the Chatwoot support app, or nothing when the
-# domain is empty.
-#
-# The one renderer for this block: init.sh appends it on provisioning and
-# self-healing-deploy.sh appends it on every release that installs the
-# Caddyfile. On 2026-10-13 a release installed the console-only template,
-# because only init.sh knew about this vhost, and chat.joblander.app (loaded
-# as a script on every joblander.app page) was down for an hour.
-#
-#   render-chatwoot-vhost.sh <domain> [port]
+# Render an optional extra reverse proxy; default deployments leave it disabled.
 set -euo pipefail
 
 domain="${1:-}"

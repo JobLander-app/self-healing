@@ -1,22 +1,4 @@
-/**
- * Prometheus textfile-collector output (JOB-731 → free-core observability v1).
- *
- * The watcher is a per-minute CRON that runs and EXITS — it cannot hold an HTTP
- * server. So it uses node_exporter's textfile-collector pattern: each tick
- * writes a `.prom` file that node_exporter exposes on its own /metrics.
- *
- * Contract (all `selfheal_watcher_`):
- *   - last_tick_timestamp_seconds gauge — now; Grafana derives freshness/uptime
- *   - detector_ok gauge — 1 when the last sample was healthy, else 0
- *   - consecutive_bad gauge — current hysteresis count
- *   - pages_total / recoveries_total counters — persisted across ticks by
- *     reading the previous .prom, incrementing this tick, and writing back.
- *
- * FAIL-SOFT: if the target directory does not exist (node_exporter not
- * installed on this host) OR any read/write errors, the write is skipped
- * silently and NEVER throws — a metrics write must never break the sacred
- * page-first tick flow. Writes are atomic: temp file in the same dir + rename.
- */
+
 import { existsSync } from "node:fs";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";

@@ -1,27 +1,3 @@
-# Off-box watchdog for the self-healing loop.
-#
-# WHY THIS MODULE EXISTS
-# On 2026-08-26 the loop's VM lost its DHCP address under memory pressure and
-# ran blind for six days: cron ticked, the dispatcher restarted, the watcher
-# watched — and none of it could reach Cloud Logging, Linear, Telegram or the
-# metadata server. Every mechanism that was supposed to notice lived on the
-# same VM or reported through the same dead network, and not one of them could
-# ACT. Recovery required a human to look.
-#
-# Everything here is deliberately somewhere else: a Cloud Function on Cloud
-# Run, driven by Cloud Scheduler, reading Cloud Logging and holding reset
-# permission on exactly one instance. It is entirely deterministic — no model
-# call, per the single-provider rule in CLAUDE.md.
-#
-#   Scheduler (*/5) ──> watchdog fn ──> Cloud Logging (heartbeat age?)
-#                             │
-#                             ├─ stale ──> Telegram page ──> compute.reset (budgeted)
-#                             └─ writes its own WATCHDOG_HEARTBEAT
-#
-#   Alert policies ──> Pub/Sub ──> alertRelay fn ──> Telegram
-#     (Monitoring's webhook channel cannot speak to the Bot API: it posts its
-#      own incident JSON and Telegram answers 400. That is why five policies in
-#      this project notified nobody for months.)
 
 locals {
   fn_name    = "self-healing-watchdog"
@@ -60,7 +36,7 @@ resource "google_project_iam_member" "watchdog_project_roles" {
 resource "google_compute_instance_iam_member" "watchdog_instance_admin" {
   project       = var.project_id
   zone          = var.vm_zone
-  instance_name = var.vm_name
+  instance_name = var.instance_ready != "" ? var.instance_ready : var.vm_name
   role          = "roles/compute.instanceAdmin.v1"
   member        = "serviceAccount:${google_service_account.watchdog.email}"
 }
@@ -234,12 +210,6 @@ resource "google_pubsub_topic_iam_member" "monitoring_publisher" {
   depends_on = [google_monitoring_notification_channel.telegram]
 }
 
-# The alert path is only proven while something keeps proving it. Once a day
-# this publishes a canary onto the same topic Cloud Monitoring uses; the relay
-# delivers it to Telegram with disable_notification (visible in the chat, no
-# sound) and logs RELAY_DELIVERED. The watchdog — a separate deployment — pages
-# if that proof goes stale. Without this, a broken relay is indistinguishable
-# from a quiet week, which is precisely how six days were lost on 2026-08-26.
 resource "google_cloud_scheduler_job" "alert_canary" {
   project     = var.project_id
   region      = var.region

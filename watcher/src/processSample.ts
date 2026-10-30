@@ -11,12 +11,7 @@ import type { Decision, Sample, WatchState, WatchIncident, DeliveryAction } from
 export interface TickEffects {
   /** Page the owner (Telegram / notify.sh). */
   notifyOwner: (input: { message: string }) => Promise<void>;
-  /**
-   * File or reconcile the stable incident UUID. Resolves to the created
-   * issue identifier (e.g. "JOB-742") on success, or null when the create was
-   * skipped (missing key) or the response carried no identifier. Throws on a
-   * real create failure.
-   */
+
   createLinearTicket: (input: {
     incidentId: string;
     status: string;
@@ -29,11 +24,7 @@ export interface TickEffects {
   saveState: (input: { state: WatchState }) => Promise<void>;
   /** Structured stdout line (heartbeat, DRY_RUN echo, error reports). */
   log: (input: { line: string }) => void;
-  /**
-   * Best-effort Prometheus textfile write (JOB-731 observability). Optional so
-   * tests can omit it. Additive and fail-soft — it never throws and runs AFTER
-   * the heartbeat, so it can never reorder or block the page-first flow.
-   */
+
   writeMetrics?: (input: {
     detectorOk: boolean;
     consecutiveBad: number;

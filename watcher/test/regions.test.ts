@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { extractStatus, renderRegions } from "../src/regions.js";
 
-describe("renderRegions (JOB-725 rendering)", () => {
+describe("renderRegions (APP-725 rendering)", () => {
   it("renders region:verdict, appending (reason) for fail_slow and unknown", () => {
     const bodyText = JSON.stringify({
       status: "fail",

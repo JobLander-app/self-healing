@@ -1,10 +1,10 @@
-# JOB-731 Phase 2: Terraform CI — fmt + validate only.
-# validate runs with `init -backend=false` so CI needs NO GCS/state access.
-# Lives in its own workflow file (ci.yml is owned by the Phase 1 watcher PR).
 name: Terraform
 
 on:
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   terraform:
@@ -19,7 +19,9 @@ jobs:
         with:
           terraform_version: "1.5.7"
       - name: terraform fmt -check
-        run: terraform fmt -check -recursive -diff
+        run: |
+          terraform fmt -check -recursive -diff
+          terraform -chdir=../../consumers/joblander/terraform fmt -check -diff
       - name: validate module (self-healing-vm)
         run: |
           terraform -chdir=modules/self-healing-vm init -backend=false -input=false
@@ -28,3 +30,7 @@ jobs:
         run: |
           terraform -chdir=self-healing init -backend=false -input=false
           terraform -chdir=self-healing validate
+      - name: validate existing consumer migration
+        run: |
+          terraform -chdir=../../consumers/joblander/terraform init -backend=false -input=false
+          terraform -chdir=../../consumers/joblander/terraform validate

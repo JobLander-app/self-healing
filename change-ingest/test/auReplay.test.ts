@@ -67,7 +67,7 @@ test("AU replay: querying the incident's entities returns both changes, ts DESC,
     assert.equal(rows[0].source, "gcp_audit");
     assert.equal(rows[0].id, "audit:au-delete-0001");
     assert.equal(rows[1].source, "linear");
-    assert.equal(rows[1].id, "linear:JOB-AU1");
+    assert.equal(rows[1].id, "linear:APP-AU1");
 
     // Each carries the LLM's input inline.
     for (const r of rows) {
@@ -153,7 +153,7 @@ test("regionFromZone: strips the zone suffix, leaves a bare region unchanged", (
 
 test("entitiesFromResourceName: GCE instance → gcp_instance + region", () => {
   const ents = entitiesFromResourceName(
-    "projects/meet-assistant-6d8ad/zones/australia-southeast1-a/instances/lk-au-southeast1",
+    "projects/example-project/zones/australia-southeast1-a/instances/lk-au-southeast1",
   );
   assert.deepEqual(ents, [
     { type: "gcp_instance", id: "lk-au-southeast1" },
@@ -163,10 +163,10 @@ test("entitiesFromResourceName: GCE instance → gcp_instance + region", () => {
 
 test("entitiesFromResourceName: Cloud Run service → service + region", () => {
   const ents = entitiesFromResourceName(
-    "projects/meet-assistant-6d8ad/locations/europe-west1/services/joblander-audio-engine",
+    "projects/example-project/locations/europe-west1/services/example-api",
   );
   assert.deepEqual(ents, [
-    { type: "service", id: "joblander-audio-engine" },
+    { type: "service", id: "example-api" },
     { type: "region", id: "europe-west1" },
   ]);
 });
@@ -177,15 +177,15 @@ test("gcpAuditExtract: instance delete → id, kind, actor, entities, ts, intent
     timestamp: "2026-07-18T04:00:00Z",
     protoPayload: {
       methodName: "v1.compute.instances.delete",
-      resourceName: "projects/meet-assistant-6d8ad/zones/australia-southeast1-a/instances/lk-au-southeast1",
-      authenticationInfo: { principalEmail: "human@joblander.app" },
+      resourceName: "projects/example-project/zones/australia-southeast1-a/instances/lk-au-southeast1",
+      authenticationInfo: { principalEmail: "human@example.com" },
     },
   };
   const { event, entities } = gcpAuditExtract({ entry });
   assert.equal(event.id, "audit:abc123");
   assert.equal(event.source, "gcp_audit");
   assert.equal(event.kind, "instance_delete");
-  assert.equal(event.actor, "human@joblander.app");
+  assert.equal(event.actor, "human@example.com");
   assert.equal(event.ts, Date.parse("2026-07-18T04:00:00Z"));
   assert.equal(event.raw_ref, "audit:abc123");
   assert.match(event.intent_text, /v1\.compute\.instances\.delete/);
@@ -201,14 +201,14 @@ test("gcpAuditExtract: Cloud Run update → run_deploy kind + service/region ent
     timestamp: "2026-07-18T05:00:00Z",
     protoPayload: {
       methodName: "google.cloud.run.v2.Services.UpdateService",
-      resourceName: "projects/meet-assistant-6d8ad/locations/europe-west1/services/joblander-audio-engine",
-      authenticationInfo: { principalEmail: "cloudbuild@meet-assistant-6d8ad.iam.gserviceaccount.com" },
+      resourceName: "projects/example-project/locations/europe-west1/services/example-api",
+      authenticationInfo: { principalEmail: "cloudbuild@example-project.iam.gserviceaccount.com" },
     },
   };
   const { event, entities } = gcpAuditExtract({ entry });
   assert.equal(event.kind, "run_deploy");
   assert.deepEqual(entities, [
-    { type: "service", id: "joblander-audio-engine" },
+    { type: "service", id: "example-api" },
     { type: "region", id: "europe-west1" },
   ]);
 });
@@ -219,39 +219,38 @@ test("gcpAuditExtract: Cloud Run v1 ReplaceService → run_deploy (not misclassi
     timestamp: "2026-07-18T06:00:00Z",
     protoPayload: {
       methodName: "google.cloud.run.v1.Services.ReplaceService",
-      resourceName: "projects/meet-assistant-6d8ad/locations/europe-west1/services/joblander-audio-engine",
-      authenticationInfo: { principalEmail: "cloudbuild@meet-assistant-6d8ad.iam.gserviceaccount.com" },
+      resourceName: "projects/example-project/locations/europe-west1/services/example-api",
+      authenticationInfo: { principalEmail: "cloudbuild@example-project.iam.gserviceaccount.com" },
     },
   };
   const { event, entities } = gcpAuditExtract({ entry });
   assert.equal(event.kind, "run_deploy");
   assert.deepEqual(entities, [
-    { type: "service", id: "joblander-audio-engine" },
+    { type: "service", id: "example-api" },
     { type: "region", id: "europe-west1" },
   ]);
 });
 
 test("entitiesFromResourceName: Cloud Run v1 namespaces shape → service (no region)", () => {
-  const ents = entitiesFromResourceName("namespaces/meet-assistant-6d8ad/services/joblander-audio-engine");
-  assert.deepEqual(ents, [{ type: "service", id: "joblander-audio-engine" }]);
+  const ents = entitiesFromResourceName("namespaces/example-project/services/example-api");
+  assert.deepEqual(ents, [{ type: "service", id: "example-api" }]);
 });
 
 test("gcpAuditExtract: v1 namespaces ReplaceService takes its region from resource labels", () => {
-  // Shape of the prod rows (2026-10-01): no region in resourceName, location label set.
   const entry: GcpAuditLogEntry = {
     insertId: "run-v1-ns",
     timestamp: "2026-10-01T14:08:46.160835Z",
     protoPayload: {
       methodName: "google.cloud.run.v1.Services.ReplaceService",
-      resourceName: "namespaces/meet-assistant-6d8ad/services/joblander-audio-engine",
-      authenticationInfo: { principalEmail: "cloud-build@meet-assistant-6d8ad.iam.gserviceaccount.com" },
+      resourceName: "namespaces/example-project/services/example-api",
+      authenticationInfo: { principalEmail: "cloud-build@example-project.iam.gserviceaccount.com" },
     },
-    resource: { labels: { location: "asia-south1", service_name: "joblander-audio-engine" } },
+    resource: { labels: { location: "asia-south1", service_name: "example-api" } },
   };
   const { event, entities } = gcpAuditExtract({ entry });
   assert.equal(event.kind, "run_deploy");
   assert.deepEqual(entities, [
-    { type: "service", id: "joblander-audio-engine" },
+    { type: "service", id: "example-api" },
     { type: "region", id: "asia-south1" },
   ]);
 });
@@ -262,12 +261,12 @@ test("gcpAuditExtract: a region already in resourceName is not duplicated by the
     timestamp: "2026-10-01T14:08:46Z",
     protoPayload: {
       methodName: "google.cloud.run.v2.Services.UpdateService",
-      resourceName: "projects/p/locations/europe-west1/services/joblander-app",
+      resourceName: "projects/p/locations/europe-west1/services/example-web",
     },
     resource: { labels: { location: "europe-west1" } },
   };
   assert.deepEqual(gcpAuditExtract({ entry }).entities, [
-    { type: "service", id: "joblander-app" },
+    { type: "service", id: "example-web" },
     { type: "region", id: "europe-west1" },
   ]);
 });
@@ -278,14 +277,14 @@ test("gcpAuditExtract: Cloud Run SetIamPolicy is an IAM change, not a deploy", (
     timestamp: "2026-10-01T14:14:12.950315Z",
     protoPayload: {
       methodName: "google.cloud.run.v1.Services.SetIamPolicy",
-      resourceName: "projects/meet-assistant-6d8ad/locations/asia-south1/services/joblander-audio-engine",
+      resourceName: "projects/example-project/locations/asia-south1/services/example-api",
     },
     resource: { labels: { location: "asia-south1" } },
   };
   const { event, entities } = gcpAuditExtract({ entry });
   assert.equal(event.kind, "iam_change");
   assert.deepEqual(entities, [
-    { type: "service", id: "joblander-audio-engine" },
+    { type: "service", id: "example-api" },
     { type: "region", id: "asia-south1" },
   ]);
 });
@@ -298,7 +297,7 @@ test("gcpAuditExtract: a failed Cloud Run update is not a deploy", () => {
     timestamp: "2026-10-01T14:08:46Z",
     protoPayload: {
       methodName: "google.cloud.run.v1.Services.ReplaceService",
-      resourceName: "namespaces/meet-assistant-6d8ad/services/joblander-audio-engine",
+      resourceName: "namespaces/example-project/services/example-api",
       status: { code: 3, message: "Revision template is invalid" },
     },
     resource: { labels: { location: "asia-south1" } },
@@ -311,7 +310,7 @@ test("gcpAuditExtract: a long-running deploy counts only at its terminal entry",
     timestamp: "2026-10-01T14:00:00Z",
     protoPayload: {
       methodName: "google.cloud.run.v2.Services.UpdateService",
-      resourceName: "projects/p/locations/europe-west1/services/joblander-app",
+      resourceName: "projects/p/locations/europe-west1/services/example-web",
     },
   };
   const start = gcpAuditExtract({ entry: { ...base, insertId: "op-first", operation: { id: "op", first: true } } });
@@ -322,7 +321,7 @@ test("gcpAuditExtract: a long-running deploy counts only at its terminal entry",
 
 test("gcpAuditExtract: only create/update/replace count as a deploy", () => {
   const kind = (methodName: string) => gcpAuditExtract({ entry: { insertId: methodName, timestamp: "2026-10-01T14:00:00Z",
-    protoPayload: { methodName, resourceName: "projects/p/locations/europe-west1/services/joblander-app" } } }).event.kind;
+    protoPayload: { methodName, resourceName: "projects/p/locations/europe-west1/services/example-web" } } }).event.kind;
   assert.equal(kind("google.cloud.run.v2.Services.CreateService"), "run_deploy");
   assert.equal(kind("google.cloud.run.v1.Services.ReplaceService"), "run_deploy");
   assert.equal(kind("google.cloud.run.v2.Services.DeleteService"), "run_delete");
@@ -335,8 +334,8 @@ test("gcpAuditExtract: resource-scoped setIamPolicy → iam_change (lowercase me
     timestamp: "2026-07-18T07:00:00Z",
     protoPayload: {
       methodName: "v1.compute.instances.setIamPolicy",
-      resourceName: "projects/meet-assistant-6d8ad/zones/europe-west1-b/instances/some-vm",
-      authenticationInfo: { principalEmail: "human@joblander.app" },
+      resourceName: "projects/example-project/zones/europe-west1-b/instances/some-vm",
+      authenticationInfo: { principalEmail: "human@example.com" },
     },
   };
   const { event } = gcpAuditExtract({ entry });
@@ -349,17 +348,17 @@ test("githubExtract: merged PR → gh id, repo entity, ts=merged_at, title+body 
     title: "feat: Cerebras hint fallback",
     body: "Adds a decommission-safe model cutover path.",
     merged_at: "2026-07-17T12:00:00Z",
-    html_url: "https://github.com/JobLander-app/backend/pull/262",
+    html_url: "https://github.com/example-org/backend/pull/262",
     merged_by: { login: "sorokinvj" },
-    base: { repo: { name: "backend", full_name: "JobLander-app/backend", owner: { login: "JobLander-app" } } },
+    base: { repo: { name: "backend", full_name: "example-org/backend", owner: { login: "example-org" } } },
   };
   const { event, entities } = githubExtract({ pr });
-  assert.equal(event.id, "gh:JobLander-app/backend#262");
+  assert.equal(event.id, "gh:example-org/backend#262");
   assert.equal(event.source, "github");
   assert.equal(event.kind, "pr_merged");
   assert.equal(event.actor, "sorokinvj");
   assert.equal(event.ts, Date.parse("2026-07-17T12:00:00Z"));
-  assert.equal(event.raw_ref, "https://github.com/JobLander-app/backend/pull/262");
+  assert.equal(event.raw_ref, "https://github.com/example-org/backend/pull/262");
   assert.match(event.intent_text, /Cerebras hint fallback/);
   assert.match(event.intent_text, /decommission-safe/);
   assert.deepEqual(entities, [{ type: "repo", id: "backend" }]);
@@ -367,7 +366,7 @@ test("githubExtract: merged PR → gh id, repo entity, ts=merged_at, title+body 
 
 test("linearExtract: closed issue → linear id, issue_status, labels→entities (instance alias), closing comment in intent", () => {
   const issue: LinearIssueNode = {
-    identifier: "JOB-710",
+    identifier: "APP-710",
     title: "Retire AU",
     description: "Remove the AU LiveKit VM.",
     updatedAt: "2026-07-18T03:00:00Z",
@@ -378,7 +377,7 @@ test("linearExtract: closed issue → linear id, issue_status, labels→entities
     closingComment: "Instance deleted, monitor list updated.",
   };
   const { event, entities } = linearExtract({ issue });
-  assert.equal(event.id, "linear:JOB-710");
+  assert.equal(event.id, "linear:APP-710");
   assert.equal(event.kind, "issue_status");
   assert.equal(event.actor, "Atlas");
   assert.equal(event.ts, Date.parse("2026-07-18T03:00:00Z"));

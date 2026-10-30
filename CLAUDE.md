@@ -1,35 +1,28 @@
-# Self-Healing Loop — Project Rules
+# Project rules
 
-Project language: **English** (code, docs, commits, dashboards). Chat with the owner: Russian.
+Code, documentation, commits and dashboards use English.
 
-## LLM inference — subscription CLIs (owner directive, 2026-09-09)
+Work in a dedicated git worktree based on `origin/main`. Keep the main checkout
+untouched. Commit persistent changes with conventional commit subjects.
+Push feature branches and open pull requests; never push directly to main.
+Obtain an actual automated review of the current commit, resolve valid findings,
+and wait for passing CI before merging. A green status alone is not a review.
 
-The dispatcher uses Claude Agent SDK under the deployed Claude subscription as
-primary and Codex CLI under ChatGPT subscription authentication as its fallback.
-The same dispatcher constitution and tools apply to both providers. Fail over
-only on provider quota, authentication or availability failures; task failures
-must not be retried blindly. Cross-provider handover is a new session that
-rechecks durable ticket/PR state, never a claim to resume Claude's conversation.
+The reusable core contains no customer identifiers or product rules. Put those in
+`consumers/<name>/profile.json`, `targets.json`, `policy.md` and an optional Python
+monitor adapter. Test both the core and affected consumer adapters.
 
-No external inference API keys or separate metered API integrations. Monitor
-judgment remains inside its existing subscription CLI session. Deterministic
-collection, filtering, health checks and accounting do not invoke an LLM.
+Claude Agent SDK is primary; Codex CLI and OpenCode with OpenRouter are optional
+fallbacks. Collection, queue selection, false-positive checks, change ingestion,
+health probes and accounting are deterministic. Do not add separate model calls
+for those tasks. Never blindly retry a task failure with another model.
 
-### Consequence for Change Context (intent correlation)
+Linear is the durable source of ticket decisions. A false-positive verdict must
+label the original issue, preserve evidence and stop re-filing the same signature.
+Do not add a separate database for these decisions. SQLite remains local storage
+for the optional change feed.
 
-The correlation "is this anomaly explained by a recent intentional change?" is **not** a
-separate model call. It splits into:
-
-- **Ingest / normalization → deterministic.** Pulling PR bodies, cloud audit-log entries,
-  and closed-ticket text into `ChangeEvent` records is plain extraction, no LLM.
-- **The judgment → the dispatcher agent's own reasoning.** The dispatcher agent that already
-  investigates an incident reads the change feed as one more source (like logs or Linear) and
-  concludes "explained → decline / unexplained → fix." No extra call, same session, same token.
-
-See `docs/DESIGN-intent-correlation.md` and `docs/DESIGN-change-ingest-infra.md`.
-
-## Git worktree hygiene (owner directive, 2026-07-12)
-
-All code work happens in a dedicated git worktree off `origin/main`:
-`git worktree add .claude/worktrees/<task> -b worktree-<task> origin/main`.
-Never touch the main checkout. This rule is passed to every subagent that writes code.
+Deploy only through the repository's reviewed release workflow. Changes to the
+installer, Terraform and deployer require operator review. Tests and a local
+build do not prove a production deployment succeeded. Never restart a production
+runner as part of repository maintenance.

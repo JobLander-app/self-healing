@@ -1,12 +1,9 @@
-# Dedicated service account with MINIMAL grants. The legacy
-# joblander-agents VM runs as the project default compute SA — this module
-# deliberately breaks with that.
 
 resource "google_service_account" "agent" {
   project      = var.project_id
   account_id   = var.service_account_id
   display_name = "Self-healing loop VM (${var.vm_name})"
-  description  = "Dedicated SA for the self-healing loop VM. Minimal: log read/write, metric write, per-secret access, agent-logs bucket. JOB-731."
+  description  = "Dedicated SA for the self-healing loop VM. Minimal: log read/write, metric write, per-secret access, optional logs bucket."
 }
 
 # Project-level roles — only what the loop actually does:
@@ -18,12 +15,11 @@ resource "google_service_account" "agent" {
 #                        (ADC — no key file); dispatcher reads meetings/users
 #                        docs while investigating a bug. Read-only on purpose.
 resource "google_project_iam_member" "roles" {
-  for_each = toset([
+  for_each = toset(concat([
     "roles/logging.viewer",
     "roles/logging.logWriter",
     "roles/monitoring.metricWriter",
-    "roles/datastore.viewer",
-  ])
+  ], var.firebase_enabled ? ["roles/datastore.viewer"] : []))
 
   project = var.project_id
   role    = each.value
@@ -71,7 +67,13 @@ resource "google_secret_manager_secret_iam_member" "secrets" {
 # Session logs / QA reports / backups bucket — objectAdmin on this ONE
 # bucket, not project-wide storage roles.
 resource "google_storage_bucket_iam_member" "logs_bucket" {
+  count  = var.logs_bucket == "" ? 0 : 1
   bucket = var.logs_bucket
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.agent.email}"
+}
+
+moved {
+  from = google_storage_bucket_iam_member.logs_bucket
+  to   = google_storage_bucket_iam_member.logs_bucket[0]
 }

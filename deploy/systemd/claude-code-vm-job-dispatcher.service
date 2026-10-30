@@ -1,44 +1,18 @@
 [Unit]
-Description=Claude-Code-VM Job Dispatcher — autonomous self-poll fixer for JobLander 'monitor' tickets (self-healing loop)
+Description=Claude-Code-VM Job Dispatcher — autonomous self-poll fixer for configured monitor tickets (self-healing loop)
 After=network.target
 
-# Never stop restarting: this daemon is the fixer, an unattended crash loop is
-# still better than an unattended silence. Rate-limit visibility comes from
-# NRestarts in the CD verify and the Grafana panel, not from systemd giving up.
-#
-# This MUST live in [Unit]. It was written under [Service] on 2026-09-02, where
-# systemd 249 logged "Unknown key name 'StartLimitIntervalSec' in section
-# 'Service', ignoring" once an hour and silently kept the default 5-starts-in-10s
-# limit — so the guard against systemd abandoning the fixer was declared and
-# not in effect. Found by reading the unit's journal rather than the unit file.
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-User=joblander
-WorkingDirectory=/home/joblander/self-healing/dispatcher
-ExecStart=/usr/bin/node dist/index.js
+User=__AGENT_USER__
+WorkingDirectory=__AGENT_HOME__/self-healing/dispatcher
+ExecStart=/usr/bin/python3 __AGENT_HOME__/self-healing/config/run.py -- /usr/bin/node dist/index.js
 Restart=always
 RestartSec=10
-EnvironmentFile=/home/joblander/self-healing/dispatcher/.env
+EnvironmentFile=__AGENT_HOME__/self-healing/dispatcher/.env
 
-# ---- memory containment (incident 2026-08-26) -------------------------------
-# An investigation session reached 1.5 GB anon-rss with no limit above it and
-# took the host's memory — and with it the DHCP lease — down. The session tree
-# (this node process, the `claude` CLI it spawns, and the stdio MCP servers)
-# all inherit this cgroup, so the cap covers the whole run.
-#
-# MemoryHigh throttles and reclaims first: a session that drifts over 2.5 GB is
-# slowed, not killed, and usually finishes. MemoryMax is the hard wall — past
-# 3 GB the kernel OOM-kills inside THIS cgroup only.
-#
-# 2.5 GB, not 2 GB, because measurement said so: on the first day under caps a
-# normal run peaked at 1.41 GiB and the slice recorded 12,299 MemoryHigh events
-# with zero kills. Throttling healthy sessions to prove a point is not the goal;
-# stopping one from taking the host is. `Restart=always` then
-# brings the dispatcher back in 10 s; the ticket it held is released by the
-# stale-claim reaper. Losing one run is the cheap outcome. Losing the host's
-# network for six days was the expensive one.
 Slice=selfheal.slice
 MemoryAccounting=yes
 MemoryHigh=2500M

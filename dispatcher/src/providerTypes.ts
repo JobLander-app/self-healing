@@ -1,4 +1,4 @@
-export type Provider = "claude" | "codex";
+export type Provider = "claude" | "codex" | "opencode";
 export type FailureKind = "quota" | "throttle" | "auth" | "unavailable" | "task" | "timeout";
 
 /** input includes cache reads/writes; cachedInput is a subset, not additive. */
@@ -32,7 +32,7 @@ export interface ProviderAttempt {
    * claude-sdk-plus-transcript-estimate: the SDK total plus usage streamed
    *   after the last `result`, priced the same way.
    */
-  costSource: "claude-sdk-estimate" | "transcript-estimate" | "claude-sdk-plus-transcript-estimate" | "unavailable";
+  costSource: "opencode-estimate" | "claude-sdk-estimate" | "transcript-estimate" | "claude-sdk-plus-transcript-estimate" | "unavailable";
   turns: number;
 }
 export interface AttemptResult {

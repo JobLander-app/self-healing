@@ -17,7 +17,7 @@ test("extracts tool_use blocks from an assistant message", () => {
     assistant([
       { type: "text", text: "checking the logs" },
       { type: "tool_use", name: "Read", input: { file_path: "/tmp/x" } },
-      { type: "tool_use", name: "mcp__linear__update_issue", input: { id: "JOB-1" } },
+      { type: "tool_use", name: "mcp__linear__update_issue", input: { id: "APP-1" } },
     ])
   );
   assert.deepEqual(uses, [{ tool: "Read" }, { tool: "mcp__linear__update_issue" }]);

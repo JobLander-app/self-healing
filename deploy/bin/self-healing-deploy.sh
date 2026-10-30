@@ -4,20 +4,27 @@
 # from the network. Secrets, databases, traces and unrelated host files stay put.
 set -Eeuo pipefail
 
-SH_DIR="${SH_DIR:-/home/joblander/self-healing}"
-AGENT_USER="${AGENT_USER:-joblander}"
+# The installer writes only non-secret deployment settings here, owned by root.
+DEPLOY_ENV_FILE="${DEPLOY_ENV_FILE:-/etc/self-healing/deploy.env}"
+if [ -f "$DEPLOY_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$DEPLOY_ENV_FILE"
+fi
+if [ -z "${SH_DIR:-}" ]; then
+  echo "CD deferred: install a consumer profile and /etc/self-healing/deploy.env before this release" >&2
+  exit 0
+fi
+export SH_DIR
+AGENT_USER="${AGENT_USER:-selfheal}"
+SELF_HEALING_PROFILE="${SELF_HEALING_PROFILE:-/etc/self-healing/profile.json}"
+export SELF_HEALING_PROFILE
 LOG_FILE="${DEPLOY_LOG:-/var/log/self-healing-deploy.log}"
 NOTIFY="${DEPLOY_NOTIFY_SCRIPT:-$SH_DIR/deploy/bin/self-healing-notify.py}"
 SYSTEM_ROOT="${DEPLOY_SYSTEM_ROOT:-}"
 LOCK_FILE="${DEPLOY_LOCK_FILE:-/var/lock/self-healing-deploy.lock}"
-WATCH_LOCK="${DEPLOY_WATCH_LOCK:-/home/joblander/.output-watch.lock}"
-# The watcher tick starts at :00 of every minute and lasts seconds, and systemd
-# coalesces the 2-minute deploy timer onto minute boundaries too. Failing fast
-# on the watcher lock deferred every release after the 2026-10-13 boot, so a
-# busy lock is waited for briefly (the monitor lock still fails fast: it runs
-# for minutes).
+WATCH_LOCK="${DEPLOY_WATCH_LOCK:-/home/$AGENT_USER/.output-watch.lock}"
 WATCH_WAIT_SEC="${DEPLOY_WATCH_WAIT_SEC:-50}"
-MONITOR_LOCK="${DEPLOY_MONITOR_LOCK:-/tmp/joblander-Monitor.lock}"
+MONITOR_LOCK="${DEPLOY_MONITOR_LOCK:-/tmp/self-healing-monitor.lock}"
 METADATA_URL="${DEPLOY_METADATA_URL:-http://metadata.google.internal/computeMetadata/v1/instance/attributes}"
 TRANSACTION_FILE="${DEPLOY_TRANSACTION_FILE:-/var/lib/self-healing-deploy/transaction.env}"
 HEALTH_URL="${DEPLOY_HEALTH_URL:-http://localhost:4100/health}"
@@ -28,7 +35,25 @@ INGEST_UNIT="self-healing-change-ingest.service"
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG_FILE"; }
 as_agent() { sudo -u "$AGENT_USER" "$@"; }
 git_agent() { as_agent git -C "$SH_DIR" "$@"; }
-notify() { if [ -x "$NOTIFY" ]; then as_agent "$NOTIFY" "$1" >/dev/null 2>&1 || true; fi; }
+monitor_python() {
+  local source="$1" profile="$2"
+  shift 2
+  if [ -f "$source/config/run.py" ]; then
+    as_agent env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$source/monitor" \
+      python3 "$source/config/run.py" --profile "$profile" -- python3 "$@"
+  else
+    # Compatibility with releases from before consumer profiles existed.
+    as_agent env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$source/monitor" python3 "$@"
+  fi
+}
+notify_confirmed() {
+  if [ -f "$SH_DIR/config/run.py" ]; then
+    as_agent python3 "$SH_DIR/config/run.py" -- "$NOTIFY" "$1"
+  else
+    as_agent "$NOTIFY" "$1"
+  fi
+}
+notify() { if [ -x "$NOTIFY" ]; then notify_confirmed "$1" >/dev/null 2>&1 || true; fi; }
 # Lock the watcher (fd 7) so no tick runs mid-activation.
 lock_watcher() {
   flock -n 7 && return 0
@@ -88,8 +113,6 @@ REMOTE="$(git_agent rev-parse origin/main)"
 DIRTY="$(git_agent status --porcelain --untracked-files=no)"
 if [ -n "$DIRTY" ]; then
   log "deferring: tracked checkout changes need reconciliation"
-  # Only a human can reconcile, so say so once per blocked release. Silent,
-  # this held every release for 17 h on 2026-09-29 (a hot-patched file).
   BLOCKED_MARKER="$(dirname "$TRANSACTION_FILE")/blocked-notified"
   # The marker is written only after confirmed delivery (the notifier exits
   # non-zero unless Telegram returns a message id), so a failed send retries
@@ -99,7 +122,7 @@ if [ -n "$DIRTY" ]; then
   DIRTY_COUNT="$(grep -c . <<<"$DIRTY")"
   DIRTY_LIST="$(tr '\n' ' ' <<<"$DIRTY" | cut -c1-1500)"
   if [ "$(cat "$BLOCKED_MARKER" 2>/dev/null || true)" != "$REMOTE" ] && [ -x "$NOTIFY" ] &&
-    as_agent "$NOTIFY" "CD BLOCKED: ${REMOTE:0:8} not deployed, $DIRTY_COUNT tracked change(s) in $SH_DIR: $DIRTY_LIST" >/dev/null 2>&1; then
+    notify_confirmed "CD BLOCKED: ${REMOTE:0:8} not deployed, $DIRTY_COUNT tracked change(s) in $SH_DIR: $DIRTY_LIST" >/dev/null 2>&1; then
     install -d -m 700 "$(dirname "$BLOCKED_MARKER")"
     printf '%s\n' "$REMOTE" >"$BLOCKED_MARKER"
   fi
@@ -220,6 +243,23 @@ fi
 
 git_agent archive "$REMOTE" | tar -x -C "$TX/stage"
 chown -R "$AGENT_USER" "$TX/stage"
+# Refuse activation if the new release cannot read the selected consumer contract.
+stage_profile="$SELF_HEALING_PROFILE"
+if [ -f "$TX/stage/config/run.py" ]; then
+  profile_relative="$(python3 - "$SELF_HEALING_PROFILE" "$SH_DIR" <<'PYPROFILE'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1]).resolve()
+root = Path(sys.argv[2]).resolve()
+print(p.relative_to(root) if p.is_relative_to(root) else p)
+PYPROFILE
+)"
+  case "$profile_relative" in /*) stage_profile="$profile_relative" ;; *) stage_profile="$TX/stage/$profile_relative" ;; esac
+  python3 "$TX/stage/config/run.py" --profile "$stage_profile" --check >>"$LOG_FILE" 2>&1
+  while IFS= read -r template; do
+    python3 "$TX/stage/config/render.py" "$stage_profile" "$template" "$template"
+  done < <(find "$TX/stage/deploy/systemd" "$TX/stage/deploy/cron" "$TX/stage/deploy/grafana" -type f)
+fi
 for component in dispatcher watcher change-ingest; do
   if changed "$component/"; then
     log "staging $component"
@@ -242,7 +282,7 @@ done
 # Every shipped config has an exact target. Build union(old,new) to remove
 # deleted managed files and restore absent/present status during rollback.
 config_pair() { CONFIG_SOURCES+=("$1"); CONFIG_TARGETS+=("$SYSTEM_ROOT$2"); }
-if changed deploy/; then
+if changed deploy/ || changed consumers/ || changed config/; then
   while IFS= read -r file; do
     case "$file" in
       deploy/systemd/*) config_pair "$file" "/etc/systemd/system/${file##*/}" ;;
@@ -253,8 +293,6 @@ if changed deploy/; then
   done < <({ git_agent ls-tree -r --name-only "$REMOTE" -- deploy/systemd deploy/prometheus deploy/grafana deploy/caddy;
     git_agent diff --name-only --diff-filter=D "$LOCAL" "$REMOTE" -- deploy/systemd deploy/prometheus deploy/grafana deploy/caddy; } | sort -u)
 fi
-# Render environment-specific templates from the currently installed domain;
-# never overwrite a self-hoster's domain with a JobLander default.
 for ((i=0; i<${#CONFIG_SOURCES[@]}; i++)); do
   src="$TX/stage/${CONFIG_SOURCES[i]}"
   if [ -f "$src" ] && grep -q '__CONSOLE_DOMAIN__' "$src"; then
@@ -279,14 +317,6 @@ file.write_text(file.read_text().replace('__CONSOLE_DOMAIN__', sys.argv[2]))
 PYRENDER
   fi
 done
-# A Caddyfile is installed whole, so it must carry every vhost this host
-# serves. The Chatwoot vhost comes from the host's Terraform declaration
-# (instance metadata) through the renderer init.sh uses. When the declaration
-# cannot be read or is invalid, the release is deferred and retried, never
-# installed without a vhost it cannot account for: on 2026-10-13 a release
-# installed the console-only template and chat.joblander.app was down for an
-# hour. (Activating without the Caddyfile instead would advance the checkout
-# and lose this release's Caddy changes for good.)
 managed_config() {
   local source
   for source in ${CONFIG_SOURCES[@]+"${CONFIG_SOURCES[@]}"}; do [ "$source" = "$1" ] && return 0; done
@@ -318,7 +348,7 @@ if managed_config deploy/caddy/Caddyfile && [ -f "$TX/stage/deploy/caddy/Caddyfi
     # terraform apply) can fix the declaration.
     CADDY_BLOCKED_MARKER="$(dirname "$TRANSACTION_FILE")/caddy-blocked-notified"
     if [ "$(cat "$CADDY_BLOCKED_MARKER" 2>/dev/null || true)" != "$REMOTE" ] && [ -x "$NOTIFY" ] &&
-      as_agent "$NOTIFY" "CD BLOCKED: ${REMOTE:0:8} not deployed, $reason (instance metadata chatwoot-domain / chatwoot-upstream-port)" >/dev/null 2>&1; then
+      notify_confirmed "CD BLOCKED: ${REMOTE:0:8} not deployed, $reason (instance metadata chatwoot-domain / chatwoot-upstream-port)" >/dev/null 2>&1; then
       install -d -m 700 "$(dirname "$CADDY_BLOCKED_MARKER")"
       printf '%s\n' "$REMOTE" >"$CADDY_BLOCKED_MARKER"
     fi
@@ -353,7 +383,7 @@ config_changed deploy/grafana/ && RESTART_UNITS+=(grafana-server.service)
 config_changed deploy/caddy/ && RESTART_UNITS+=(caddy.service)
 for path in "${RUNTIME_DIRS[@]}"; do backup "$SH_DIR/$path"; done
 for path in "${CONFIG_TARGETS[@]}"; do backup "$path"; done
-if changed deploy/cron/self-healing.crontab; then
+if changed deploy/cron/self-healing.crontab || changed consumers/ || changed config/; then
   if crontab -u "$AGENT_USER" -l >"$TX/crontab"; then touch "$TX/cron-present"; fi
   touch "$TX/cron-snapshot"
 fi
@@ -368,8 +398,8 @@ fi
 # imports that newer legacy state. Established monitor state is never backed
 # up or removed: its live reports and suppressions must survive code rollback.
 if [ -f "$TX/stage/monitor/run_monitor.py" ]; then
-  monitor_target="$(as_agent env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$TX/stage/monitor" \
-    python3 -c 'from run_monitor import Config; print(Config.from_env().state_dir)')"
+  monitor_target="$(monitor_python "$TX/stage" "$stage_profile" \
+    -c 'from run_monitor import Config; print(Config.from_env().state_dir)')"
   [[ "$monitor_target" = /* && "$monitor_target" != / ]]
   if [ ! -e "$monitor_target" ] && [ ! -L "$monitor_target" ]; then
     ABSENT_PATHS+=("$monitor_target")
@@ -408,17 +438,17 @@ for ((i=0; i<${#CONFIG_SOURCES[@]}; i++)); do
     cmp -s "$src" "$target"
   else rm -f "$target"; fi
 done
-if changed deploy/cron/self-healing.crontab; then
-  crontab -u "$AGENT_USER" "$SH_DIR/deploy/cron/self-healing.crontab"
+if changed deploy/cron/self-healing.crontab || changed consumers/ || changed config/; then
+  crontab -u "$AGENT_USER" "$TX/stage/deploy/cron/self-healing.crontab"
   crontab -u "$AGENT_USER" -l >"$TX/cron-verify"
-  cmp -s "$SH_DIR/deploy/cron/self-healing.crontab" "$TX/cron-verify"
+  cmp -s "$TX/stage/deploy/cron/self-healing.crontab" "$TX/cron-verify"
 fi
 # Migration is a deterministic copy under the already-held monitor flock.
 # Do it before dispatcher startup can create the new suppression directory and
 # accidentally suppress copy-once migration of the legacy monitor history.
 if [ -f "$SH_DIR/monitor/run_monitor.py" ]; then
-  as_agent env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SH_DIR/monitor" \
-    python3 -c 'from run_monitor import Config, migrate_state; migrate_state(Config.from_env())'
+  monitor_python "$SH_DIR" "$SELF_HEALING_PROFILE" \
+    -c 'from run_monitor import Config, migrate_state; migrate_state(Config.from_env())'
   log "monitor state migration checked before dispatcher restart"
 fi
 systemctl daemon-reload

@@ -5,10 +5,8 @@ import { execFileSync } from "child_process";
 const LINEAR_API_URL = "https://api.linear.app/graphql";
 const CHARACTER_LIMIT = 25000;
 
-// Secret Manager fallback — used when LINEAR_API_KEY* env vars are absent so
-// the dispatcher need not pass the key via --mcp-config argv (JOB-916).
-const LINEAR_SECRET = "linear-api-key";
-const GCP_PROJECT = (process.env.GCP_PROJECT_ID || "meet-assistant-6d8ad").trim();
+const LINEAR_SECRET = process.env.LINEAR_API_KEY_SECRET || "linear-api-key";
+const GCP_PROJECT = (process.env.GCP_PROJECT_ID || process.env.GCP_PROJECT || "").trim();
 const FETCH_TIMEOUT_MS = 15_000;
 
 // ── Per-request context (agent key selection) ────────────
@@ -37,10 +35,6 @@ function loadKeys() {
     if (key) ALL_KEYS.push(key);
   }
 
-  // When no key is found in env, fall back to Secret Manager (JOB-916).
-  // This mirrors the sentry MCP's gcloud-fallback pattern and avoids the
-  // dispatcher having to pass LINEAR_API_KEY via --mcp-config argv (where it
-  // is readable by any user on the host via `ps` / /proc/<pid>/cmdline).
   if (ALL_KEYS.length === 0) {
     try {
       const key = execFileSync(
@@ -166,10 +160,7 @@ function formatIssue(issue) {
   };
 }
 
-/**
- * Resolve an issue identifier (e.g. "JOB-123") to a UUID.
- * If the input is already a UUID, returns it as-is.
- */
+
 async function resolveIssueId(idOrIdentifier) {
   if (
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
@@ -223,7 +214,7 @@ export function registerTools(server) {
       description: `List Linear issues with optional filters. Returns issue summaries sorted by updatedAt.
 
 Args:
-  - team (string, optional): Filter by team name or key (e.g. "JobLander" or "JOB").
+  - team (string, optional): Filter by team name or key (e.g. "Example" or "APP").
   - state (string, optional): Filter by workflow state name (e.g. "To Do", "In Progress", "Done", "QA").
   - assignee (string, optional): Filter by assignee display name (case-insensitive contains).
   - labels (array of strings, optional): Filter by label names.
@@ -233,8 +224,8 @@ Returns:
   { "count": number, "issues": [{ "id", "identifier", "title", "priority", "priorityLabel", "state", "assignee", "labels", "project", "cycle", "createdAt", "updatedAt", "url" }] }
 
 Examples:
-  - All team issues: { "team": "JobLander" }
-  - Issues in state: { "team": "JOB", "state": "In Progress" }
+  - All team issues: { "team": "Example" }
+  - Issues in state: { "team": "APP", "state": "In Progress" }
   - By assignee: { "assignee": "Vlad" }
 
 Error Handling:
@@ -337,20 +328,20 @@ Error Handling:
       description: `Get full details of a Linear issue by ID or identifier, including description, children, parent, labels, and more.
 
 Args:
-  - id (string, required): Issue ID (UUID) or identifier (e.g. "JOB-123").
+  - id (string, required): Issue ID (UUID) or identifier (e.g. "APP-123").
 
 Returns:
   { "id", "identifier", "title", "description", "priority", "priorityLabel", "state", "assignee", "labels", "project", "cycle", "parent", "children", "estimate", "createdAt", "updatedAt", "url" }
 
 Examples:
-  - By identifier: { "id": "JOB-123" }
+  - By identifier: { "id": "APP-123" }
   - By UUID: { "id": "550e8400-e29b-41d4-a716-446655440000" }
 
 Error Handling:
   - "Issue not found" — the identifier or UUID does not match any issue.
   - "Invalid issue identifier" — format must be TEAM-123 or a valid UUID.`,
       inputSchema: {
-        id: z.string().min(1).describe("Issue ID (UUID) or identifier (e.g. 'JOB-123')"),
+        id: z.string().min(1).describe("Issue ID (UUID) or identifier (e.g. 'APP-123')"),
       },
       annotations: {
         readOnlyHint: true,
@@ -490,7 +481,7 @@ Error Handling:
       description: `Update fields on an existing Linear issue. Only provided fields are changed; omitted fields remain unchanged.
 
 Args:
-  - id (string, required): Issue ID (UUID) or identifier (e.g. "JOB-123").
+  - id (string, required): Issue ID (UUID) or identifier (e.g. "APP-123").
   - title (string, optional): New title.
   - description (string, optional): New description (markdown).
   - stateId (string, optional): New workflow state ID. Use list_states to find it.
@@ -504,14 +495,14 @@ Returns:
   { "updated": true, "id": string, "identifier": string, "title": string, "state": string, "priority": string, "assignee": string, "url": string }
 
 Examples:
-  - Change state: { "id": "JOB-123", "stateId": "uuid-of-in-progress" }
-  - Change priority: { "id": "JOB-123", "priority": 1 }
+  - Change state: { "id": "APP-123", "stateId": "uuid-of-in-progress" }
+  - Change priority: { "id": "APP-123", "priority": 1 }
 
 Error Handling:
   - "Issue not found" — identifier does not match any issue.
   - "Failed to update issue" — check that field values (stateId, assigneeId) are valid UUIDs.`,
       inputSchema: {
-        id: z.string().min(1).describe("Issue ID (UUID) or identifier (e.g. 'JOB-123')"),
+        id: z.string().min(1).describe("Issue ID (UUID) or identifier (e.g. 'APP-123')"),
         title: z.string().optional().describe("New title"),
         description: z.string().optional().describe("New description (markdown)"),
         stateId: z.string().optional().describe("New workflow state ID"),
@@ -585,18 +576,18 @@ Error Handling:
       description: `List all comments on a Linear issue, ordered by creation time.
 
 Args:
-  - issueId (string, required): Issue ID (UUID) or identifier (e.g. "JOB-123").
+  - issueId (string, required): Issue ID (UUID) or identifier (e.g. "APP-123").
 
 Returns:
   { "count": number, "comments": [{ "id": string, "body": string, "author": string, "createdAt": string, "updatedAt": string }] }
 
 Examples:
-  - By identifier: { "issueId": "JOB-123" }
+  - By identifier: { "issueId": "APP-123" }
 
 Error Handling:
   - "Issue not found" — the identifier or UUID does not match any issue.`,
       inputSchema: {
-        issueId: z.string().min(1).describe("Issue ID (UUID) or identifier (e.g. 'JOB-123')"),
+        issueId: z.string().min(1).describe("Issue ID (UUID) or identifier (e.g. 'APP-123')"),
       },
       annotations: {
         readOnlyHint: true,
@@ -644,21 +635,21 @@ Error Handling:
       description: `Add a comment to a Linear issue. Supports markdown formatting.
 
 Args:
-  - issueId (string, required): Issue ID (UUID) or identifier (e.g. "JOB-123").
+  - issueId (string, required): Issue ID (UUID) or identifier (e.g. "APP-123").
   - body (string, required): Comment body in markdown.
 
 Returns:
   { "created": true, "id": string, "body": string, "author": string, "createdAt": string }
 
 Examples:
-  - Simple: { "issueId": "JOB-123", "body": "Fixed in PR #42" }
-  - With markdown: { "issueId": "JOB-123", "body": "## QA Report\\n- [x] Login works\\n- [ ] Signup broken" }
+  - Simple: { "issueId": "APP-123", "body": "Fixed in PR #42" }
+  - With markdown: { "issueId": "APP-123", "body": "## QA Report\\n- [x] Login works\\n- [ ] Signup broken" }
 
 Error Handling:
   - "Issue not found" — the identifier does not match any issue.
   - "Failed to create comment" — check issueId is valid.`,
       inputSchema: {
-        issueId: z.string().min(1).describe("Issue ID (UUID) or identifier (e.g. 'JOB-123')"),
+        issueId: z.string().min(1).describe("Issue ID (UUID) or identifier (e.g. 'APP-123')"),
         body: z.string().min(1).describe("Comment body (markdown)"),
       },
       annotations: {

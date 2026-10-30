@@ -1,6 +1,3 @@
-# Grafana datasource provisioning (JOB-731 observability v1).
-# Installed to /etc/grafana/provisioning/datasources/prometheus.yml.
-# The local Prometheus is the default (and only) datasource.
 apiVersion: 1
 
 datasources:

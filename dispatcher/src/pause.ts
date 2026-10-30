@@ -16,7 +16,6 @@ import * as fs from "fs";
 import * as path from "path";
 import { config } from "./config";
 
-// Sits next to the turn traces: /var/log/claude-code-vm-job-dispatcher/pause.json
 const PAUSE_FILE = path.join(path.dirname(config.logDir), "pause.json");
 
 export interface PauseState {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Standalone hourly monitor. No workspace launcher, manager context or git pulls."""
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import argparse
 import fcntl
@@ -18,9 +18,10 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+from false_positives import decisions, matching
 from topology import load_targets, retirement, revision
 
-PROJECT = "meet-assistant-6d8ad"
+PROJECT = os.environ.get("GCP_PROJECT", "")
 MONITOR_DIR = Path(__file__).resolve().parent
 ESCALATION_ACTIONS = {"telegram_p0_and_linear", "linear_create_if_no_dup", "linear_ensure_open_issue"}
 def retire_pending(config, pending, kind, now=None):
@@ -73,7 +74,7 @@ class Config:
     state_dir: Path
     legacy_dirs: tuple
     # Same as the old launcher: migration waits for an in-flight legacy session.
-    lock_file: Path = Path("/tmp/joblander-Monitor.lock")
+    lock_file: Path = Path("/tmp/self-healing-monitor.lock")
     provider_log_dir: Path = Path("/var/log/self-healing-monitor/turns")
     metrics_file: Path = Path("/var/lib/node_exporter/textfile/selfheal_monitor.prom")
     max_seconds: int = 1800
@@ -83,7 +84,8 @@ class Config:
         home = Path.home()
         return cls(
             state_dir=Path(os.environ.get("MONITOR_STATE_DIR", str(home / ".local/state/self-healing/monitor"))).resolve(),
-            legacy_dirs=(home / "workspace/teams/logs/monitoring", home / "joblander/workspace/teams/logs/monitoring"),
+            legacy_dirs=tuple(Path(p) for p in os.environ.get("MONITOR_LEGACY_DIRS", "").split(":") if p),
+            lock_file=Path(os.environ.get("MONITOR_LOCK_FILE", "/tmp/self-healing-monitor.lock")),
             provider_log_dir=Path(os.environ.get("MONITOR_LOG_DIR", "/var/log/self-healing-monitor/turns")),
             metrics_file=Path(os.environ.get("MONITOR_METRICS_FILE", "/var/lib/node_exporter/textfile/selfheal_monitor.prom")),
         )
@@ -162,6 +164,11 @@ def prepare_escalations(config, summary):
         pending.pop(suppressed["signature"], None)
     for item in summary["escalations"]:
         pending[item["signature"]] = {**item, "prepared_at": summary["timestamp"]}
+    # Triage already advanced its baseline. Persist new work before a remote
+    # lookup can fail, or a stable P2 will become report-only and disappear.
+    write_json(path, pending)
+    rules = decisions()
+    pending = {key: item for key, item in pending.items() if not matching(key, item.get("severity"), rules)}
     pending = retire_pending(config, pending, "signature_prefixes")
     write_json(path, pending)
     batch = {**summary, "escalations": list(pending.values())}
@@ -173,11 +180,12 @@ def acknowledge_escalations(config, batch, actions):
     """A final marker alone is not coverage: acknowledge recorded outcomes only."""
     required = {item["signature"] for item in batch["escalations"]}
     covered = {signature for signature, issue in actions.get("issue_by_signature", {}).items()
-               if isinstance(issue, str) and re.fullmatch(r"JOB-[1-9]\d*|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", issue)}
+               if isinstance(issue, str) and re.fullmatch(r"[A-Z][A-Z0-9]*-[1-9]\d*|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", issue)}
     for duplicate in actions.get("pr_duplicates", []):
         if (isinstance(duplicate, dict) and isinstance(duplicate.get("signature"), str)
                 and isinstance(duplicate.get("url"), str)
-                and re.fullmatch(r"https://github\.com/JobLander-app/[^/]+/pull/[1-9]\d*", duplicate["url"])):
+                and re.fullmatch(r"https://github\.com/[^/]+/[^/]+/pull/[1-9]\d*", duplicate["url"])
+                and "/".join(duplicate["url"].split("/")[3:5]) in os.environ.get("TRACKED_REPOS", "").split(",")):
             covered.add(duplicate["signature"])
     path = config.state_dir / "linear-outbox.json"
     pending = json.loads(path.read_text())
@@ -193,7 +201,7 @@ def telegram_credentials():
         return token, chat
     # Existing credential retains its historical name; no workspace file needed.
     values = {}
-    for line in secret("self-healing-workspace-env").splitlines():
+    for line in secret(os.environ.get("TELEGRAM_ENV_SECRET", "self-healing-telegram-env")).splitlines():
         key, sep, value = line.removeprefix("export ").strip().partition("=")
         if sep and key in {"TG_BOT_TOKEN", "TG_CHAT_ID"}:
             parsed = shlex.split(value, comments=True)
@@ -320,7 +328,7 @@ def run_session(config):
     log_dir = config.state_dir / "sessions"
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ") + ".jsonl")
-    prompt = (MONITOR_DIR / "prompt.md").read_text() + "\n\nCurrent UTC: " + timestamp()
+    prompt = (MONITOR_DIR / "prompt.md").read_text() + "\n\nConsumer policy:\n" + Path(os.environ["CONSUMER_POLICY_FILE"]).read_text() + "\nLinear team: " + os.environ["LINEAR_TEAM"] + "\nApproved repositories: " + os.environ["TRACKED_REPOS"] + "\n\nCurrent UTC: " + timestamp()
     failure = None
     with open(log_file, "w") as output:
         process = subprocess.Popen(["node", str(MONITOR_DIR.parent / "dispatcher/dist/providerCli.js")],
@@ -420,6 +428,13 @@ def write_metrics(config, result):
 
 
 def run_once(config, collector=collect, session_runner=run_session, pager=send_p0, publisher=publish_heartbeat):
+    dry_run = os.environ.get("DRY_RUN") == "true"
+    if dry_run:
+        # Preview observations must not advance the live eligibility baseline,
+        # consume pending deliveries, or overwrite live health/metrics.
+        preview = config.state_dir / "dry-run"
+        preview.mkdir(parents=True, exist_ok=True)
+        config = replace(config, state_dir=preview, legacy_dirs=(), metrics_file=preview / "metrics.prom")
     result = {"startedAt": timestamp(), "finishedAt": None, "status": "failed", "llmSkipped": True,
               "triageAt": None, "telegramSent": [], "attempts": [], "errors": []}
     try:
@@ -427,38 +442,42 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
             raise RuntimeError("triage collection failed")
         summary = load_triage(config)
         result["triageAt"] = summary["timestamp"]
-        batch = prepare_escalations(config, summary)
-        sent, failures = deliver_pending(config, summary["p0_alerts"], pager)
-        result["telegramSent"].extend(sent)
-        result["errors"].extend(failures)
-        actions = {"linear_created": [], "linear_commented": [], "issue_by_signature": {}}
-        if batch["escalations"]:
-            result["llmSkipped"] = False
-            provider_result = session_runner(config)
-            result["attempts"] = provider_result["attempts"]
-            if provider_result.get("error"):
-                result["errors"].append(provider_result["error"])
-            actions = provider_result.get("actions", actions)
-            result["actions"] = actions
-            if actions.get("errors"):
-                result["errors"].append("monitor action record contains unresolved errors")
-        report_path = config.state_dir / "latest-report.json"
-        report = json.loads(report_path.read_text())
-        report["actions"] = {"telegram_sent": result["telegramSent"],
-                             "linear_created": actions["linear_created"], "linear_commented": actions["linear_commented"]}
-        for group in report.get("error_groups", []):
-            if group["signature"] in actions.get("issue_by_signature", {}):
-                group["linear_issue"] = actions["issue_by_signature"][group["signature"]]
-        write_json(report_path, report)
-        if batch["escalations"]:
-            result["pendingSignatures"] = acknowledge_escalations(config, batch, actions)
-            if result["pendingSignatures"]:
-                result["errors"].append("escalations lack recorded outcomes: " + ", ".join(result["pendingSignatures"]))
-        if not result["errors"]:
+        if dry_run:
             result["status"] = "success"
+            result["dryRun"] = True
+        else:
+            sent, failures = deliver_pending(config, summary["p0_alerts"], pager)
+            result["telegramSent"].extend(sent)
+            result["errors"].extend(failures)
+            batch = prepare_escalations(config, summary)
+            actions = {"linear_created": [], "linear_commented": [], "issue_by_signature": {}}
+            if batch["escalations"]:
+                result["llmSkipped"] = False
+                provider_result = session_runner(config)
+                result["attempts"] = provider_result["attempts"]
+                if provider_result.get("error"):
+                    result["errors"].append(provider_result["error"])
+                actions = provider_result.get("actions", actions)
+                result["actions"] = actions
+                if actions.get("errors"):
+                    result["errors"].append("monitor action record contains unresolved errors")
+            report_path = config.state_dir / "latest-report.json"
+            report = json.loads(report_path.read_text())
+            report["actions"] = {"telegram_sent": result["telegramSent"],
+                                 "linear_created": actions["linear_created"], "linear_commented": actions["linear_commented"]}
+            for group in report.get("error_groups", []):
+                if group["signature"] in actions.get("issue_by_signature", {}):
+                    group["linear_issue"] = actions["issue_by_signature"][group["signature"]]
+            write_json(report_path, report)
+            if batch["escalations"]:
+                result["pendingSignatures"] = acknowledge_escalations(config, batch, actions)
+                if result["pendingSignatures"]:
+                    result["errors"].append("escalations lack recorded outcomes: " + ", ".join(result["pendingSignatures"]))
+            if not result["errors"]:
+                result["status"] = "success"
     except Exception as error:
         result["errors"].append(str(error))
-        if result["triageAt"] is None:
+        if result["triageAt"] is None and not dry_run:
             try:
                 sent, failures = deliver_pending(config, [], pager)
                 result["telegramSent"].extend(sent)
@@ -466,7 +485,7 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
             except (ValueError, OSError) as outbox_error:
                 result["errors"].append(f"P0 outbox retry failed: {outbox_error}")
     result["finishedAt"] = timestamp()
-    result["heartbeatPublished"] = publisher(result)
+    result["heartbeatPublished"] = False if dry_run else publisher(result)
     write_json(config.state_dir / "last-session.json", result)
     try:
         write_metrics(config, result)

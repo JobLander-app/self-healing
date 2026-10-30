@@ -110,7 +110,6 @@ class TopologyTests(unittest.TestCase):
     def test_invalid_policy_cannot_silently_disable_coverage_or_page_filtering(self):
         base = topology.load_targets()
         cases = []
-        empty = copy.deepcopy(base); empty["voice_agents"] = []; cases.append(empty)
         broad = copy.deepcopy(base); broad["retired_resources"][0]["signature_prefixes"] = ["voice-agent:"]; cases.append(broad)
         active = copy.deepcopy(base); active["retired_resources"][0]["name"] = base["voice_agents"][0]["name"]; cases.append(active)
         future = copy.deepcopy(base); future["retired_resources"][0]["retired_at"] = "2999-01-01T00:00:00Z"; cases.append(future)

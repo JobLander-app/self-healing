@@ -1,4 +1,4 @@
-"""Regression replays for JOB-952/953; no network or model execution."""
+"""Regression coverage: test triage signals."""
 
 import copy
 import datetime
@@ -192,7 +192,6 @@ class SignalTests(unittest.TestCase):
                 self.assertTrue(all(g.get("request_context") for g in groups.values()))
 
     def billing_log(self, message, region="asia-south1", service="joblander-audio-engine"):
-        # Shape of the real 2026-09-29T16:34:42Z entry: winston nests the message.
         return {
             "resource": {"labels": {"service_name": service, "location": region}},
             "severity": "ERROR", "timestamp": "2026-09-29T16:34:42Z",
@@ -213,7 +212,7 @@ class SignalTests(unittest.TestCase):
                 self.assertEqual(items[0]["severity"], "P2")
                 self.assertEqual(items[0]["action"], "linear_create_if_no_dup")
 
-    def test_billing_floor_is_scoped_to_the_audio_engine_ledger(self):
+    def test_ensure_open_issue_is_scoped_to_the_audio_engine_ledger(self):
         groups = self.collect_requests([
             self.billing_log("Failed to deduct balance atomically", service="joblander-app"),
             self.billing_log("Failed to deduct balance atomically later"),
@@ -235,7 +234,7 @@ class SignalTests(unittest.TestCase):
                 self.assertEqual(item["diff_status"], "recurring")
                 self.assertEqual(item["action"], expected)
 
-    def test_billing_floor_never_lowers_a_spike(self):
+    def test_ensure_open_issue_never_lowers_a_spike(self):
         groups = self.collect_requests([self.billing_log("Failed to deduct balance atomically")] * 101)
         self.assertEqual(self.escalations(groups)[1][0]["severity"], "P1")
 

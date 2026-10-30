@@ -1,13 +1,4 @@
-"""Regression tests for the per-signature cooldown gate (JOB-858).
-
-These tests exercise the two functions added to triage.py for the cooldown gate
-without requiring any external services (Linear API is mocked).
-
-Replay scenarios from the ticket evidence (2026-07-27):
-  - JOB-840 filed 07:03, closed Canceled 07:26 → JOB-843 filed 10:02 (same sig)
-  - JOB-838 filed prior, closed Done 08:31 → JOB-844 filed 10:02 (same sig)
-Both should have been suppressed by the cooldown gate; these tests verify that.
-"""
+"""Regression coverage: test triage cooldown."""
 
 import datetime
 import io
@@ -72,12 +63,9 @@ class TestBuildEscalationsCooldown(unittest.TestCase):
             p0, esc = triage.build_escalations(final_groups, cooldowns or {})
         return p0, esc
 
-    # -----------------------------------------------------------------------
-    # Replay: JOB-840 → JOB-843 (Canceled 2.6h before re-check, P2 recurring)
-    # -----------------------------------------------------------------------
 
     def test_job840_843_suppressed(self):
-        """Signature closed Canceled 2.6h ago → no new ticket (JOB-843 prevented)."""
+        """Regression coverage: test job840 843 suppressed."""
         cooldowns = {
             SIG_STT: {
                 "state_type": "canceled",
@@ -96,12 +84,9 @@ class TestBuildEscalationsCooldown(unittest.TestCase):
         self.assertAlmostEqual(suppressed[0]["cooldown"]["age_h"], 2.6, delta=0.1)
         self.assertEqual(len(active), 0, "Must not produce any filing escalation")
 
-    # -----------------------------------------------------------------------
-    # Replay: JOB-838 → JOB-844 (Done 1.5h before re-check, P1 recurring)
-    # -----------------------------------------------------------------------
 
     def test_job838_844_suppressed(self):
-        """Signature closed Done 1.5h ago → no new ticket (JOB-844 prevented)."""
+        """Regression coverage: test job838 844 suppressed."""
         cooldowns = {
             SIG_STT_2: {
                 "state_type": "completed",
@@ -275,9 +260,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-# ---------------------------------------------------------------------------
-# Review findings on PR #22 (Codex, 2026-07-28). Each test fails without its fix.
-# ---------------------------------------------------------------------------
 
 def _node(ident, sig, state_type, *, completed=None, canceled=None, updated=None, priority=2):
     return {

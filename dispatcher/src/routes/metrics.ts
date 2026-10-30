@@ -7,10 +7,6 @@ import { renderMetrics } from "../metrics";
 
 const router = Router();
 
-// GET /metrics — Prometheus text exposition (JOB-731 → free-core observability
-// v1). Localhost scrape only: Prometheus scrapes localhost and the VM sits
-// behind the IAP firewall, so no auth is applied here. Emits the 0.0.4 text
-// format content-type so node_exporter/Prometheus parse it directly.
 router.get("/", (_req: Request, res: Response) => {
   const body = renderMetrics({
     busy: isBusy(),

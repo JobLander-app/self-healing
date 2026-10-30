@@ -1,26 +1,4 @@
-/**
- * Dispatcher dependency healthcheck (JOB-731 follow-up).
- *
- * Ported from the proven handy-daemon pattern
- * (handy-daemon/src/healthcheck.ts) but pointed INWARD: instead of alerting a
- * human to go fix a downed MCP, on failure it files a Linear ticket that the
- * dispatcher's OWN poll loop picks up (`monitor` label) and repairs — the
- * self-healing loop healing its own toolchain.
- *
- * CRITICAL: like handy's, this runs entirely OUTSIDE the agent — plain Node
- * fetch / child_process / stdio JSON-RPC, NEVER via Claude tools. A healthcheck
- * that needed the agent to run couldn't verify the agent's dependencies.
- *
- * The five dependencies the dispatch session actually leans on:
- *   1. firebase MCP  — real Firestore reads during investigation (ADC + datastore.viewer)
- *   2. sentry MCP    — Sentry issue lookups (sentry token)
- *   3. gcp/gcloud    — `gcloud logging read` is the primary investigation channel (SA log access)
- *   4. claude-oauth  — the OAuth token the agent session authenticates with
- *   5. linear        — the work queue + the durable `In Progress` claim
- *
- * Every probe is individually try/caught and time-bounded; the whole run is
- * wrapped so a hang or throw can never wedge the poll loop or crash the daemon.
- */
+
 
 import * as cron from "node-cron";
 import { spawn, execFile } from "child_process";
@@ -28,7 +6,7 @@ import { promisify } from "util";
 import * as path from "path";
 import {
   config,
-  LINEAR_JOB_TEAM_ID,
+  LINEAR_TEAM_ID,
   LINEAR_MONITOR_LABEL_ID,
   LINEAR_API_KEY_SECRET,
   SENTRY_TOKEN_SECRET,
@@ -281,30 +259,6 @@ async function probeFirebase(): Promise<string> {
 }
 
 async function probeSentry(): Promise<string> {
-  // stdio MCP: initialize → tools/list(>0) → sentry_list_issues (not isError).
-  // Exercises the sentry token (SENTRY_TOKEN env or Secret Manager).
-  //
-  // Token pre-resolution (mirrors probeLinear pattern): resolve the Sentry
-  // token HERE, outside the MCP probe budget, so the child process finds
-  // SENTRY_TOKEN already in env via buildMcpEnv() and skips its own gcloud
-  // call.  Without this, the child's getToken() calls gcloud (≤ 15 s) then
-  // sentryGet() calls the Sentry API (≤ 15 s), and BOTH happen inside the
-  // probe budget — two sequential 15 s operations inside a single 15 s window
-  // is the direct cause of the "tools/call: timed out" at the 12:00 healthcheck
-  // (observed: sentry probe took exactly 15 002 ms, JOB-808).
-  // With pre-resolution the budget only needs to cover spawn + MCP handshake +
-  // Sentry API fetch (≤ 20 s in mcp/sentry/tools.js FETCH_TIMEOUT_MS).
-  // Budget set to 28 s: spawn + handshake ~1-2 s + HTTP fetch max 20 s +
-  // 6 s headroom.  (JOB-878: inner 15 s HTTP timeout fired while the outer
-  // 20 s budget still had headroom — both values raised together to eliminate
-  // the mismatch.)
-  //
-  // 429 retry (JOB-1119): the hourly monitor's collect_sentry() and the
-  // 6-hourly healthcheck probe overlap at :00 UTC — both use the same Sentry
-  // token and the monitor's 7d/100 query can exhaust the rate-limit budget.
-  // A 429 clears within seconds; retry once after SENTRY_429_RETRY_MS before
-  // reporting "sentry down". Token is already cached, so the retry only pays
-  // for spawn + handshake + HTTP fetch (budget unchanged at 28 s).
   const SENTRY_429_RETRY_MS = 5_000;
   await resolveSentryToken();
   const probeOnce = () => probeMcp({
@@ -363,8 +317,8 @@ async function probeLinear(): Promise<string> {
 }
 
 const PROBES: Array<{ dep: string; run: () => Promise<string> }> = [
-  { dep: "firebase", run: probeFirebase },
-  { dep: "sentry", run: probeSentry },
+  ...(config.firebaseEnabled ? [{ dep: "firebase", run: probeFirebase }] : []),
+  ...(config.sentryEnabled ? [{ dep: "sentry", run: probeSentry }] : []),
   { dep: "gcp", run: probeGcloud },
   { dep: "linear", run: probeLinear },
 ];
@@ -394,7 +348,7 @@ function selfHealTitle(dep: string): string {
 
 async function openSelfHealTicketExists(input: { key: string; dep: string }): Promise<boolean> {
   const filter = {
-    team: { id: { eq: LINEAR_JOB_TEAM_ID } },
+    team: { id: { eq: LINEAR_TEAM_ID } },
     labels: { name: { eq: "monitor" } },
     title: { contains: selfHealTitle(input.dep) },
     // "open" = not completed / not canceled.
@@ -432,7 +386,7 @@ async function fileSelfHealTicket(input: { key: string; dep: string; detail: str
       query: "mutation($i:IssueCreateInput!){ issueCreate(input:$i){ success issue{ identifier } } }",
       variables: {
         i: {
-          teamId: LINEAR_JOB_TEAM_ID,
+          teamId: LINEAR_TEAM_ID,
           title: selfHealTitle(input.dep),
           description: `${input.detail}\n\ncheck mcp/${input.dep}/ or the SA roles / secret; fix and PR`,
           labelIds: [LINEAR_MONITOR_LABEL_ID],
@@ -523,8 +477,10 @@ export async function runHealthcheck(): Promise<HealthcheckSnapshot> {
       (failures.length > 0 ? ` — DOWN: ${failures.map((f) => f.dep).join(", ")}` : ""),
   );
 
-  for (const failure of failures) await handleFailure(failure);
-  await notifyHealthcheckRecovery(results);
+  if (!config.dryRun) {
+    for (const failure of failures) await handleFailure(failure);
+    await notifyHealthcheckRecovery(results);
+  }
 
   return snapshot;
 }

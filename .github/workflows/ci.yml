@@ -1,11 +1,3 @@
-# CI for the self-healing loop.
-#
-# Every package that ships to the VM is built here. This is the gate that makes
-# pull-based CD safe: deploy/bin/self-healing-deploy.sh trusts origin/main
-# blindly, so origin/main must never carry code that fails to compile.
-#
-# Until 2026-07-28 only the watcher was built — the dispatcher, the component
-# that autonomously merges to production repos, had no CI at all.
 name: CI
 
 on:
@@ -55,9 +47,6 @@ jobs:
       - name: Typecheck + build
         run: npm run build
       - name: Unit tests
-        # The dispatcher had no tests until 2026-07-31, which is how a check
-        # against a message type the SDK does not have survived 143 runs
-        # producing zero trace events without anyone noticing.
         run: npm test
 
   change-ingest:
@@ -92,7 +81,10 @@ jobs:
       - name: Lint (syntax check)
         run: python3 -m py_compile monitor/triage.py monitor/run_monitor.py monitor/topology.py dispatcher/scripts/codex-session.py
       - name: Unit tests
-        run: python3 -m unittest discover -s monitor -p "test_*.py" -v
+        run: |
+          python3 -m unittest discover -s monitor -p "test_*.py" -v
+          python3 -m unittest discover -s config -p "test_*.py" -v
+          PYTHONPATH=monitor python3 config/run.py --profile consumers/joblander/profile.json -- python3 -m unittest discover -s consumers/joblander/test -p "test_*.py" -v
 
   deploy-script:
     name: deploy script (shellcheck)
@@ -141,12 +133,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: systemd-analyze verify
-        # Catches directives systemd silently ignores. StartLimitIntervalSec was
-        # shipped under [Service] on 2026-09-02, where systemd logs "Unknown key
-        # name ... ignoring" and keeps the default — the guard read as present in
-        # the file and was not in effect.
         run: |
           set -uo pipefail
+          for file in deploy/systemd/*; do
+            python3 config/render.py consumers/example/profile.json "$file" "$file"
+          done
 
           # A guard that cannot fail is not a guard. Prove the detection works
           # before trusting a clean result: feed systemd-analyze the exact

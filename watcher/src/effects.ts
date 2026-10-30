@@ -48,8 +48,6 @@ export const buildRealEffects = ({
   config: WatchConfig;
   secretReader: SecretReader;
 }): TickEffects => ({
-  // JOB-731: direct plain-text Telegram send (no parse_mode), notify.sh as
-  // fallback, PAGE_FAILED log when both fail — see telegram.ts.
   notifyOwner: buildNotifyOwner({ config, env: process.env }),
 
   createLinearTicket: async ({ incidentId, status, httpCode, regions }) => {
@@ -74,9 +72,9 @@ export const buildRealEffects = ({
     if (!Array.isArray(existing.issues?.nodes)) throw new Error("Malformed Linear lookup response");
     if (existing.issues.nodes[0]?.identifier) return existing.issues.nodes[0].identifier as string;
     const { title, description } = buildLinearTicket({ status, httpCode, regions });
-    const created = await gql<{ issueCreate?: { success?: boolean; issue?: { identifier?: string } } }>(LINEAR_MUTATION, { i: { id: incidentId, teamId: LINEAR.jobTeam,
+    const created = await gql<{ issueCreate?: { success?: boolean; issue?: { identifier?: string } } }>(LINEAR_MUTATION, { i: { id: incidentId, teamId: LINEAR.teamId,
       title, description: `${description}\n\nWatcher incident: ${incidentId}`,
-      labelIds: [LINEAR.lblMonitor, LINEAR.lblBug, LINEAR.lblRepoBackend], priority: 1 } });
+      labelIds: LINEAR.labels, priority: 1 } });
     if (created.issueCreate?.success !== true || !created.issueCreate.issue?.identifier) {
       throw new Error("Linear issueCreate did not confirm success");
     }
@@ -100,8 +98,6 @@ export const buildRealEffects = ({
     console.log(line);
   },
 
-  // JOB-731: Prometheus textfile write. writeWatcherMetrics is itself fail-soft
-  // (skips when the node_exporter textfile dir is absent, never throws).
   writeMetrics: async ({ detectorOk, consecutiveBad, pagedThisTick, recoveredThisTick, pendingActions }) => {
     await writeWatcherMetrics({
       path: config.metricsFile,

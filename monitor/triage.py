@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic monitor collection + triage for JobLander production.
+"""Deterministic monitor collection + triage for the configured consumer.
 
 Runs BEFORE the LLM monitor session (invoked by monitor/run-monitor-session.sh).
 Collects errors from GCP Logging / Cloud Run services and worker pools / Sentry, groups them
@@ -27,39 +27,20 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
+from false_positives import decisions, filter_groups
 from topology import inspect_targets, load_targets, revision, topology_signature, voice_filter, worker_service_status
 
-REGIONS = ["europe-west1", "us-central1", "australia-southeast1", "asia-south1"]
 TARGETS = load_targets()
 PROJECT = TARGETS["project"]
+REGIONS = TARGETS.get("regions", [])
 VOICE_AGENT_LOG_FILTER = voice_filter(TARGETS)
 WINDOW_HOURS = 2
 STATE_DIR = os.environ.get("MONITOR_STATE_DIR", str(Path.home() / ".local/state/self-healing/monitor"))
-SENTRY_ORG = "joblander-z2"
-SENTRY_PROJECT_ID = "4511020395069520"
-# Sentry issues are counted over a 7-day window (its thresholds are 7d-based),
-# but a 7-day COUNT says nothing about whether the bug is still happening. An
-# issue fixed on Monday still shows 53 events on Friday, so the monitor kept
-# filing tickets for bugs that had already stopped.
-#
-# 2026-07-22: ResumeParseLlmError 524 was fixed by PR #259 (merged 04:49Z) yet
-# got re-filed three times — JOB-799 at 05:0x, JOB-800 at 06:02, JOB-801 at
-# 07:02, once per hourly monitor run. The dispatcher investigated all three
-# ($0.65 + $0.38 + $0.52) and closed each `fixed-elsewhere`, noting: "Monitor
-# re-filed on stale 7d rolling window." The signature had been silent 17.9h.
-#
-# So: keep the 7d window for COUNTING, but require at least one event within
-# SENTRY_FRESH_HOURS to file at all. 12h mirrors the dispatcher's own
-# staleAgeHrs, above which it treats a ticket as stale anyway — filing something
-# the fixer will only ever close as stale is pure waste.
+SENTRY_ORG = os.environ.get("SENTRY_ORG", "")
+SENTRY_PROJECT_ID = os.environ.get("SENTRY_PROJECT_ID", "")
+SENTRY_SERVICE = os.environ.get("SENTRY_SERVICE", "sentry")
 SENTRY_FRESH_HOURS = int(os.environ.get("SENTRY_FRESH_HOURS", "12"))
 
-# Per-signature cooldown after a ticket is closed: suppress re-filing within
-# this window so the dispatcher's adjudication (stale/not-a-bug/fixed) isn't
-# immediately reversed by the next monitor run. Evidence: JOB-840 closed 07:26
-# → JOB-843 filed 10:02 same day; JOB-838 closed 08:31 → JOB-844 filed 10:02.
-# $7.56 burned across four tickets covering two signatures (2026-07-27).
-# P0 always overrides cooldown — a DOWN server is never suppressed.
 COOLDOWN_HOURS_CANCELED = int(os.environ.get("COOLDOWN_HOURS_CANCELED", "12"))
 COOLDOWN_HOURS_DONE = int(os.environ.get("COOLDOWN_HOURS_DONE", "6"))
 
@@ -90,12 +71,6 @@ _SEV_RANK = {"P0": 3, "P1": 2, "P2": 1, "P3": 0}
 
 # Audio-engine errors on the paid-minute ledger (backend
 # src/machines/session/session.machine.ts). Slugs as produced by slugify().
-BILLING_SERVICE = "joblander-audio-engine"
-BILLING_FAILURE_SLUGS = frozenset({
-    "failed-to-deduct-balance-atomically",
-    "failed-to-record-balance-transaction",
-    "failed-to-persist-final-meeting-balance",
-})
 
 collection_errors = []
 
@@ -201,8 +176,7 @@ def payload_error(entry):
     """The structured `error` a logger attached next to the message, if any.
 
     Evidence only, never part of the signature. Without it a ticket shows just
-    "Failed to deduct balance atomically" and the filer guessed a transaction
-    conflict, while the logged error was `socket hang up` (JOB-1131).
+    a generic message and can mistake a transport failure for a logic defect.
     """
     jp = entry.get("jsonPayload")
     if not isinstance(jp, dict):
@@ -305,9 +279,11 @@ def request_route_signature(path):
 
 
 def collect_cloud_run(groups):
-    entries = gcloud_logging_read(
-        'resource.type="cloud_run_revision" AND severity>=ERROR'
-    )
+    services = TARGETS.get("cloud_run_services", [])
+    if not services:
+        return
+    scope = " OR ".join(f'resource.labels.service_name={json.dumps(name)}' for name in services)
+    entries = gcloud_logging_read(f'resource.type="cloud_run_revision" AND severity>=ERROR AND ({scope})')
     for e in entries:
         labels = e.get("resource", {}).get("labels", {})
         service = labels.get("service_name", "unknown")
@@ -340,6 +316,8 @@ def collect_cloud_run(groups):
 
 
 def collect_cloud_functions(groups):
+    if not TARGETS.get("cloud_functions", False):
+        return
     entries = gcloud_logging_read('resource.type="cloud_function" AND severity>=ERROR', limit=QUERY_LIMIT)
     for e in entries:
         fn = e.get("resource", {}).get("labels", {}).get("function_name", "unknown")
@@ -348,174 +326,15 @@ def collect_cloud_functions(groups):
         # pipeline) so service_status() in the report reflects real email
         # health; the signature keeps the cloud-function prefix.
         add_to_groups(groups, f"cloud-function:{fn}:{slugify(msg)}",
-                      "email-service", fn, e.get("timestamp", ""), msg)
+                      os.environ.get("CLOUD_FUNCTION_SERVICE", fn), fn, e.get("timestamp", ""), msg)
     log(f"cloud functions: {len(entries)} error entries")
-
-
-def voice_agent_region(entry):
-    return entry.get("resource", {}).get("labels", {}).get("location", "unknown")
-
-
-def collect_voice_agent_errors(groups):
-    # The worker's JSON logger supplies level, not always GCP severity.
-    entries = gcloud_logging_read(
-        f'{VOICE_AGENT_LOG_FILTER} AND (severity>=ERROR OR '
-        'jsonPayload.level=~"(?i)^(error|critical|fatal)$")', limit=QUERY_LIMIT
-    )
-    for e in entries:
-        region = voice_agent_region(e)
-        msg = entry_message(e)
-        add_to_groups(groups, f"voice-agent:{region}:{slugify(msg)}",
-                      "ai-voice-agent-python", region, e.get("timestamp", ""), msg)
-    log(f"voice agent workers: {len(entries)} error entries")
-
-
-def collect_stage_errors(groups):
-    entries = gcloud_logging_read(
-        f'{VOICE_AGENT_LOG_FILTER} AND jsonPayload.message=~"STAGE_ERROR"', limit=QUERY_LIMIT
-    )
-    by_code = {}
-    for e in entries:
-        msg = entry_message(e)
-        m = re.search(r"status_code=(\d{3})", msg)
-        code = m.group(1) if m else "unknown"
-        by_code.setdefault(code, []).append((e.get("timestamp", ""), msg))
-    for code, items in by_code.items():
-        items.sort()
-        sig = f"voice-agent:all:stage-error-{code}"
-        for ts, msg in items:
-            add_to_groups(groups, sig, "ai-voice-agent-python", "all", ts, msg)
-    log(f"stage errors: {len(entries)} entries")
-    return {code: len(items) for code, items in by_code.items()}
-
-
-def collect_audio_timeouts(groups):
-    entries = gcloud_logging_read(
-        f'{VOICE_AGENT_LOG_FILTER} AND jsonPayload.message=~"Audio Timeout Error"', limit=QUERY_LIMIT
-    )
-    for e in entries:
-        msg = entry_message(e)
-        add_to_groups(groups, "voice-agent:all:audio-timeout-error",
-                      "ai-voice-agent-python", "all", e.get("timestamp", ""), msg)
-    log(f"audio timeouts: {len(entries)} entries")
-    return len(entries)
-
-
-def collect_geo_misroutes(groups):
-    """monitor.md §1.5: `country=IN → eu` in geo logs = Indian users misrouted
-    (defeats the purpose of the asia-south1 region) → P1."""
-    entries = gcloud_logging_read(
-        'resource.type="cloud_run_revision" AND resource.labels.service_name="joblander-app" '
-        'AND textPayload=~"\\[geo\\]"', limit=QUERY_LIMIT
-    )
-    misroutes = []
-    for e in entries:
-        msg = entry_message(e)
-        m = re.search(r"country=(\w+).*→\s*(\S+)", msg)
-        if m and m.group(1) == "IN" and m.group(2) != "india":
-            misroutes.append((e.get("timestamp", ""), msg))
-    for ts, msg in sorted(misroutes):
-        add_to_groups(groups, "joblander-app:geo:in-users-misrouted",
-                      "joblander-app", "geo-routing", ts, msg)
-    # Severity floor (P1) is applied in assign_severity via raise_to so the
-    # generic count thresholds can still escalate a massive spike to P0.
-    log(f"geo: {len(entries)} entries, {len(misroutes)} IN misroutes")
-    return len(misroutes)
-
-
-def collect_anam_failures(groups):
-    """monitor.md §1.5: Anam `Failed to start avatar` > 3/2h → P2."""
-    entries = gcloud_logging_read(
-        f'{VOICE_AGENT_LOG_FILTER} AND jsonPayload.message=~"Failed to start avatar"',
-        limit=QUERY_LIMIT,
-    )
-    for e in entries:
-        add_to_groups(groups, "voice-agent:all:anam-avatar-start-failed",
-                      "ai-voice-agent-python", "all", e.get("timestamp", ""), entry_message(e))
-    # Severity floor (P2 when >3/2h) is applied in assign_severity via
-    # raise_to so the generic thresholds can still escalate to P1/P0.
-    log(f"anam failures: {len(entries)} entries")
-    return len(entries)
-
-
-TURN_LATENCY_RE = re.compile(
-    r"TURN_LATENCY EOUMetrics (\{[^}]*\})(?: counts=\{[^}]*\})? ctx=(\{[^}]*\})"
-)
-
-
-def percentile(values, p):
-    s = sorted(values)
-    k = (len(s) - 1) * p
-    f = int(k)
-    c = min(f + 1, len(s) - 1)
-    return s[f] if f == c else s[f] + (s[c] - s[f]) * (k - f)
-
-
-def collect_transcription_delay(groups):
-    """monitor.md §1.6.3 thresholds. Values are already in ms — voice-agent's
-    metrics_service multiplies by 1000 before logging (verified in source).
-    p50 EU/en > 1500 → P2; p50 IN/en > 2500 → P2; p99 > 30000 → P3 (P2 if
-    >= 2 such outliers in the same region/lang within the window)."""
-    import ast
-    entries = gcloud_logging_read(
-        f'{VOICE_AGENT_LOG_FILTER} AND jsonPayload.message=~"TURN_LATENCY EOUMetrics"',
-        limit=QUERY_LIMIT,
-    )
-    rows = {}
-    for e in entries:
-        m = TURN_LATENCY_RE.search(entry_message(e))
-        if not m:
-            continue
-        try:
-            metrics = ast.literal_eval(m.group(1))
-            ctx = ast.literal_eval(m.group(2))
-        except (ValueError, SyntaxError):
-            continue
-        td = metrics.get("transcription_delay")
-        if not td or td <= 0:
-            continue
-        # logs are duplicated across two streams — dedupe by speech_id+session
-        rows[(ctx.get("speech_id"), ctx.get("session"))] = (
-            ctx.get("region") or "?", ctx.get("language") or "?",
-            td, e.get("timestamp", ""))
-    by_rl = {}
-    for region, lang, td, ts in rows.values():
-        by_rl.setdefault((region, lang), []).append((td, ts))
-    p50_limits = {("eu", "en"): 1500, ("india", "en"): 2500}
-    now = utcnow_iso()
-    for (region, lang), vals in by_rl.items():
-        tds = [v[0] for v in vals]
-        p50, p99 = percentile(tds, 0.5), percentile(tds, 0.99)
-        limit_p50 = p50_limits.get((region, lang))
-        outliers = len([t for t in tds if t > 30000])
-        sev = None
-        if limit_p50 and p50 > limit_p50:
-            sev = "P2"
-        elif outliers >= 2:
-            sev = "P2"
-        elif outliers == 1:
-            sev = "P3"
-        if sev:
-            sig = f"voice-agent:{region}:transcription-delay-regression-{lang}"
-            ts_sorted = sorted(v[1] for v in vals)
-            groups[sig] = {
-                "signature": sig, "service": "ai-voice-agent-python",
-                "region": region, "count": len(tds),
-                "first_seen": ts_sorted[0], "last_seen": ts_sorted[-1],
-                "severity": sev,
-                "sample_message": (f"transcription_delay {region}/{lang}: "
-                                   f"p50={p50:.0f}ms p99={p99:.0f}ms n={len(tds)} "
-                                   f"(p50 limit {limit_p50}, >30s outliers: {outliers})"),
-            }
-    log(f"turn latency: {len(entries)} entries, {len(rows)} turns, "
-        f"{len(by_rl)} region/lang groups")
 
 
 def collect_sentry(groups):
     token = os.environ.get("SENTRY_TOKEN", "").strip()
     if not token:
         out = run_cmd(["gcloud", "secrets", "versions", "access", "latest",
-                       "--secret=joblander-sentry-monitor-token", f"--project={PROJECT}"])
+                       f"--secret={os.environ.get('SENTRY_TOKEN_SECRET', 'sentry-monitor-token')}", f"--project={PROJECT}"])
         token = (out or "").strip()
     if not token:
         collection_errors.append({"cmd": "sentry", "error": "no SENTRY_TOKEN available"})
@@ -576,7 +395,7 @@ def collect_sentry(groups):
         culprit = (issue.get("culprit") or "unknown").split("/")[-1] or "unknown"
         title = str(issue.get("title") or meta.get("title") or "Untyped Sentry issue")
         error_type = str(meta.get("type") or title)
-        sig = f"sentry:joblander-app:{slugify(culprit)}:{slugify(error_type)}"
+        sig = f"sentry:{SENTRY_SERVICE}:{slugify(culprit)}:{slugify(error_type)}"
         if count >= 50 or uc >= 5:
             sev = "P1"
         elif count >= 10 or uc >= 2:
@@ -585,7 +404,7 @@ def collect_sentry(groups):
             sev = "P3"
         groups[sig] = {
             "signature": sig,
-            "service": "joblander-app",
+            "service": SENTRY_SERVICE,
             "region": "frontend",
             "count": count,
             # Sentry counts use a 7-day window per monitor.md §1.8 (its
@@ -612,7 +431,7 @@ def collect_sentry(groups):
     log(f"sentry: {len(issues)} issues, {kept} after noise + freshness filters")
 
 
-def assign_severity(groups, stage_counts, audio_timeouts,
+def assign_severity(groups, stage_counts=None, audio_timeouts=0,
                     geo_misroutes=0, anam_count=0):
     """Thresholds from agents/claude/monitor.md Шаг 4 + §1.5/§1.6 triage rules."""
     for g in groups.values():
@@ -632,47 +451,8 @@ def assign_severity(groups, stage_counts, audio_timeouts,
             # severity already set by a caller (Sentry/duplicate-worker), but
             # DO raise it if the spike is severe enough (e.g. errors=1001 → P0).
             g["severity"] = new_sev
-    # voice-agent specific rules — only ever RAISE severity, never lower what
-    # the generic count thresholds already assigned.
-    rank = {"P3": 0, "P2": 1, "P1": 2, "P0": 3}
-
-    def raise_to(sig, sev):
-        if sig in groups and rank[sev] > rank[groups[sig]["severity"]]:
-            groups[sig]["severity"] = sev
-
-    # "STAGE_ERROR total > 20/2h → P2 (elevated provider error rate)" — with
-    # mixed status codes each per-code group can stay under the generic P3
-    # bar, so the overall spike must escalate every stage-error group.
-    stage_total = sum(stage_counts.values())
-    for code, n in stage_counts.items():
-        sig = f"voice-agent:all:stage-error-{code}"
-        if code == "402":
-            raise_to(sig, "P1")
-        elif code == "429" and n >= 5:
-            raise_to(sig, "P2")
-        elif code.startswith("5") and n >= 5:
-            raise_to(sig, "P2")
-        if stage_total > 20:
-            raise_to(sig, "P2")
-    if audio_timeouts >= 5:
-        raise_to("voice-agent:all:audio-timeout-error", "P1")
-    # §1.5 floors — raise_to keeps generic count thresholds able to escalate
-    # a massive spike to P1/P0 (Codex P1 on PR #59).
-    if geo_misroutes > 0:
-        raise_to("joblander-app:geo:in-users-misrouted", "P1")
-    if anam_count > 3:
-        raise_to("voice-agent:all:anam-avatar-start-failed", "P2")
-    # Billing-ledger failures: every occurrence is a paid minute lost or a ledger
-    # row left wrong, so the count thresholds do not apply. They happen once per
-    # affected session — a few a day — which kept them at P3/report_only forever:
-    # "Failed to deduct balance atomically" was collected 17 times (26–29.09,
-    # asia-south1/us-central1) and never filed, while the backend paged the
-    # owner in Telegram for each one (JOB-1114).
-    for sig, g in groups.items():
-        if (g.get("service") == BILLING_SERVICE
-                and sig.rsplit(":", 1)[-1] in BILLING_FAILURE_SLUGS):
-            raise_to(sig, "P2")
-            g["billing_floor"] = True
+    if ADAPTER:
+        ADAPTER.severity(groups, stage_counts, audio_timeouts, geo_misroutes, anam_count)
 
 
 def load_json(path, default):
@@ -688,6 +468,9 @@ def filter_known(groups, state_dir):
     today = datetime.date.today().isoformat()
     kept, skipped = {}, []
     for sig, g in groups.items():
+        if g.get("severity") == "P0":
+            kept[sig] = g
+            continue
         is_known = False
         for k in known:
             if k.get("expires") and k["expires"] < today:
@@ -727,6 +510,7 @@ def diff_with_previous(groups, state_dir):
             else:
                 g["diff_status"] = "recurring"
             g["linear_issue"] = old[sig].get("linear_issue")
+            g["recheck_after_suppression"] = bool(old[sig].get("suppressed"))
         g.setdefault("linear_issue", None)
         summary["total_errors"] += g["count"]
         summary["by_region"][g["region"]] = summary["by_region"].get(g["region"], 0) + g["count"]
@@ -788,7 +572,7 @@ def merged_pr(attachments):
 
     Linear's GitHub integration attaches linked PRs as Attachment rows whose
     `url` is the PR and whose `metadata` carries `status` ("merged") and
-    `mergedAt` (verified live on JOB-1109, JOB-1131, JOB-1138, 2026-10-01). An
+    `mergedAt`. An
     open or closed-unmerged PR fixed nothing, so it does not count. With several
     merged PRs the most recently merged one is reported. (None, None) if none.
     """
@@ -885,10 +669,6 @@ def fix_live_time(service, signature, region, closed_at, now_dt):
         ts = matching[0][0]
         source = f"change-feed:run_deploy:{service}:{region}"
     else:
-        # Not just the regions that happen to have deployed already: during a
-        # staggered rollout that subset says nothing about the rest. Require every
-        # production region (joblander-app, the Sentry service, runs in exactly
-        # REGIONS and each deploy reaches all four, verified 2026-10-01).
         first_per_region = {}
         for d_ts, d_regions in deploys:
             for r in d_regions:
@@ -1050,7 +830,7 @@ def collect_closed_signature_cooldowns():
     """Query Linear for recently-closed [Monitor] tickets and extract their signatures.
 
     Returns a dict keyed by signature:
-      {signature: {"state_type": "canceled"|"completed", "closed_at": ISO, "issue": "JOB-XXX"}}
+      {signature: {"state_type": "canceled"|"completed", "closed_at": ISO, "issue": "APP-XXX"}}
 
     Fails open: any error (no API key, network, bad response) → returns {} so
     the monitor behaves exactly as it did before this gate existed.  The gate
@@ -1062,7 +842,7 @@ def collect_closed_signature_cooldowns():
     # trigger the hard-fail path, discarding every escalation of the run.
     token_raw = run_cmd([
         "gcloud", "secrets", "versions", "access", "latest",
-        "--secret=linear-api-key", f"--project={PROJECT}",
+        "--secret=" + os.environ.get("LINEAR_API_KEY_SECRET", "linear-api-key"), f"--project={PROJECT}",
     ], optional=True)
     token = (token_raw or "").strip()
     if not token:
@@ -1086,10 +866,10 @@ def collect_closed_signature_cooldowns():
     # suppress a live P1/P2 whose real closure window had already expired.
     # change-ingest/src/ingest/linear.ts makes the same distinction.
     query = """
-query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
+query CooldownCheck($since: DateTimeOrDuration!, $after: String, $team: String!) {
   issues(
     filter: {
-      team: { name: { eq: "JobLander" } }
+      team: { name: { eq: $team } }
       title: { startsWith: "[Monitor]" }
       state: { type: { in: ["canceled", "completed"] } }
       updatedAt: { gt: $since }
@@ -1105,6 +885,7 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
       updatedAt
       completedAt
       canceledAt
+      labels { nodes { name } }
       description
       attachments(first: 20) { nodes { url metadata } }
     }
@@ -1121,7 +902,7 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
         for _ in range(MAX_PAGES):
             payload = json.dumps({
                 "query": query,
-                "variables": {"since": since, "after": after},
+                "variables": {"since": since, "team": os.environ.get("LINEAR_TEAM", ""), "after": after},
             }).encode()
             req = urllib.request.Request(
                 LINEAR_API_URL,
@@ -1155,6 +936,10 @@ query CooldownCheck($since: DateTimeOrDuration!, $after: String) {
 
     cooldowns = {}
     for node in nodes:
+        # False-positive decisions have their own independent-confirmation clock.
+        # A late duplicate closure must not restart a separate canceled cooldown.
+        if any(label.get("name") == "false-positive" for label in (node.get("labels") or {}).get("nodes", [])):
+            continue
         desc = node.get("description") or ""
         # Extract the exact signature from the factory-ready ticket body:
         # "**Signature:** `service:region:slug`"
@@ -1217,7 +1002,7 @@ def build_escalations(final_groups, cooldowns=None):
     p0_alerts, escalations = [], []
     for g in final_groups:
         sev, status = g.get("severity"), g.get("diff_status")
-        if status == "resolved":
+        if status == "resolved" or g.get("suppressed"):
             continue
         item = {k: g.get(k) for k in ("signature", "service", "region", "count",
                                       "first_seen", "last_seen", "severity",
@@ -1227,14 +1012,6 @@ def build_escalations(final_groups, cooldowns=None):
         item["window"] = g.get("window", f"{WINDOW_HOURS}h")
         item["suggested_title"] = f"[Monitor] {g['service']} {g['region']}: {g['signature'].split(':')[-1]}"
 
-        # --- Cooldown gate (JOB-858) ---
-        # P0 is always exempt: a DOWN server or a massive spike must never be
-        # silenced by a cooldown.  For all other severities, if this signature's
-        # prior Linear ticket was recently closed (Canceled within
-        # COOLDOWN_HOURS_CANCELED, Done within COOLDOWN_HOURS_DONE), suppress
-        # re-filing so the dispatcher's adjudication isn't reversed an hour later.
-        # Exception: a Done ticket fixed by a merged PR whose signature is seen
-        # again after that fix deployed — the fix did not hold, so re-file.
         refile_after_fix = False
         if sev != "P0":
             cd = cooldowns.get(g.get("signature", ""))
@@ -1301,7 +1078,7 @@ def build_escalations(final_groups, cooldowns=None):
         # --- end cooldown gate ---
 
         if sev == "P0":
-            if g["signature"].startswith("lk-server:") and g["signature"].endswith(":down"):
+            if g.get("availability_failure"):
                 # Synthetic outage group (count=1 by construction) — say DOWN,
                 # not "1 errors/2h".
                 text = (f"URGENT P0: {g['sample_message'][:150]} — "
@@ -1313,34 +1090,26 @@ def build_escalations(final_groups, cooldowns=None):
             p0_alerts.append(text)
             item["action"] = "telegram_p0_and_linear"
             item["alert_text"] = text
-        elif (sev == "P1"
-              and g.get("signature") == "duplicate-worker:purchased-minutes-reduced"):
-            # Financial-integrity signal: purchased minutes were reduced — must
-            # NEVER happen per the spec (JOB-1010).  Emit immediate Telegram even
-            # though this is P1, not P0, because the constitition mandates it.
-            text = (f"URGENT P1 — PURCHASED MINUTES REDUCED: "
-                    f"{g.get('sample_message', g.get('signature', ''))[:200]}")
+        elif ADAPTER and (text := ADAPTER.page(g)):
             p0_alerts.append(text)
-            item["action"] = "telegram_p1_financial_and_linear"
+            item["action"] = "telegram_p0_and_linear"
             item["alert_text"] = text
         elif sev == "P1" and status in ("new", "worsened"):
             item["action"] = "linear_create_if_no_dup"
         elif sev == "P1" and status == "recurring":
             item["action"] = "linear_ensure_open_issue"
-        elif refile_after_fix and sev in ("P1", "P2"):
+        elif (refile_after_fix or g.get("recheck_after_suppression")) and sev in ("P1", "P2"):
             # A recurrence right after the deploy is usually still in the
             # previous report (pre-fix events share the 2h window), so its
             # diff_status is `recurring`/`improved`, which would otherwise be
             # report_only. The prior ticket is Done, so this files a new one.
-            # P3 stays report_only, as for any other P3 signal.
+            # An expired suppression also needs a new investigation even when
+            # its retained count is stable. P3 stays report_only.
             item["action"] = "linear_create_if_no_dup"
         elif sev == "P2" and status == "new":
             item["action"] = "linear_create_if_no_dup"
-        elif sev == "P2" and g.get("billing_floor") and not g.get("linear_issue"):
-            # A billing failure already in the previous report (e.g. as the
-            # former P3, or a filing that did not land) is `recurring`, not
-            # `new`; without this it stays report_only until it ages out of
-            # the window unfiled. The session dedups against open issues.
+        elif sev == "P2" and g.get("ensure_open_issue") and not g.get("linear_issue"):
+            # Adapters can require a ticket even when a signal is not new.
             item["action"] = "linear_create_if_no_dup"
         else:
             item["action"] = "report_only"
@@ -1348,212 +1117,26 @@ def build_escalations(final_groups, cooldowns=None):
     return p0_alerts, escalations
 
 
-def _firestore_doc_fields(collection, doc_id, token):
-    """Fetch a Firestore document via REST and return its fields dict.
-
-    Returns {} on 404 (document absent) or returns None on HTTP errors / network
-    failures.  Authentication uses the supplied bearer token.
-    """
-    url = (f"https://firestore.googleapis.com/v1/projects/{PROJECT}"
-           f"/databases/(default)/documents/{collection}/{doc_id}")
-    try:
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode()).get("fields", {})
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return {}   # document does not exist
-        raise
-    except Exception:  # noqa: BLE001
-        raise
-
-
-def _fs_int(fields, name):
-    """Extract an integer from a Firestore typed-value field."""
-    f = fields.get(name, {})
-    v = f.get("integerValue") or f.get("doubleValue")
-    return int(float(v)) if v is not None else 0
-
-
-def _fs_str(fields, name):
-    """Extract a string from a Firestore typed-value field."""
-    return fields.get(name, {}).get("stringValue") or ""
-
-
-def check_duplicate_worker(groups):
-    """Monitor the daily duplicate-free-grant worker (JOB-1007/JOB-1010).
-
-    Checks Firestore: `duplicate_worker_runs/{yesterday}`:
-    - Document missing or errors > 0 → P2 (worker did not complete cleanly).
-    - purchasedMinutesReduced > 0 → P1 (must never happen; immediate Telegram).
-    - mode in doc != DUPLICATE_WORKER_MODE env var → P2 (config drift).
-    - revokedMinutes/day > 3× trailing 7-day median → P2 (false-positive wave).
-
-    Skipped when DUPLICATE_WORKER_MODE=off (worker not yet live).
-    All Firestore failures are informational — never count toward hard_fail.
-    """
-    mode = os.environ.get("DUPLICATE_WORKER_MODE", "off").strip()
-    if mode == "off":
-        return
-
-    # Obtain an access token via ADC (Application Default Credentials).
-    token_raw = run_cmd(["gcloud", "auth", "print-access-token"], optional=True)
-    token = (token_raw or "").strip()
-    if not token:
-        collection_errors.append({
-            "cmd": "check_duplicate_worker",
-            "error": "no GCP access token — duplicate worker check skipped",
-            "informational": True,
-        })
-        return
-
-    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-    now = utcnow_iso()
-
-    # --- Fetch yesterday's run record ---
-    try:
-        fields = _firestore_doc_fields("duplicate_worker_runs", yesterday, token)
-    except Exception as e:  # noqa: BLE001
-        collection_errors.append({
-            "cmd": "check_duplicate_worker",
-            "error": f"Firestore error fetching duplicate_worker_runs/{yesterday}: {str(e)[:200]}",
-            "informational": True,
-        })
-        return
-
-    if not fields:
-        # Document absent → worker did not run or failed before persisting.
-        sig = "duplicate-worker:missing-run"
-        groups[sig] = {
-            "signature": sig,
-            "service": "backend",
-            "region": "europe-west1",
-            "count": 1,
-            "first_seen": now,
-            "last_seen": now,
-            "severity": "P2",
-            "sample_message": (
-                f"duplicate_worker_runs/{yesterday} not found in Firestore — "
-                f"daily duplicate-free-grant worker (DUPLICATE_WORKER_MODE={mode}) "
-                f"did not run or failed to persist its run record."
-            ),
-        }
-        log(f"duplicate worker check: {yesterday} — run record MISSING")
-        return
-
-    errors_count = _fs_int(fields, "errors")
-    purchased_reduced = _fs_int(fields, "purchasedMinutesReduced")
-    revoked_minutes = _fs_int(fields, "revokedMinutes")
-    doc_mode = _fs_str(fields, "mode")
-
-    log(f"duplicate worker check: {yesterday} mode={doc_mode!r} errors={errors_count} "
-        f"purchasedReduced={purchased_reduced} revokedMinutes={revoked_minutes}")
-
-    # --- Check 1: errors > 0 → P2 ---
-    if errors_count > 0:
-        sig = "duplicate-worker:run-errors"
-        groups[sig] = {
-            "signature": sig,
-            "service": "backend",
-            "region": "europe-west1",
-            "count": errors_count,
-            "first_seen": now,
-            "last_seen": now,
-            "severity": "P2",
-            "sample_message": (
-                f"duplicate_worker_runs/{yesterday}: errors={errors_count} "
-                f"(mode={doc_mode}). Daily duplicate worker completed with errors."
-            ),
-        }
-
-    # --- Check 2: purchasedMinutesReduced > 0 → P1 (must NEVER happen) ---
-    if purchased_reduced > 0:
-        sig = "duplicate-worker:purchased-minutes-reduced"
-        groups[sig] = {
-            "signature": sig,
-            "service": "backend",
-            "region": "europe-west1",
-            "count": purchased_reduced,
-            "first_seen": now,
-            "last_seen": now,
-            "severity": "P1",
-            "sample_message": (
-                f"CRITICAL: duplicate_worker_runs/{yesterday}: "
-                f"purchasedMinutesReduced={purchased_reduced} — "
-                "the duplicate worker reduced purchased minutes, which must never happen."
-            ),
-        }
-
-    # --- Check 3: mode mismatch → P2 ---
-    if doc_mode and doc_mode != mode:
-        sig = "duplicate-worker:mode-mismatch"
-        groups[sig] = {
-            "signature": sig,
-            "service": "backend",
-            "region": "europe-west1",
-            "count": 1,
-            "first_seen": now,
-            "last_seen": now,
-            "severity": "P2",
-            "sample_message": (
-                f"duplicate_worker_runs/{yesterday}: mode={doc_mode!r} but "
-                f"DUPLICATE_WORKER_MODE env={mode!r}. Configuration drift?"
-            ),
-        }
-
-    # --- Check 4: revocation spike → P2 ---
-    # revokedMinutes/day > 3× trailing 7-day median (possible false-positive wave).
-    if revoked_minutes > 0:
-        _check_duplicate_worker_spike(groups, revoked_minutes, token, now)
-
-
-def _check_duplicate_worker_spike(groups, today_revoked, token, now):
-    """P2 when today's revokedMinutes > 3× the trailing 7-day median.
-
-    Needs ≥3 prior data points; skips silently if Firestore is unavailable or
-    history is too thin.  All fetch failures are informational.
-    """
-    prior = []
-    # Offsets 2–8 give the 7 days BEFORE yesterday (the monitored date).
-    # Offset 1 would be yesterday itself — that's what we're comparing against,
-    # so it must not appear in the baseline history.
-    for offset in range(2, 9):
-        day = (datetime.date.today() - datetime.timedelta(days=offset)).isoformat()
-        try:
-            f = _firestore_doc_fields("duplicate_worker_runs", day, token)
-            if f:
-                prior.append(_fs_int(f, "revokedMinutes"))
-        except Exception as e:  # noqa: BLE001
-            collection_errors.append({
-                "cmd": f"check_duplicate_worker_spike/{day}",
-                "error": str(e)[:200],
-                "informational": True,
-            })
-
-    if len(prior) < 3:
-        return  # insufficient history
-
-    median = statistics.median(prior)
-    if median > 0 and today_revoked > 3 * median:
-        sig = "duplicate-worker:revocation-spike"
-        groups[sig] = {
-            "signature": sig,
-            "service": "backend",
-            "region": "europe-west1",
-            "count": today_revoked,
-            "first_seen": now,
-            "last_seen": now,
-            "severity": "P2",
-            "sample_message": (
-                f"Duplicate worker revoked {today_revoked} free minutes today — "
-                f">3× trailing 7-day median ({median}). "
-                "Possible false-positive wave (e.g. new campus NAT)."
-            ),
-        }
-
-
 def utcnow_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_adapter():
+    filename = os.environ.get("MONITOR_ADAPTER")
+    if not filename:
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("consumer_monitor", filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for name in ("configure", "collect", "severity", "services", "page"):
+        if not callable(getattr(module, name, None)):
+            raise ValueError(f"Monitor adapter lacks {name}()")
+    module.configure(sys.modules[__name__])
+    return module
+
+
+ADAPTER = load_adapter()
 
 
 def main():
@@ -1564,40 +1147,38 @@ def main():
         if target["status"] in {"READY", "MATCH"}:
             continue
         sig = topology_signature(target["region"], target["name"])
-        groups[sig] = {"signature": sig, "service": "ai-voice-agent-python", "region": target["region"],
+        groups[sig] = {"signature": sig, "service": target["name"], "region": target["region"],
                        "count": 1, "severity": "P2", "first_seen": utcnow_iso(), "last_seen": utcnow_iso(),
                        "sample_message": f'Monitoring target {target["name"]}: {target["status"]}. Verify targets.json against deployment intent; do not restore retired infrastructure.'}
     collect_cloud_run(groups)
     collect_cloud_functions(groups)
-    collect_voice_agent_errors(groups)
-    stage_counts = collect_stage_errors(groups)
-    audio_timeouts = collect_audio_timeouts(groups)
-    geo_misroutes = collect_geo_misroutes(groups)
-    anam_count = collect_anam_failures(groups)
-    collect_transcription_delay(groups)
-    collect_sentry(groups)
+    context = ADAPTER.collect(groups, topology) if ADAPTER else ({}, 0, 0, 0)
+    if os.environ.get("SENTRY_ENABLED") == "true":
+        collect_sentry(groups)
 
-    # JOB-1010: check that the daily duplicate-free-grant worker ran and
-    # produced no errors. Skipped when DUPLICATE_WORKER_MODE=off.
-    # Must run BEFORE assign_severity so severity can be adjusted by the
-    # generic count thresholds like any other group.
-    check_duplicate_worker(groups)
-
-    assign_severity(groups, stage_counts, audio_timeouts,
-                    geo_misroutes, anam_count)
-    groups = filter_known(groups, STATE_DIR)
+    assign_severity(groups, *context)
     final_groups, summary = diff_with_previous(groups, STATE_DIR)
-    # Cooldown gate (JOB-858): query Linear for recently-closed [Monitor] tickets
-    # and suppress re-filing within the adjudication window.  Fails open — if the
-    # Linear API is unreachable the monitor behaves exactly as before.
+    # Growth can promote P1 to P0. Suppression must use that final severity,
+    # while the report retains observations to detect growth during a pause.
+    active = {g["signature"]: g for g in final_groups if g["diff_status"] != "resolved"}
+    eligible = filter_known(active, STATE_DIR)
+    legacy_suppressed = set(active) - set(eligible)
+    false_positives = []
+    try:
+        eligible, false_positives = filter_groups(eligible, decisions())
+    except Exception:
+        # The runner defers filing when it cannot recheck labels; P0 pages remain live.
+        collection_errors.append({"cmd": "false-positive labels", "informational": True,
+                                  "error": "Linear decision lookup unavailable; filing will retry"})
+    for group in final_groups:
+        signature = group["signature"]
+        group["suppressed"] = ("known-error" if signature in legacy_suppressed else
+                               "false-positive" if signature in active and signature not in eligible else None)
+    summary["suppressed_groups"] = sum(bool(g["suppressed"]) for g in final_groups)
     cooldowns = collect_closed_signature_cooldowns()
     p0_alerts, escalations = build_escalations(final_groups, cooldowns)
 
     now = utcnow_iso()
-    # Hard fail: collection is severely broken. Do NOT overwrite the baseline
-    # (latest-report.json) or write an archive — an empty report would make the
-    # next run treat everything as NEW, the exact failure mode of JOB-558.
-    # Truncation and informational notes do not count toward the threshold.
     hard_fail = len([e for e in collection_errors
                      if not e.get("truncated") and not e.get("informational")]) >= 6
 
@@ -1608,25 +1189,16 @@ def main():
         # error groups — DEGRADED if any active P0/P1 group, else HEALTHY.
         def service_status(svc_name):
             sev = {g.get("severity") for g in final_groups
-                   if g.get("service") == svc_name and g.get("diff_status") != "resolved"}
+                   if g.get("service") == svc_name and g.get("diff_status") != "resolved"
+                   and not g.get("suppressed")}
             return "DEGRADED" if sev & {"P0", "P1"} else "HEALTHY"
 
         services = {
             svc: {"status": service_status(svc)}
-            for svc in ("joblander-app", "joblander-audio-engine", "email-service")
+            for svc in TARGETS.get("services", [])
         }
-        services["ai-voice-agent-python"] = {
-            "status": worker_service_status(service_status("ai-voice-agent-python"), topology),
-            "hosting": "cloud-run-worker-pools",
-        }
-        # Looked up by kind, not position: a target past its end of coverage
-        # is absent from the observations, so the list can be short or empty.
-        livekit = next((o for o in topology if o.get("kind") == "livekit-config"), None)
-        services["livekit"] = {
-            "hosting": "cloud",
-            "status": ("COVERAGE_ENDED" if livekit is None
-                       else "MANAGED" if livekit["status"] == "MATCH" else livekit["status"]),
-        }
+        if ADAPTER:
+            services.update(ADAPTER.services(service_status, topology))
         report = {
             "timestamp": now,
             "window_hours": WINDOW_HOURS,
@@ -1658,9 +1230,8 @@ def main():
              if e["action"] not in ("report_only", "cooldown_suppressed")],
         "report_only": [] if hard_fail else
             [e["signature"] for e in escalations if e["action"] == "report_only"],
-        # Signatures suppressed by the cooldown gate — logged for auditability,
-        # never silently discarded (JOB-858 acceptance criterion).
         "cooldown_suppressed": cooldown_suppressed,
+        "false_positive_suppressed": false_positives,
         "summary": summary,
         "collection_errors": collection_errors,
         "state_files": None if hard_fail else {"latest": latest_path, "archive": archive_path},

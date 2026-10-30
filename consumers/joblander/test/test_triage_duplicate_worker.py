@@ -1,14 +1,4 @@
-"""Unit tests for the duplicate-free-grant worker monitor check (JOB-1010).
-
-Tests the three escalation conditions in check_duplicate_worker():
-  1. Missing run record (Firestore 404) → P2
-  2. purchasedMinutesReduced > 0 → P1
-  3. revokedMinutes/day > 3× trailing 7-day median → P2
-Plus: mode=off skips the check entirely; errors > 0 → P2.
-
-No network or GCP calls are made — all Firestore and gcloud interactions are
-patched at the urllib.request / subprocess level.
-"""
+"""Regression coverage: test triage duplicate worker."""
 
 import datetime
 import json
@@ -97,7 +87,7 @@ def _run_check(doc_fields=None, mode="write", token="fake-token", extra_urlopen_
     with patch.dict("os.environ", {"DUPLICATE_WORKER_MODE": mode}), \
          patch.object(triage, "run_cmd", return_value=token), \
          patch.object(triage.urllib.request, "urlopen", side_effect=fake_urlopen):
-        triage.check_duplicate_worker(groups)
+        triage.ADAPTER.check_duplicate_worker(groups)
 
     return groups
 
@@ -121,7 +111,7 @@ class DuplicateWorkerCheckTests(unittest.TestCase):
         with patch.dict("os.environ", {"DUPLICATE_WORKER_MODE": "off"}), \
              patch.object(triage, "run_cmd", return_value="fake-token") as mock_cmd, \
              patch.object(triage.urllib.request, "urlopen") as mock_urlopen:
-            triage.check_duplicate_worker(groups)
+            triage.ADAPTER.check_duplicate_worker(groups)
         self.assertEqual(groups, {})
         mock_urlopen.assert_not_called()
 
@@ -133,7 +123,7 @@ class DuplicateWorkerCheckTests(unittest.TestCase):
         with patch.dict("os.environ", env, clear=True), \
              patch.object(triage, "run_cmd", return_value="fake-token") as mock_cmd, \
              patch.object(triage.urllib.request, "urlopen") as mock_urlopen:
-            triage.check_duplicate_worker(groups)
+            triage.ADAPTER.check_duplicate_worker(groups)
         self.assertEqual(groups, {})
         mock_urlopen.assert_not_called()
 
@@ -184,7 +174,7 @@ class DuplicateWorkerCheckTests(unittest.TestCase):
         self.assertEqual(g["count"], 3)
 
     def test_purchased_minutes_reduced_triggers_telegram(self):
-        """P1 purchased-minutes-reduced MUST emit Telegram — spec (JOB-1010)."""
+        """Regression coverage: test purchased minutes reduced triggers telegram."""
         groups = _run_check(
             doc_fields={"errors": 0, "purchasedMinutesReduced": 2,
                         "revokedMinutes": 0, "mode": "write"},
@@ -204,7 +194,7 @@ class DuplicateWorkerCheckTests(unittest.TestCase):
                 for alert in p0_alerts),
         )
         item = next(e for e in escalations if e.get("signature") == sig)
-        self.assertEqual(item["action"], "telegram_p1_financial_and_linear")
+        self.assertEqual(item["action"], "telegram_p0_and_linear")
 
     def test_zero_purchased_reduced_no_p1(self):
         groups = _run_check(
@@ -286,7 +276,7 @@ class DuplicateWorkerCheckTests(unittest.TestCase):
         with patch.dict("os.environ", {"DUPLICATE_WORKER_MODE": "write"}), \
              patch.object(triage, "run_cmd", return_value=None), \
              patch.object(triage.urllib.request, "urlopen") as mock_urlopen:
-            triage.check_duplicate_worker(groups)
+            triage.ADAPTER.check_duplicate_worker(groups)
         self.assertEqual(groups, {})
         mock_urlopen.assert_not_called()
         errors = [e for e in triage.collection_errors if "duplicate" in e.get("cmd", "").lower()

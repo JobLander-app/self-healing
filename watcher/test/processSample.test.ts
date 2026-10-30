@@ -9,7 +9,7 @@ function harness() {
   let state: WatchState = { count: 2, paged: false };
   const lines: string[] = [];
   const effects: TickEffects = {
-    notifyOwner: vi.fn(async () => {}), createLinearTicket: vi.fn(async () => "JOB-999"),
+    notifyOwner: vi.fn(async () => {}), createLinearTicket: vi.fn(async () => "APP-999"),
     triggerDispatcher: vi.fn(async () => {}),
     saveState: vi.fn(async ({ state: next }) => { state = parseState({ content: serializeState({ state: next }) }); }),
     log: ({ line }) => lines.push(line), writeMetrics: vi.fn(async () => {}),
@@ -52,7 +52,7 @@ describe("durable watcher delivery", () => {
   });
   it("retries failed Linear create with same UUID, and only triggers after a confirmed ticket", async () => {
     const h = harness();
-    h.effects.createLinearTicket = vi.fn().mockRejectedValueOnce(new Error("lost response")).mockResolvedValue("JOB-999");
+    h.effects.createLinearTicket = vi.fn().mockRejectedValueOnce(new Error("lost response")).mockResolvedValue("APP-999");
     await h.tick();
     expect(h.effects.triggerDispatcher).not.toHaveBeenCalled();
     const id = h.state().outbox![0]!.id;

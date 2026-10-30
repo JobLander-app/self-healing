@@ -16,13 +16,7 @@ export const extractStatus = ({ bodyText }: { bodyText: string }): string => {
   }
 };
 
-/**
- * JOB-725 regions rendering, ported from the bash inline python:
- * - per region: `region:verdict`
- * - for fail_slow | unknown verdicts append ` (reason)`
- * - regions object empty or missing -> "(no regions)"
- * - body missing / unparsable / wrong shape -> "(no body)"
- */
+
 export const renderRegions = ({ bodyText }: { bodyText: string }): string => {
   try {
     const parsed: unknown = JSON.parse(bodyText);

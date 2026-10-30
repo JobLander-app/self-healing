@@ -1,8 +1,8 @@
 {
-  "name": "@joblander/output-watch",
+  "name": "self-healing-output-watch",
   "version": "1.0.0",
   "private": true,
-  "description": "JOB-731 Phase 1: TypeScript port of output-watch.sh — 1-minute product-output pager (JOB-670)",
+  "description": "Deterministic product-output health watcher",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -17,5 +17,6 @@
     "@types/node": "^20.14.0",
     "typescript": "^5.5.0",
     "vitest": "^2.1.0"
-  }
+  },
+  "license": "MIT"
 }

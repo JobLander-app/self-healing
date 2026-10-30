@@ -27,7 +27,7 @@ function pr({
     title: `PR ${number}`,
     updated_at: new Date(now - updatedMsAgo).toISOString(),
     merged_at: mergedMsAgo === null ? null : new Date(now - mergedMsAgo).toISOString(),
-    base: { repo: { name: "backend", full_name: "JobLander-app/backend", owner: { login: "JobLander-app" } } },
+    base: { repo: { name: "backend", full_name: "example-org/backend", owner: { login: "example-org" } } },
     merged_by: { login: "sorokinvj" },
   };
 }
@@ -44,7 +44,7 @@ test("collectMergedSince: finds a merge on page 2 behind a full page of unmerged
     page === 1 ? page1 : page === 2 ? page2 : [];
 
   const { merged, capped } = await collectMergedSince({
-    owner: "JobLander-app",
+    owner: "example-org",
     repo: "backend",
     token: "t",
     since: Date.now() - 72 * HOUR,

@@ -1,10 +1,3 @@
-// Accounting for runs that end without an SDK `result` (watchdog abort) or
-// that continue past an intermediate one, plus the failure alert they send.
-//
-// Evidence (2026-10-01): 6 of 8 watchdog-aborted runs in a week were recorded
-// costUsd null / numTurns 0 although each ran 40 minutes, and the alert read
-// "[dispatcher] ⚠️ run FAILED — session error: watchdog: run aborted before
-// provider completion. $2.83,2400s, 80 turns" with no ticket id.
 import { strict as assert } from "node:assert";
 import { test, afterEach, mock } from "node:test";
 import * as fs from "node:fs";
@@ -14,6 +7,7 @@ import * as path from "node:path";
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shl-aborted-"));
 process.env.LOG_DIR = path.join(dir, "turns");
 process.env.MAX_RUN_MS = "50";
+process.env.DRY_RUN = "false";
 process.env.DEPLOY_GUARD_FILE = path.join(dir, "no-deploy");
 process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -29,8 +23,6 @@ const realExecuteClaude = claude.executeClaude;
 
 afterEach(() => { mock.restoreAll(); });
 
-// Usage of run dispatch-2026-10-01T12-10-01-204Z-iessyc at its `result`, for
-// which the SDK reported total_cost_usd 2.8344.
 const SONNET = { input_tokens: 75, cache_creation_input_tokens: 116467, cache_read_input_tokens: 5835193, output_tokens: 42305 };
 const HAIKU = { input_tokens: 12247, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 15 };
 
@@ -125,26 +117,26 @@ test("a completed run is still accounted from the SDK result alone", async () =>
 });
 
 const base: import("../src/trace").RunSummary = { turnId: "t", startedAt: "2026-10-01T12:10:01Z", finishedAt: "2026-10-01T12:50:01Z",
-  durationSec: 2400, outcome: "error", issueId: "JOB-1138", costUsd: 2.83, numTurns: 80, dryRun: false,
+  durationSec: 2400, outcome: "error", issueId: "APP-1138", costUsd: 2.83, numTurns: 80, dryRun: false,
   summary: "session error: watchdog: run exceeded MAX_RUN_MS (40m) and was aborted" };
 
 test("failure alert names the ticket and separates the stats", () => {
   assert.equal(session.buildRunNotification(base),
-    "⚠️ JOB-1138: run FAILED — session error: watchdog: run exceeded MAX_RUN_MS (40m) and was aborted. $2.83, 2400s, 80 turns");
-  assert.equal(session.buildRunNotification({ ...base, costUsd: null, summary: "boom." }), "⚠️ JOB-1138: run FAILED — boom. cost unknown, 2400s, 80 turns");
+    "⚠️ APP-1138: run FAILED — session error: watchdog: run exceeded MAX_RUN_MS (40m) and was aborted. $2.83, 2400s, 80 turns");
+  assert.equal(session.buildRunNotification({ ...base, costUsd: null, summary: "boom." }), "⚠️ APP-1138: run FAILED — boom. cost unknown, 2400s, 80 turns");
   assert.equal(session.buildRunNotification({ ...base, issueId: undefined, costUsd: 0, numTurns: 0, durationSec: 0, summary: "Startup error: x" }),
     "⚠️ run FAILED — Startup error: x. 0s, 0 turns");
 });
 
 test("a fixed run reports the merge, not a confirmed production deploy", () => {
-  const line = session.buildRunNotification({ ...base, outcome: "fixed", prUrl: "https://github.com/JobLander-app/backend/pull/399", summary: "ok" });
-  assert.equal(line, "🚀 merged: JOB-1138 FIXED — https://github.com/JobLander-app/backend/pull/399 merged, deploy pending. ok. estimated $2.83, 2400s");
+  const line = session.buildRunNotification({ ...base, outcome: "fixed", prUrl: "https://github.com/example-org/backend/pull/399", summary: "ok" });
+  assert.equal(line, "🚀 merged: APP-1138 FIXED — https://github.com/example-org/backend/pull/399 merged, deploy pending. ok. estimated $2.83, 2400s");
   assert.doesNotMatch(line!, /in prod/);
 });
 
 test("a watchdog-aborted session is attributed to its selected ticket with streamed cost", async () => {
   const NOW = Date.now();
-  const candidate = { id: "issue-1", identifier: "JOB-1138", createdAt: new Date(NOW - 3_600_000).toISOString(), updatedAt: new Date(NOW - 60_000).toISOString(), reclaim: false };
+  const candidate = { id: "issue-1", identifier: "APP-1138", createdAt: new Date(NOW - 3_600_000).toISOString(), updatedAt: new Date(NOW - 60_000).toISOString(), reclaim: false };
   const notifications: string[] = [];
   const summaries: import("../src/trace").RunSummary[] = [];
   mock.method(accounting, "accountingStatus", () => ({ healthy: true }));
@@ -165,20 +157,20 @@ test("a watchdog-aborted session is attributed to its selected ticket with strea
 
   const summary = await session.runDispatchSession("cron", candidate);
   assert.equal(summary.outcome, "error");
-  assert.equal(summary.issueId, "JOB-1138");
+  assert.equal(summary.issueId, "APP-1138");
   assert.equal(summary.attempts?.length, 1, "a timeout is not a provider failure, so no fallback");
   assert.equal(summary.numTurns, 1);
   assert.ok(summary.costUsd !== null && Math.abs(summary.costUsd - (1000 * 3 + 1000 * 15) / 1e6) < 1e-12);
   assert.match(summary.summary, /watchdog: run exceeded MAX_RUN_MS \(\d+m\) and was aborted/);
   assert.equal(notifications.length, 1);
-  assert.match(notifications[0], /^⚠️ JOB-1138: run FAILED — session error: watchdog: run exceeded MAX_RUN_MS \(\d+m\) and was aborted\. \$0\.02, \d+s, 1 turns$/);
+  assert.match(notifications[0], /^⚠️ APP-1138: run FAILED — session error: watchdog: run exceeded MAX_RUN_MS \(\d+m\) and was aborted\. \$0\.02, \d+s, 1 turns$/);
   assert.equal(summaries.length, 1);
 });
 
 test("a run that claimed a different ticket is attributed to that ticket, not the selected one", async () => {
   const { LINEAR_AGENT_CLAIMED_LABEL_ID } = require("../src/config") as typeof import("../src/config");
   const NOW = Date.now();
-  const candidate = { id: "issue-1", identifier: "JOB-1138", createdAt: new Date(NOW - 3_600_000).toISOString(), updatedAt: new Date(NOW - 60_000).toISOString(), reclaim: false };
+  const candidate = { id: "issue-1", identifier: "APP-1138", createdAt: new Date(NOW - 3_600_000).toISOString(), updatedAt: new Date(NOW - 60_000).toISOString(), reclaim: false };
   const notifications: string[] = [];
   mock.method(accounting, "accountingStatus", () => ({ healthy: true }));
   mock.method(alerts, "alertAccounting", async () => {});
@@ -190,14 +182,14 @@ test("a run that claimed a different ticket is attributed to that ticket, not th
   for (const name of ["traceEvent", "recordAttemptStarted", "recordAttempt", "recordRun"] as const) mock.method(trace, name, () => {});
   mock.method(claude, "executeClaude", (input: Parameters<typeof claude.executeClaude>[0]) => realExecuteClaude(input, (async function* () {
     yield { type: "assistant", session_id: "s1", parent_tool_use_id: null, message: { id: "m1", model: "claude-sonnet-4-6", usage: u(1, 1),
-      content: [{ type: "tool_use", id: "toolu_1", name: "mcp__linear__update_issue", input: { id: "JOB-9999", labelIds: [LINEAR_AGENT_CLAIMED_LABEL_ID] } }] } };
+      content: [{ type: "tool_use", id: "toolu_1", name: "mcp__linear__update_issue", input: { id: "APP-9999", labelIds: [LINEAR_AGENT_CLAIMED_LABEL_ID] } }] } };
     // The provider's own marker names the selected ticket; the observed claim must still win.
-    yield { ...RESULT, result: '[DISPATCH_RESULT] {"outcome":"fixed","issue":"JOB-1138","repo":null,"pr":null,"note":"done"}' };
+    yield { ...RESULT, result: '[DISPATCH_RESULT] {"outcome":"fixed","issue":"APP-1138","repo":null,"pr":null,"note":"done"}' };
   }) as any));
 
   const summary = await session.runDispatchSession("cron", candidate);
   assert.equal(summary.outcome, "error");
   assert.match(summary.summary, /claimed outside the exact selected candidate/);
-  assert.equal(summary.issueId, "JOB-9999");
-  assert.match(notifications[0], /^⚠️ JOB-9999: run FAILED/);
+  assert.equal(summary.issueId, "APP-9999");
+  assert.match(notifications[0], /^⚠️ APP-9999: run FAILED/);
 });

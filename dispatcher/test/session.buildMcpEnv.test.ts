@@ -1,22 +1,3 @@
-// Regression test for JOB-916: the per-server MCP env builders must use an
-// allowlist, never copy process.env wholesale, and must NOT include any
-// credentials in the environment passed to MCP child processes.
-//
-// The old buildMcpEnv() iterated over all of process.env and serialised
-// every key into the --mcp-config argv passed to the claude child process.
-// Because argv is world-readable via `ps` or /proc/<pid>/cmdline, this leaked
-// at minimum: CLAUDE_CODE_OAUTH_TOKEN, TG_BOT_TOKEN, TRIGGER_TOKEN,
-// and LINEAR_API_KEY to any user on the machine.
-//
-// The fix:
-//   1. Three per-server allowlist builders — no credentials forwarded.
-//   2. firebase MCP uses ADC (applicationDefault()) when GCP_PRIVATE_KEY_BASE_64
-//      is absent — as is always the case on the self-healing VM.
-//   3. sentry MCP already fetched SENTRY_TOKEN itself from Secret Manager.
-//   4. linear MCP now fetches LINEAR_API_KEY itself from Secret Manager
-//      (mcp/linear/tools.js gcloud fallback added in this PR).
-//
-// Result: `ps -eo args | grep mcp-config` contains no credentials.
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
@@ -25,7 +6,7 @@ import { test } from "node:test";
 // config.ts can initialise without throwing or hitting Secret Manager.
 process.env.GCP_PROJECT = "test-project-id";
 process.env.GCP_PROJECT_ID = "test-project-id";
-process.env.LINEAR_TEAM = "JobLander";
+process.env.LINEAR_TEAM = "Example";
 process.env.LOG_DIR = "/tmp";
 
 import { buildFirebaseMcpEnv, buildSentryMcpEnv, buildLinearMcpEnv } from "../src/session";

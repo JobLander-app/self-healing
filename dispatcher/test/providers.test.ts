@@ -86,7 +86,7 @@ test("fallback preserves same-ticket handover, never retries arbitrary task erro
       }, record: a => { attempts.push(a.provider); } });
     return { value, seen, attempts };
   };
-  const quota = await run("quota", true, ["JOB-1"]);
+  const quota = await run("quota", true, ["APP-1"]);
   assert.deepEqual(quota.attempts, ["claude", "codex"]);
   assert.match(quota.seen[1], /Work on this ticket ONLY/);
   assert.match(quota.seen[1], /NEW session/);
@@ -177,11 +177,11 @@ test("Linear failure still notifies and never claims ticket creation", async () 
   const { reportDependencyFailure } = await import("../src/healthcheck");
   const messages: string[] = [], order: string[] = [];
   const failure = { dep: "linear", detail: "offline", healthy: false, latencyMs: 0 };
-  await reportDependencyFailure(failure, { resolveKey: async () => { throw new Error("unreachable"); }, exists: async () => false, file: async () => "JOB-1", notify: async s => { messages.push(s); } });
+  await reportDependencyFailure(failure, { resolveKey: async () => { throw new Error("unreachable"); }, exists: async () => false, file: async () => "APP-1", notify: async s => { messages.push(s); } });
   assert.match(messages[0], /could not be filed/);
-  await reportDependencyFailure(failure, { resolveKey: async () => "key", exists: async () => false, file: async () => { order.push("file"); return "JOB-1"; }, notify: async s => { order.push("notify"); messages.push(s); } });
+  await reportDependencyFailure(failure, { resolveKey: async () => "key", exists: async () => false, file: async () => { order.push("file"); return "APP-1"; }, notify: async s => { order.push("notify"); messages.push(s); } });
   assert.deepEqual(order, ["file", "notify"]);
-  assert.match(messages[1], /JOB-1 filed/);
+  assert.match(messages[1], /APP-1 filed/);
   await reportDependencyFailure(failure, { resolveKey: async () => "key", exists: async () => true, file: async () => { throw new Error("must not duplicate"); }, notify: async s => { messages.push(s); } });
   assert.match(messages[2], /Existing repair ticket/);
 });
@@ -236,7 +236,7 @@ test("monitor fallback keeps its escalation scope and never retries after tool a
   assert.match(prompt, /SAME monitor escalation batch/);
   assert.match(prompt, /Do not pick or claim repair tickets/);
   assert.equal(fallbackAllowed(previous, "monitor"), true);
-  assert.equal(fallbackAllowed({ ...previous, toolsUsed: true, issueIds: ["JOB-1"] }, "monitor"), false);
+  assert.equal(fallbackAllowed({ ...previous, toolsUsed: true, issueIds: ["APP-1"] }, "monitor"), false);
 });
 
 test("unavailable intent coverage does not authorize infrastructure reversal", () => {
