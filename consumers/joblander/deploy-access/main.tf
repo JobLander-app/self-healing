@@ -28,6 +28,7 @@ resource "google_service_account" "deploy" {
   project      = local.project
   account_id   = "self-healing-deploy"
   display_name = "Self-healing reviewed GitHub deployment"
+  depends_on   = [google_project_service.required]
 }
 
 # The existing pool only accepts the JobLander-app organization. This binding
@@ -61,12 +62,20 @@ resource "google_project_iam_member" "discover" {
   member  = local.member
 }
 
+resource "google_project_service" "required" {
+  for_each           = toset(["iap.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com"])
+  project            = local.project
+  service            = each.value
+  disable_on_destroy = false
+}
+
 resource "google_iap_tunnel_instance_iam_member" "ssh" {
-  project  = local.project
-  zone     = local.zone
-  instance = local.vm
-  role     = "roles/iap.tunnelResourceAccessor"
-  member   = local.member
+  project    = local.project
+  zone       = local.zone
+  instance   = local.vm
+  role       = "roles/iap.tunnelResourceAccessor"
+  member     = local.member
+  depends_on = [google_project_service.required]
 }
 
 resource "google_service_account_iam_member" "runtime_identity" {
