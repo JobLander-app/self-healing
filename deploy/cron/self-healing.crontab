@@ -1,6 +1,8 @@
 # Installed as the dedicated agent user's entire crontab. Edit the profile, not the host copy.
 SHELL=/bin/bash
-PATH=/usr/local/bin:/usr/bin:/bin
+# Ubuntu images may install the Cloud SDK through Snap. Scheduled probes need
+# the same system executable locations as the service environment.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
 WATCH_NOTIFY_SCRIPT=__AGENT_HOME__/self-healing/deploy/bin/self-healing-notify.py
 
 # Write the external heartbeat only after a successful tick.
