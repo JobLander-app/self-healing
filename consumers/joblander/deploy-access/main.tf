@@ -33,10 +33,11 @@ resource "google_service_account" "deploy" {
 
 # The existing pool only accepts the JobLander-app organization. This binding
 # narrows it to this repository's main branch, excluding PR and fork tokens.
+# Match the repository's OIDC sub_claim_prefix, including immutable owner/repo IDs.
 resource "google_service_account_iam_member" "github" {
   service_account_id = google_service_account.deploy.name
   role               = "roles/iam.workloadIdentityUser"
-  member             = "principal://iam.googleapis.com/projects/255174193709/locations/global/workloadIdentityPools/github-actions/subject/repo:JobLander-app/self-healing:ref:refs/heads/main"
+  member             = "principal://iam.googleapis.com/projects/255174193709/locations/global/workloadIdentityPools/github-actions/subject/repo:JobLander-app@181870937/self-healing@1301755140:ref:refs/heads/main"
 }
 
 # This host uses metadata SSH keys, not OS Login. gcloud installs an expiring
