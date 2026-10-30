@@ -1,0 +1,38 @@
+# One-time portable-release migration, built from an exact reviewed GitHub SHA.
+timeout: 1200s
+serviceAccount: projects/meet-assistant-6d8ad/serviceAccounts/255174193709-compute@developer.gserviceaccount.com
+options:
+  logging: CLOUD_LOGGING_ONLY
+steps:
+  - id: plan
+    name: hashicorp/terraform:1.5.7
+    dir: consumers/joblander/terraform
+    entrypoint: sh
+    args:
+      - -ec
+      - |
+        terraform init -input=false
+        terraform plan -input=false -lock-timeout=60s -out=/workspace/migration.tfplan \
+          -target=module.dashboard \
+          -target=module.self_healing.google_compute_instance.this \
+          '-target=module.self_healing.google_logging_metric.product_output[0]' \
+          '-target=module.self_healing.google_monitoring_alert_policy.no_product_output[0]' \
+          '-target=module.self_healing.google_storage_bucket_iam_member.logs_bucket[0]' \
+          -target=module.self_healing.google_logging_metric.meetings_saved \
+          -target=module.self_healing.google_monitoring_alert_policy.no_meetings_saved \
+          -target=module.self_healing.google_storage_bucket_iam_member.logs_bucket
+        terraform show -json /workspace/migration.tfplan > /workspace/migration-plan.json
+  - id: validate-plan
+    name: python:3.11-slim
+    entrypoint: python3
+    args: [consumers/joblander/terraform/validate-migration.py, /workspace/migration-plan.json]
+  - id: apply-reviewed-plan
+    name: hashicorp/terraform:1.5.7
+    dir: consumers/joblander/terraform
+    entrypoint: terraform
+    args: [apply, -input=false, /workspace/migration.tfplan]
+  - id: dashboard-url
+    name: hashicorp/terraform:1.5.7
+    dir: consumers/joblander/terraform
+    entrypoint: terraform
+    args: [output, -raw, dashboard_url]
