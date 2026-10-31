@@ -48,6 +48,9 @@ resource "google_monitoring_alert_policy" "legacy_5xx" {
     notification_prompts = ["OPENED"]
   }
   notification_channels = ["projects/meet-assistant-6d8ad/notificationChannels/12522190450093504822"]
+  # Preserve the existing subject-only documentation exactly on import; the
+  # provider otherwise fills an empty MIME type even before the cutover.
+  lifecycle { ignore_changes = [documentation] }
 }
 
 output "monitor_topic" { value = module.monitor_ingress.topic }
