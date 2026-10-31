@@ -105,3 +105,18 @@ transaction for a full minute. It reports provider readiness separately: old
 provider evidence is not proof of a new successful model session. Check new
 monitor/watcher heartbeats and runtime logs after deployment. Unrelated Terraform
 changes, including watchdog build-artifact updates, are intentionally deferred.
+
+## Incoming-error delivery
+
+The monitor ingress build runs from the reviewed main commit using
+`terraform/cloudbuild-monitor-ingress.yaml`. Provision with `_CUTOVER=false`
+first. Its dedicated push identity and topic need a one-time owner bootstrap:
+apply the reviewed `deploy-access/` plan after those resources exist. The two
+custom roles grant the build only IAM-policy reads/writes on that identity and
+topic, not project-wide IAM administration. Re-run provisioning, prove an
+authenticated webhook monitor run, then use `_CUTOVER=true`. The build refuses
+cutover without a successful event-run heartbeat in the last 30 minutes.
+
+Only services in `targets.json` leave the old raw 5xx pager; unmonitored services
+retain coverage. Monitor-confirmed urgent pages and independent loop alerts
+continue through their existing channels.
