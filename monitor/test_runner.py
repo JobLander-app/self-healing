@@ -232,6 +232,27 @@ class MonitorRunnerTests(unittest.TestCase):
             self.assertTrue(runner.publish_heartbeat(result))
             self.assertTrue(command.call_args.args[0][4].startswith("MONITOR_HEARTBEAT success "))
 
+    def test_frequent_events_do_not_multiply_pages_but_new_incidents_page_immediately(self):
+        pager = Mock()
+        with patch.object(runner.time, "time", return_value=1000):
+            runner.deliver_pending(self.config, ["first count"], pager, {"first count": "api:failure:P0"})
+        with patch.object(runner.time, "time", return_value=1300):
+            runner.deliver_pending(self.config, ["larger count", "different failure"], pager,
+                                   {"larger count": "api:failure:P0", "different failure": "api:other:P0"})
+        self.assertEqual(pager.call_count, 2)
+        with patch.object(runner.time, "time", return_value=4600):
+            runner.deliver_pending(self.config, ["larger count"], pager, {"larger count": "api:failure:P0"})
+        self.assertEqual(pager.call_count, 3)
+
+    def test_failed_page_delivery_has_no_receipt_and_retries_on_next_trigger(self):
+        sent, failures = runner.deliver_pending(self.config, ["urgent"], Mock(side_effect=RuntimeError("offline")),
+                                                {"urgent": "api:failure:P0"})
+        self.assertEqual(sent, [])
+        self.assertTrue(failures)
+        pager = Mock()
+        runner.deliver_pending(self.config, [], pager)
+        pager.assert_called_once_with("urgent")
+
     def test_event_lock_collision_is_retryable_not_acknowledged_as_success(self):
         with patch.object(runner.Config, "from_env", return_value=self.config), \
              patch.object(runner.signal, "signal"), patch.dict(os.environ, {}, clear=False):

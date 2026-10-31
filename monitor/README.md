@@ -5,7 +5,10 @@ hourly cron remains an independent fallback; both invoke `run-monitor-session.sh
 hold the same process lock, read the same sources and apply the same severity,
 false-positive and ticket-deduplication policy. A notification is only a hint to
 collect evidence, never an instruction to the agent. Confirmed urgent P0 pages
-and the loop's own dead-man alerts remain enabled.
+and the loop's own dead-man alerts remain enabled. Successful urgent pages have
+one-hour delivery receipts per signature/severity, so frequent event runs do not
+multiply reminders; a new signature or higher severity pages immediately. Failed
+deliveries stay in the outbox. These receipts never suppress investigations.
 
 The GCP path is Logging → Monitoring → Pub/Sub → HTTPS `/monitor/alerts` → the
 monitor. Pub/Sub signs an OIDC token; the receiver verifies its signature, expiry,

@@ -141,6 +141,20 @@ class FalsePositiveTests(unittest.TestCase):
             with patch.object(runner, 'decisions', return_value=[rule]):
                 self.assertEqual(len(runner.prepare_escalations(config, summary)['escalations']), 1)
 
+    def test_early_webhook_observation_does_not_hide_later_threshold_crossing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            signature = 'api:eu:growing-error'
+            runner.write_json(Path(directory) / 'latest-report.json', {'error_groups': [
+                {'signature': signature, 'severity': 'P3', 'count': 8, 'diff_status': 'new'}]})
+            group = {'signature': signature, 'severity': 'P2', 'count': 10, 'service': 'api',
+                     'region': 'eu', 'first_seen': runner.timestamp(), 'last_seen': runner.timestamp(),
+                     'sample_message': 'growing error'}
+            groups, _ = triage.diff_with_previous({signature: group}, directory)
+            self.assertEqual(groups[0]['diff_status'], 'recurring')
+            with patch.object(triage, 'ADAPTER', None):
+                _, escalations = triage.build_escalations(groups)
+            self.assertEqual(escalations[0]['action'], 'linear_create_if_no_dup')
+
     def test_label_outage_still_pages_before_deferring_inference(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

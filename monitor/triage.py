@@ -511,6 +511,7 @@ def diff_with_previous(groups, state_dir):
                 g["diff_status"] = "recurring"
             g["linear_issue"] = old[sig].get("linear_issue")
             g["recheck_after_suppression"] = bool(old[sig].get("suppressed"))
+            g["severity_increased"] = _SEV_RANK.get(g["severity"], 0) > _SEV_RANK.get(old[sig].get("severity"), 0)
         g.setdefault("linear_issue", None)
         summary["total_errors"] += g["count"]
         summary["by_region"][g["region"]] = summary["by_region"].get(g["region"], 0) + g["count"]
@@ -1106,7 +1107,9 @@ def build_escalations(final_groups, cooldowns=None):
             # An expired suppression also needs a new investigation even when
             # its retained count is stable. P3 stays report_only.
             item["action"] = "linear_create_if_no_dup"
-        elif sev == "P2" and status == "new":
+        elif sev == "P2" and (status == "new" or (g.get("severity_increased") and not g.get("linear_issue"))):
+            # An early webhook may observe a sub-threshold P3 first. Crossing
+            # the filing threshold later is eligible even though it is not new.
             item["action"] = "linear_create_if_no_dup"
         elif sev == "P2" and g.get("ensure_open_issue") and not g.get("linear_issue"):
             # Adapters can require a ticket even when a signal is not new.

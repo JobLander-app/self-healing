@@ -226,12 +226,22 @@ def send_p0(alert):
         raise RuntimeError("Telegram P0 delivery failed") from None
 
 
-def deliver_pending(config, alerts, pager):
+def deliver_pending(config, alerts, pager, identities=None):
     """At-least-once delivery; commit the outbox before contacting Telegram."""
     path = config.state_dir / "p0-outbox.json"
     pending = json.loads(path.read_text()) if path.exists() else {}
+    history_path = config.state_dir / "page-deliveries.json"
+    history = json.loads(history_path.read_text()) if history_path.exists() else {}
+    now = time.time()
+    history = {key: at for key, at in history.items() if now - at < 3600}
     for alert in alerts:
-        pending.setdefault(hashlib.sha256(alert.encode()).hexdigest(), alert)
+        identity = (identities or {}).get(alert, alert)
+        key = hashlib.sha256(identity.encode()).hexdigest()
+        if key not in history:
+            pending.setdefault(key, alert)
+    # Delivery receipts also cover a crash after sending but before removing
+    # the outbox entry. They do not suppress ticket creation or investigations.
+    pending = {key: alert for key, alert in pending.items() if key not in history}
     pending = retire_pending(config, pending, "page_prefixes")
     write_json(path, pending)
     sent, failures = [], []
@@ -239,6 +249,8 @@ def deliver_pending(config, alerts, pager):
         try:
             pager(alert)
             sent.append(alert)
+            history[key] = time.time()
+            write_json(history_path, history)
             del pending[key]
             write_json(path, pending)
         except Exception:
@@ -449,7 +461,9 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
             result["status"] = "success"
             result["dryRun"] = True
         else:
-            sent, failures = deliver_pending(config, summary["p0_alerts"], pager)
+            identities = {item["alert_text"]: item["signature"] + ":" + str(item.get("severity"))
+                          for item in summary["escalations"] if item.get("alert_text")}
+            sent, failures = deliver_pending(config, summary["p0_alerts"], pager, identities)
             result["telegramSent"].extend(sent)
             result["errors"].extend(failures)
             batch = prepare_escalations(config, summary)
