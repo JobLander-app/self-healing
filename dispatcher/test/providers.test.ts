@@ -3,6 +3,7 @@ import { test } from "node:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { spawnSync } from "node:child_process";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "shl-providers-"));
 process.env.LOG_DIR = path.join(root, "turns");
@@ -10,6 +11,7 @@ process.env.CODEX_BIN = path.join(root, "codex");
 process.env.CODEX_HOME = path.join(root, "auth");
 process.env.CODEX_ENABLED = "true";
 process.env.CODEX_MODEL = "verified-test-model";
+process.env.GCP_PROJECT = "provider-test-project";
 
 test("Claude and Codex quota variants and dated resets", async () => {
   const { isLimitError, parseResetTime } = await import("../src/pause");
@@ -71,6 +73,33 @@ test("Codex authentication cannot inherit API keys or dispatcher secrets", async
   assert.ok(args.includes('forced_login_method="chatgpt"'));
   assert.ok(args.includes("mcp_servers.linear.required=true"));
   assert.equal(args.at(-1), "-");
+});
+
+test("Codex MCP children receive cloud routing without credential values in argv", async () => {
+  const { codexEnv, codexArgs } = await import("../src/codex");
+  const cloud = { CLOUDSDK_CONFIG: "/tmp/cloud-config", GOOGLE_APPLICATION_CREDENTIALS: "/tmp/adc.json",
+    LINEAR_API_KEY_SECRET: "linear-test-secret", SENTRY_ORG: "test-org", SENTRY_PROJECT_ID: "42",
+    SENTRY_TOKEN_SECRET: "sentry-test-secret", SSL_CERT_FILE: "/tmp/ca.pem", SSL_CERT_DIR: "/tmp/ca" };
+  const env = codexEnv({ HOME: root, PATH: process.env.PATH, ...cloud,
+    LINEAR_API_KEY: "forbidden-value", SENTRY_TOKEN: "forbidden-value", OPENAI_API_KEY: "forbidden-value" });
+  const entries = { linear: "/repo/linear.js", sentry: "/repo/sentry.js", firebase: "/repo/firebase.js" };
+  const args = codexArgs(entries, "model");
+  for (const name of Object.keys(entries)) {
+    const setting = args.find(arg => arg.startsWith(`mcp_servers.${name}.env_vars=`));
+    assert.ok(setting, `${name} must explicitly forward cloud routing into its MCP process`);
+    const names: string[] = JSON.parse(setting.slice(setting.indexOf("=") + 1));
+    // Exercise the CLI -> MCP boundary: standard vars plus explicitly allowed
+    // names, not the entire CLI environment. A CLI-only env fix must fail here.
+    const childEnv = Object.fromEntries(["HOME", "PATH", ...names]
+      .filter(key => env[key] !== undefined).map(key => [key, env[key]!]));
+    const child = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify(process.env))"], { env: childEnv, encoding: "utf8" });
+    assert.equal(child.status, 0, child.stderr);
+    const received = JSON.parse(child.stdout);
+    assert.equal(received.GCP_PROJECT_ID, "provider-test-project");
+    for (const [key, value] of Object.entries(cloud)) assert.equal(received[key], value);
+    assert.ok(!Object.values(received).includes("forbidden-value"));
+    for (const value of Object.values(cloud)) assert.ok(!args.join(" ").includes(value));
+  }
 });
 
 test("fallback preserves same-ticket handover, never retries arbitrary task errors", async () => {

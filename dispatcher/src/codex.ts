@@ -9,6 +9,11 @@ import type { Duplex } from "node:stream";
 import { unknownUsage, type AttemptResult, type ProviderAttempt, type TokenUsage } from "./providerTypes";
 
 const number = (n: unknown): number | null => typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : null;
+// Codex stdio MCP children inherit a smaller environment than the CLI itself.
+// Forward names only; each server resolves its credentials from Secret Manager.
+const MCP_ENV_VARS = ["GCP_PROJECT_ID", "CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS",
+  "LINEAR_API_KEY_SECRET", "SENTRY_ORG", "SENTRY_PROJECT_ID", "SENTRY_TOKEN_SECRET",
+  "SSL_CERT_FILE", "SSL_CERT_DIR"];
 export function codexUsage(value: unknown): TokenUsage {
   const u = value as Record<string, unknown> | undefined;
   return { input: number(u?.input_tokens), cachedInput: number(u?.cached_input_tokens), cacheWrite: number(u?.cache_write_input_tokens), output: number(u?.output_tokens) };
@@ -26,7 +31,8 @@ export function codexArgs(entries: Record<string, string>, model: string): strin
   const args = ["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--color", "never", "-m", model,
     "-c", 'forced_login_method="chatgpt"', "-c", 'cli_auth_credentials_store="file"', "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="medium"'];
   for (const [name, entry] of Object.entries(entries)) {
-    args.push("-c", `mcp_servers.${name}.command="node"`, "-c", `mcp_servers.${name}.args=${JSON.stringify([entry])}`, "-c", `mcp_servers.${name}.required=true`);
+    args.push("-c", `mcp_servers.${name}.command="node"`, "-c", `mcp_servers.${name}.args=${JSON.stringify([entry])}`,
+      "-c", `mcp_servers.${name}.env_vars=${JSON.stringify(MCP_ENV_VARS)}`, "-c", `mcp_servers.${name}.required=true`);
   }
   args.push("-");
   return args;

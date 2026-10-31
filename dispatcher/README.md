@@ -45,6 +45,9 @@ python3 ../config/run.py --profile ../consumers/my-app/profile.json -- node dist
 ```
 
 Credentials are supplied by the service's EnvironmentFile / Secret Manager.
+Codex forwards cloud project/credential-path and secret-name configuration to
+each stdio MCP server through `env_vars`; inheriting it in the CLI alone is not
+enough. The MCP servers retrieve their own credentials from Secret Manager.
 `DRY_RUN=true` and `AUTO_MERGE=false` are the new-consumer defaults. Inspect
 `GET /status`, `/feed`, `/metrics` and `/health` on localhost:4100. Readiness,
 accounting health, provider readiness and VM liveness are separate signals.
