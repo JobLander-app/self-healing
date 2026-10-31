@@ -7,8 +7,10 @@ PREFIX = "module.monitor_ingress."
 NEW = {PREFIX + name for name in (
     "google_pubsub_topic.errors", "google_service_account.push",
     "google_service_account_iam_member.token_creator", "google_pubsub_subscription.push",
-    "google_monitoring_notification_channel.monitor", "google_pubsub_topic_iam_member.monitoring",
-    "google_monitoring_alert_policy.errors")}
+    "google_logging_project_sink.errors", "google_pubsub_topic_iam_member.logging")}
+RETIRED = {PREFIX + name for name in (
+    "google_monitoring_alert_policy.errors", "google_monitoring_notification_channel.monitor",
+    "google_pubsub_topic_iam_member.monitoring")}
 LEGACY = "google_monitoring_alert_policy.legacy_5xx"
 
 
@@ -22,6 +24,10 @@ def validate(plan):
         if c["actions"] in (["no-op"], ["read"]):
             continue
         before, after = c.get("before") or {}, c.get("after") or {}
+        # Remove only the quota-limited wake-up resources introduced by this
+        # rollout. The existing human pager and all loop alerts are protected.
+        if c["actions"] == ["delete"] and address in RETIRED and before.get("project") == "meet-assistant-6d8ad":
+            continue
         if c["actions"] == ["create"] and address in NEW:
             if after.get("project", "meet-assistant-6d8ad") == "meet-assistant-6d8ad":
                 continue
@@ -46,4 +52,4 @@ def validate(plan):
 
 if __name__ == "__main__":
     validate(json.loads(Path(sys.argv[1]).read_text()))
-    print("Ingress plan contains only reviewed additive resources and scoped paging cutover")
+    print("Ingress plan contains only reviewed ingress resources, obsolete wake-up cleanup and scoped paging cutover")

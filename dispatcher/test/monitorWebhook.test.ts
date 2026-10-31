@@ -29,6 +29,11 @@ test("only this subscription/project can wake the monitor; closed incidents do n
   assert.throws(() => parseWakeup({ ...envelope(incident), subscription: "other" }, options));
   assert.throws(() => parseWakeup(envelope({ incident: { ...incident.incident, scoping_project_id: "other" } }), options));
   assert.throws(() => parseWakeup(envelope({ command: "rm -rf /" }), options));
+  const entry = { logName: `projects/${options.project}/logs/run.googleapis.com%2Fstderr`,
+    resource: { type: "cloud_run_revision", labels: { project_id: options.project } },
+    textPayload: "large error ".repeat(20_000) };
+  assert.equal(parseWakeup(envelope(entry), options), "123");
+  assert.throws(() => parseWakeup(envelope({ ...entry, logName: "projects/other/logs/errors" }), options));
 });
 
 test("wake-ups survive restart, coalesce a burst and re-read after the window matures", async () => {
@@ -86,7 +91,7 @@ test("corrupt durable state is not silently reset", () => {
 test("HTTP rejects unauthenticated/wrong identities, and only acknowledges durable acceptance", async () => {
   const dir = mkdtempSync(join(tmpdir(), "monitor-http-"));
   const q = new MonitorWakeups(join(dir, "state.json"), async () => 0);
-  const app = express(); app.use(express.json());
+  const app = express();
   app.use("/", monitorRouter(options, q, async token => {
     if (token === "invalid") throw new Error("invalid signature");
     return token === "valid" ? identity : { ...identity, email: "someone-else@example.com" };
@@ -107,6 +112,13 @@ test("HTTP rejects unauthenticated/wrong identities, and only acknowledges durab
     assert.equal(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).pending, true);
     assert.equal((await post("valid")).status, 204);
     assert.equal(q.status().generation, 1);
+    const largeEntry = envelope({ logName: `projects/${options.project}/logs/errors`,
+      resource: { type: "cloud_run_revision", labels: { project_id: options.project } },
+      textPayload: "e".repeat(200_000) }, "124");
+    const largeResponse = await fetch(`http://127.0.0.1:${address.port}/`, { method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer valid" }, body: JSON.stringify(largeEntry) });
+    assert.equal(largeResponse.status, 204);
+    assert.equal(q.status().generation, 2);
     q.accept = () => { throw new Error("disk full"); };
     assert.equal((await post("valid")).status, 503);
   } finally {

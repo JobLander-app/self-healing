@@ -10,10 +10,12 @@ one-hour delivery receipts per signature/severity, so frequent event runs do not
 multiply reminders; a new signature or higher severity pages immediately. Failed
 deliveries stay in the outbox. These receipts never suppress investigations.
 
-The GCP path is Logging → Monitoring → Pub/Sub → HTTPS `/monitor/alerts` → the
+The GCP path is a Cloud Logging sink → Pub/Sub → HTTPS `/monitor/alerts` → the
 monitor. Pub/Sub signs an OIDC token; the receiver verifies its signature, expiry,
 exact audience and verified service-account email, and checks the subscription
-and source project. No shared webhook password is stored in Terraform. Only this
+and source project. No shared webhook password is stored in Terraform. Streaming avoids the 20
+notifications/day limit of a log-based alert policy. Pub/Sub traffic is metered;
+the queue coalesces collections, not incoming message delivery. Only this
 route is exposed through Caddy; the dispatcher API stays on loopback.
 
 The receiver persists a coalesced wake-up before returning 204. Pub/Sub retries

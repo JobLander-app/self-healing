@@ -8,7 +8,6 @@ import { configuredMonitorIngress, MonitorWakeups, monitorRouter, runTriggeredMo
 
 export function startApi(): Promise<void> {
   const app = express();
-  app.use(express.json());
 
   const ingress = configuredMonitorIngress();
   if (ingress) {
@@ -20,6 +19,7 @@ export function startApi(): Promise<void> {
       console.error("MONITOR_WEBHOOK_ERROR queue processing failed");
     }); }, 5_000).unref();
   }
+  app.use(express.json());
 
   // CORS — allow Owner dashboards / any operator UI.
   app.use((_req, res, next) => {
