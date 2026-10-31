@@ -113,7 +113,11 @@ The monitor ingress build runs from the reviewed main commit using
 first. Its dedicated push identity and topic need a one-time owner bootstrap:
 apply the reviewed `deploy-access/` plan after those resources exist. The two
 custom roles grant the build only IAM-policy reads/writes on that identity and
-topic, not project-wide IAM administration. Re-run provisioning, prove an
+topic, not project-wide IAM administration. A third custom role grants only
+`logging.sinks.create/get/update/delete` at project scope, as required by the
+[Logging API](https://docs.cloud.google.com/logging/docs/reference/v2/rest/v2/projects.sinks/create).
+It cannot change log retention, buckets or exclusions. The build's plan guard
+restricts sink changes to the reviewed monitor ingress resource. Re-run provisioning, prove an
 authenticated webhook monitor run, then use `_CUTOVER=true`. The build refuses
 cutover without a successful event-run heartbeat in the last 30 minutes.
 
