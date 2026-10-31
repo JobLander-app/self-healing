@@ -22,6 +22,14 @@ class IngressPlanTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 guard.validate(self.plan(address, actions))
 
+    def test_cleanup_is_limited_to_the_new_obsolete_wakeup_policy(self):
+        for address in guard.RETIRED:
+            guard.validate(self.plan(address, ['delete'], {'project': 'meet-assistant-6d8ad'}))
+            with self.assertRaises(ValueError):
+                guard.validate(self.plan(address, ['delete'], {'project': 'other-project'}))
+        with self.assertRaises(ValueError):
+            guard.validate(self.plan(guard.LEGACY, ['delete'], {'project': 'meet-assistant-6d8ad'}))
+
     def test_old_policy_can_only_exclude_monitored_services_without_losing_other_coverage(self):
         query = 'fetch cloud_run_revision\n| filter (response_code_class == "5xx")\n| condition val() > 5'
         before = {"project": "meet-assistant-6d8ad", "enabled": True,

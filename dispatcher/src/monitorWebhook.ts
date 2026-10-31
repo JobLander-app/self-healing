@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, json } from "express";
 import { OAuth2Client, TokenPayload } from "google-auth-library";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -101,11 +101,16 @@ export function parseWakeup(body: unknown, options: MonitorIngress): string | nu
   const b = body as { subscription?: string; message?: { messageId?: unknown; data?: unknown } } | null;
   if (!b || b.subscription !== options.subscription || !b.message ||
       typeof b.message.messageId !== "string" || !/^\d{1,80}$/.test(b.message.messageId) ||
-      typeof b.message.data !== "string" || b.message.data.length > 90_000 ||
+      typeof b.message.data !== "string" || b.message.data.length > 2_000_000 ||
       !/^[A-Za-z0-9+/]+={0,2}$/.test(b.message.data)) throw new Error("Invalid Pub/Sub envelope");
   const value = JSON.parse(Buffer.from(b.message.data, "base64").toString("utf8"));
   // The probe exercises transport + the real collector without inventing an error.
   if (value?.kind === "monitor-wakeup" && value.project === options.project) return b.message.messageId;
+  // Cloud Logging exports each LogEntry as JSON. Contents are only a wake-up;
+  // the collector independently reads its configured project and service scope.
+  if (typeof value?.logName === "string" && value.logName.startsWith(`projects/${options.project}/logs/`) &&
+      value.resource?.labels?.project_id === options.project &&
+      ["cloud_run_revision", "cloud_function"].includes(value.resource?.type)) return b.message.messageId;
   const incident = value?.incident;
   if (!incident || incident.scoping_project_id !== options.project ||
       !["open", "closed"].includes(incident.state)) throw new Error("Invalid Monitoring incident");
@@ -117,12 +122,14 @@ export function monitorRouter(options: MonitorIngress, queue: MonitorWakeups,
     idToken: token, audience: options.audience,
   })).getPayload()): Router {
   const router = Router();
-  router.post("/", async (req, res) => {
+  router.post("/", async (req, res, next) => {
     const match = /^Bearer ([^\s]+)$/.exec(req.header("authorization") || "");
     if (!match) { res.sendStatus(401); return; }
     try {
       if (!validIdentity(await verify(match[1]), options)) { res.sendStatus(403); return; }
     } catch { res.sendStatus(401); return; }
+    next();
+  }, json({ limit: "2mb" }), (req, res) => {
     let id: string | null;
     try { id = parseWakeup(req.body, options); }
     catch { res.sendStatus(400); return; }

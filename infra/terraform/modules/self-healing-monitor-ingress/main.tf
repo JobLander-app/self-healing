@@ -50,45 +50,27 @@ resource "google_pubsub_subscription" "push" {
   depends_on = [google_service_account_iam_member.token_creator]
 }
 
-resource "google_monitoring_notification_channel" "monitor" {
-  project      = var.project_id
-  display_name = "Self-healing monitor wake-up (no human page)"
-  type         = "pubsub"
-  labels       = { topic = google_pubsub_topic.errors.id }
-}
-
-resource "google_pubsub_topic_iam_member" "monitoring" {
-  project    = var.project_id
-  topic      = google_pubsub_topic.errors.name
-  role       = "roles/pubsub.publisher"
-  member     = "serviceAccount:service-${var.project_number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com"
-  depends_on = [google_monitoring_notification_channel.monitor]
-}
-
-resource "google_monitoring_alert_policy" "errors" {
-  project      = var.project_id
-  display_name = "Self-healing: production error wakes monitor"
-  combiner     = "OR"
-  conditions {
-    display_name = "An error in the monitored application scope"
-    condition_matched_log { filter = var.trigger_config.filter }
-  }
-  documentation {
-    mime_type = "text/markdown"
-    content   = "Wake-up only. The monitor re-reads production logs and applies the same thresholds, ticket decisions and suppressions as its hourly fallback. This notification never pages a person."
-  }
-  alert_strategy {
-    notification_rate_limit { period = "300s" }
-    auto_close = "1800s"
-  }
-  notification_channels = [google_monitoring_notification_channel.monitor.id]
-  depends_on            = [google_pubsub_topic_iam_member.monitoring]
+# A log stream has no Monitoring notification quota. The receiver coalesces
+# bursts; severity thresholds and suppression still belong to the shared monitor.
+resource "google_logging_project_sink" "errors" {
+  project                = var.project_id
+  name                   = "self-healing-monitor-errors"
+  destination            = "pubsub.googleapis.com/${google_pubsub_topic.errors.id}"
+  filter                 = var.trigger_config.filter
+  unique_writer_identity = true
   lifecycle {
     precondition {
       condition     = var.trigger_config.project == var.project_id && var.trigger_config.filter != ""
       error_message = "Generate a non-empty trigger config from this consumer's targets.json."
     }
   }
+}
+
+resource "google_pubsub_topic_iam_member" "logging" {
+  project = var.project_id
+  topic   = google_pubsub_topic.errors.name
+  role    = "roles/pubsub.publisher"
+  member  = google_logging_project_sink.errors.writer_identity
 }
 
 output "topic" { value = google_pubsub_topic.errors.id }
