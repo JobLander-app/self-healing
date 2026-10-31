@@ -82,6 +82,8 @@ jobs:
         run: python3 -m py_compile monitor/triage.py monitor/run_monitor.py monitor/topology.py dispatcher/scripts/codex-session.py
       - name: Unit tests
         run: |
+          python3 monitor/trigger_config.py consumers/joblander/targets.json consumers/joblander/monitor-trigger.json --check
+          python3 monitor/trigger_config.py consumers/example/targets.json consumers/example/monitor-trigger.json --check
           python3 -m unittest discover -s monitor -p "test_*.py" -v
           python3 -m unittest discover -s config -p "test_*.py" -v
           PYTHONPATH=monitor python3 config/run.py --profile consumers/joblander/profile.json -- python3 -m unittest discover -s consumers/joblander/test -p "test_*.py" -v

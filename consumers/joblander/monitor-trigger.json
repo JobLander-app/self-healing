@@ -1,0 +1,4 @@
+{
+  "project": "meet-assistant-6d8ad",
+  "filter": "(resource.type=\"cloud_run_revision\" AND severity>=ERROR AND (resource.labels.service_name=\"joblander-app\" OR resource.labels.service_name=\"joblander-audio-engine\" OR resource.labels.service_name=\"email-service\")) OR (resource.type=\"cloud_function\" AND severity>=ERROR)"
+}

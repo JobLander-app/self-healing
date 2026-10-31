@@ -68,3 +68,13 @@ the pause. The first two independent verdicts pause exact-signature filing for
 Only new tickets filed after the prior pause count. P0 and increased severity
 bypass suppression. Removing a label withdraws that verdict from history.
 Do not use this verdict for a stale report or an already fixed real bug.
+
+## Incoming error notifications
+
+When configured by the consumer profile, the HTTP server accepts authenticated
+Pub/Sub wake-ups at `/monitor/alerts`. It persists and coalesces work, then invokes
+the shared monitor; incoming data cannot directly trigger a repair or skip Linear
+false-positive labels. See [monitor setup and delivery semantics](../monitor/README.md).
+The endpoint works without an available model; an empty/suppressed collection
+does not start a provider. The independent cron fallback also works if the
+dispatcher HTTP process is unavailable.

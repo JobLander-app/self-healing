@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 import run_monitor as runner
@@ -208,6 +209,35 @@ class MonitorRunnerTests(unittest.TestCase):
         # No fresh escalation on the next collection: the old P2 is report-only.
         self.assertEqual(self.run_once(collector=self.collector(), session_runner=recovered), 0)
         self.assertEqual(json.loads((self.config.state_dir / "linear-outbox.json").read_text()), {})
+
+    def test_webhook_and_cron_both_honor_ticket_verdict_before_starting_filing(self):
+        now = datetime.now(timezone.utc)
+        verdict = {"signature": "audio:failed", "priority": 3, "issue_identifier": "APP-42",
+                   "issue_id": "original", "created_at": now - timedelta(hours=2), "decided_at": now}
+        session = Mock(side_effect=AssertionError("suppressed work must not reach the agent"))
+        for trigger in ("webhook", "webhook", "cron"):
+            with patch.dict(os.environ, {"MONITOR_TRIGGER": trigger}), patch.object(runner, "decisions", return_value=[verdict]):
+                self.assertEqual(self.run_once(collector=self.collector(escalations=[{
+                    "action": "linear_create_if_no_dup", "severity": "P2"}]), session_runner=session), 0)
+                self.assertEqual(json.loads((self.config.state_dir / "linear-outbox.json").read_text()), {})
+        session.assert_not_called()
+
+    def test_event_success_cannot_hide_a_dead_hourly_scheduler(self):
+        result = {"status": "success", "trigger": "webhook", "triageAt": runner.timestamp(),
+                  "finishedAt": runner.timestamp(), "llmSkipped": True}
+        with patch.object(runner.subprocess, "run", return_value=Mock(returncode=0)) as command:
+            self.assertTrue(runner.publish_heartbeat(result))
+            self.assertTrue(command.call_args.args[0][4].startswith("MONITOR_EVENT success "))
+            result["trigger"] = "cron"
+            self.assertTrue(runner.publish_heartbeat(result))
+            self.assertTrue(command.call_args.args[0][4].startswith("MONITOR_HEARTBEAT success "))
+
+    def test_event_lock_collision_is_retryable_not_acknowledged_as_success(self):
+        with patch.object(runner.Config, "from_env", return_value=self.config), \
+             patch.object(runner.signal, "signal"), patch.dict(os.environ, {}, clear=False):
+            with runner.monitor_lock(self.config.lock_file):
+                self.assertEqual(runner.main(["--trigger", "webhook"]), 75)
+                self.assertEqual(runner.main([]), 0)
 
     def test_success_marker_cannot_ack_a_batch_with_recorded_routing_errors(self):
         self.assertEqual(self.run_once(

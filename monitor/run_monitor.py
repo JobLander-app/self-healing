@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone hourly monitor. No workspace launcher, manager context or git pulls."""
+"""Shared scheduled/event monitor. No workspace launcher, manager context or git pulls."""
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -372,7 +372,9 @@ def run_session(config):
 def publish_heartbeat(result):
     if result["status"] != "success":
         return False
-    message = "MONITOR_HEARTBEAT success " + json.dumps({
+    # Incoming events must never hide a broken hourly fallback.
+    tag = "MONITOR_HEARTBEAT" if result.get("trigger", "cron") == "cron" else "MONITOR_EVENT"
+    message = tag + " success " + json.dumps({
         "triageAt": result["triageAt"], "llmSkipped": result["llmSkipped"], "finishedAt": result["finishedAt"],
     })
     try:
@@ -436,7 +438,8 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
         preview.mkdir(parents=True, exist_ok=True)
         config = replace(config, state_dir=preview, legacy_dirs=(), metrics_file=preview / "metrics.prom")
     result = {"startedAt": timestamp(), "finishedAt": None, "status": "failed", "llmSkipped": True,
-              "triageAt": None, "telegramSent": [], "attempts": [], "errors": []}
+              "triageAt": None, "telegramSent": [], "attempts": [], "errors": [],
+              "trigger": os.environ.get("MONITOR_TRIGGER", "cron")}
     try:
         if collector(config) != 0:
             raise RuntimeError("triage collection failed")
@@ -487,6 +490,7 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
     result["finishedAt"] = timestamp()
     result["heartbeatPublished"] = False if dry_run else publisher(result)
     write_json(config.state_dir / "last-session.json", result)
+    write_json(config.state_dir / ("last-event-session.json" if result["trigger"] == "webhook" else "last-cron-session.json"), result)
     try:
         write_metrics(config, result)
     except (OSError, ValueError, KeyError):
@@ -500,7 +504,9 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--migrate-only", action="store_true", help="migrate local state under the shared lock, without collection or inference")
+    parser.add_argument("--trigger", choices=("cron", "webhook"), default="cron")
     args = parser.parse_args(argv)
+    os.environ["MONITOR_TRIGGER"] = args.trigger
     def interrupted(signum, frame):
         raise InterruptedError("monitor interrupted")
     signal.signal(signal.SIGTERM, interrupted)
@@ -509,7 +515,7 @@ def main(argv=None):
     with monitor_lock(config.lock_file) as acquired:
         if not acquired:
             print("Monitor already running; skipped", flush=True)
-            return 1 if args.migrate_only else 0
+            return 1 if args.migrate_only else 75 if args.trigger == "webhook" else 0
         migrate_state(config)
         if args.migrate_only:
             return 0

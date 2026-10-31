@@ -4,10 +4,22 @@ import { statusRouter } from "./routes/status";
 import { triggerRouter } from "./routes/trigger";
 import { feedRouter } from "./routes/feed";
 import { metricsRouter } from "./routes/metrics";
+import { configuredMonitorIngress, MonitorWakeups, monitorRouter, runTriggeredMonitor } from "./monitorWebhook";
 
 export function startApi(): Promise<void> {
   const app = express();
   app.use(express.json());
+
+  const ingress = configuredMonitorIngress();
+  if (ingress) {
+    const wakeups = new MonitorWakeups(ingress.stateFile, runTriggeredMonitor);
+    app.use("/monitor/alerts", monitorRouter(ingress, wakeups));
+    // Local operations endpoint, deliberately not exposed through Caddy.
+    app.get("/monitor/status", (_req, res) => res.json(wakeups.status()));
+    setInterval(() => { void wakeups.tick().catch(() => {
+      console.error("MONITOR_WEBHOOK_ERROR queue processing failed");
+    }); }, 5_000).unref();
+  }
 
   // CORS — allow Owner dashboards / any operator UI.
   app.use((_req, res, next) => {

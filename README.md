@@ -19,6 +19,10 @@ after deployment. Start here with your coding agent.
 Budget for continuous compute, disk/IP, logs, monitoring, Secret Manager, the
 watchdog function/scheduler and model access. Costs depend on region, traffic,
 retention and provider; set budgets and run limits before enabling live work.
+Optional incoming-error webhooks also use Pub/Sub and Cloud Monitoring. They
+wake the same monitor immediately; the hourly cron remains a fallback. See
+[ingress setup and delivery guarantees](monitor/README.md).
+
 The included VM permissions read logs/service configuration, write telemetry and
 read named secrets. Firestore and Sentry are opt-in. The external watchdog can
 reset this specific VM after stale heartbeats, within its reset budget.

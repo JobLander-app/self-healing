@@ -28,6 +28,7 @@ import sys
 import urllib.parse
 import urllib.request
 from false_positives import decisions, filter_groups
+from trigger_config import cloud_run_filter
 from topology import inspect_targets, load_targets, revision, topology_signature, voice_filter, worker_service_status
 
 TARGETS = load_targets()
@@ -279,11 +280,10 @@ def request_route_signature(path):
 
 
 def collect_cloud_run(groups):
-    services = TARGETS.get("cloud_run_services", [])
-    if not services:
+    log_filter = cloud_run_filter(TARGETS)
+    if not log_filter:
         return
-    scope = " OR ".join(f'resource.labels.service_name={json.dumps(name)}' for name in services)
-    entries = gcloud_logging_read(f'resource.type="cloud_run_revision" AND severity>=ERROR AND ({scope})')
+    entries = gcloud_logging_read(log_filter)
     for e in entries:
         labels = e.get("resource", {}).get("labels", {})
         service = labels.get("service_name", "unknown")
@@ -1212,8 +1212,9 @@ def main():
         }
         with open(latest_path, "w") as f:
             json.dump(report, f, indent=2)
-        with open(archive_path, "w") as f:
-            json.dump(report, f, indent=2)
+        if os.environ.get("MONITOR_TRIGGER", "cron") == "cron":
+            with open(archive_path, "w") as f:
+                json.dump(report, f, indent=2)
 
     # Build the cooldown_suppressed list for the summary: these are signatures
     # the monitor adjudicated recently and must not be re-filed this run.
