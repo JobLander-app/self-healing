@@ -21,9 +21,12 @@ failed deliveries for up to 24 hours. The local queue survives service restarts;
 duplicates and bursts do not start concurrent runs. First collection starts after
 10 seconds for log ingestion, with a second collection five minutes after success
 to catch growing bursts. Subsequent events are coalesced at five-minute intervals.
-A cron lock collision retries after 30 seconds; other failures retry after five
+An event run colliding with cron retries after 30 seconds; other failures retry after five
 minutes. An event arriving during a run remains queued. Deployment guards defer
 starts. No webhook body is forwarded to the model or used to construct a command.
+Scheduled runs wait up to 55 minutes for the lock, then fail explicitly if it is
+still held. Event cooldowns leave space for that waiting fallback to run and
+publish its own heartbeat.
 
 `last-event-session.json`, `last-cron-session.json`, and `webhook-queue.json` expose
 the two paths separately. `GET http://127.0.0.1:4100/monitor/status` shows queue

@@ -92,13 +92,19 @@ class Config:
 
 
 @contextmanager
-def monitor_lock(path):
+def monitor_lock(path, wait_seconds=0):
     with open(path, "a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    yield False
+                    return
+                time.sleep(min(1, remaining))
         try:
             yield True
         finally:
@@ -519,17 +525,24 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--migrate-only", action="store_true", help="migrate local state under the shared lock, without collection or inference")
     parser.add_argument("--trigger", choices=("cron", "webhook"), default="cron")
+    parser.add_argument("--lock-wait-seconds", type=int, default=3300,
+                        help="scheduled runs wait up to this long for an event run (0..3300 seconds)")
     args = parser.parse_args(argv)
+    if not 0 <= args.lock_wait_seconds <= 3300:
+        parser.error("--lock-wait-seconds must be between 0 and 3300")
     os.environ["MONITOR_TRIGGER"] = args.trigger
     def interrupted(signum, frame):
         raise InterruptedError("monitor interrupted")
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     config = Config.from_env()
-    with monitor_lock(config.lock_file) as acquired:
+    # Event runs back off for five minutes after success, giving a waiting cron
+    # its own collection/heartbeat. Never acknowledge a skipped scheduled run.
+    wait = args.lock_wait_seconds if args.trigger == "cron" and not args.migrate_only else 0
+    with monitor_lock(config.lock_file, wait_seconds=wait) as acquired:
         if not acquired:
             print("Monitor already running; skipped", flush=True)
-            return 1 if args.migrate_only else 75 if args.trigger == "webhook" else 0
+            return 75 if args.trigger == "webhook" and not args.migrate_only else 1
         migrate_state(config)
         if args.migrate_only:
             return 0

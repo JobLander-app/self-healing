@@ -258,7 +258,18 @@ class MonitorRunnerTests(unittest.TestCase):
              patch.object(runner.signal, "signal"), patch.dict(os.environ, {}, clear=False):
             with runner.monitor_lock(self.config.lock_file):
                 self.assertEqual(runner.main(["--trigger", "webhook"]), 75)
-                self.assertEqual(runner.main([]), 0)
+                self.assertEqual(runner.main(["--lock-wait-seconds", "0"]), 1)
+
+    def test_scheduled_lock_wait_collects_after_event_releases_and_is_bounded(self):
+        with patch.object(runner.fcntl, "flock", side_effect=[BlockingIOError(), None, None]), \
+             patch.object(runner.time, "sleep") as sleep:
+            with runner.monitor_lock(self.config.lock_file, wait_seconds=10) as acquired:
+                self.assertTrue(acquired)
+            sleep.assert_called_once()
+        with patch.object(runner.fcntl, "flock", side_effect=BlockingIOError()), \
+             patch.object(runner.time, "monotonic", side_effect=[0, 11]):
+            with runner.monitor_lock(self.config.lock_file, wait_seconds=10) as acquired:
+                self.assertFalse(acquired)
 
     def test_success_marker_cannot_ack_a_batch_with_recorded_routing_errors(self):
         self.assertEqual(self.run_once(
