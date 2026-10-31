@@ -37,6 +37,22 @@ Use an isolated checkout or worktree; never edit the running service checkout.
 Read the target repository's instructions, build commands and release workflow.
 Keep one ticket per run and the smallest change that addresses the evidence.
 
+## Validation resource budget
+
+Before validation, inspect the process/container memory limits, including the
+service's cgroup limits where available. Free memory on the host does not mean
+the agent can use it. Run dependency installation, typechecking, builds and test
+suites sequentially: at most one memory-heavy validation command at a time.
+Use the repository's supported worker limit when needed, without skipping tests.
+Independent read-only inspection may still run in parallel.
+
+Give each validation a deadline within the remaining investigation budget. If it
+stalls or hits resource limits, stop and reap your validation children before
+retrying sequentially. Record interrupted checks as incomplete, never passed.
+Do not raise service limits, stop the dispatcher or bypass required checks to
+make validation finish. If one sequential check still cannot fit, leave the PR
+backlogged with the failed command and resource evidence for the operator.
+
 ## Step 3.5 — Freshness gate
 
 A ticket records a hypothesis at filing time. Reproduce its exact signature in

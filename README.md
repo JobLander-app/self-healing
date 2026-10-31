@@ -19,6 +19,11 @@ after deployment. Start here with your coding agent.
 Budget for continuous compute, disk/IP, logs, monitoring, Secret Manager, the
 watchdog function/scheduler and model access. Costs depend on region, traffic,
 retention and provider; set budgets and run limits before enabling live work.
+Builds and tests share the dispatcher's service memory budget: the supplied
+unit starts reclaiming memory at 2500 MiB and caps usage at 3 GiB, even when the
+VM has free memory. The agent runs heavy validation commands sequentially.
+Check that your repository's individual build/test commands fit these limits;
+larger workloads need reviewed resource configuration before live operation.
 Optional incoming-error webhooks also use Pub/Sub and Cloud Monitoring. They
 wake the same monitor immediately; the hourly cron remains a fallback. See
 [ingress setup and delivery guarantees](monitor/README.md).
