@@ -1,4 +1,10 @@
-# Public TLS endpoint; Grafana provides authentication.
+# Only the authenticated wake-up endpoint is exposed from the dispatcher.
+# Grafana provides its own authentication for the console.
 __CONSOLE_DOMAIN__ {
-	reverse_proxy localhost:3000
+	handle /monitor/alerts {
+		reverse_proxy 127.0.0.1:4100
+	}
+	handle {
+		reverse_proxy localhost:3000
+	}
 }

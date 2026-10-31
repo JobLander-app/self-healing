@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone hourly monitor. No workspace launcher, manager context or git pulls."""
+"""Shared scheduled/event monitor. No workspace launcher, manager context or git pulls."""
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -92,13 +92,19 @@ class Config:
 
 
 @contextmanager
-def monitor_lock(path):
+def monitor_lock(path, wait_seconds=0):
     with open(path, "a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    yield False
+                    return
+                time.sleep(min(1, remaining))
         try:
             yield True
         finally:
@@ -226,12 +232,22 @@ def send_p0(alert):
         raise RuntimeError("Telegram P0 delivery failed") from None
 
 
-def deliver_pending(config, alerts, pager):
+def deliver_pending(config, alerts, pager, identities=None):
     """At-least-once delivery; commit the outbox before contacting Telegram."""
     path = config.state_dir / "p0-outbox.json"
     pending = json.loads(path.read_text()) if path.exists() else {}
+    history_path = config.state_dir / "page-deliveries.json"
+    history = json.loads(history_path.read_text()) if history_path.exists() else {}
+    now = time.time()
+    history = {key: at for key, at in history.items() if now - at < 3600}
     for alert in alerts:
-        pending.setdefault(hashlib.sha256(alert.encode()).hexdigest(), alert)
+        identity = (identities or {}).get(alert, alert)
+        key = hashlib.sha256(identity.encode()).hexdigest()
+        if key not in history:
+            pending.setdefault(key, alert)
+    # Delivery receipts also cover a crash after sending but before removing
+    # the outbox entry. They do not suppress ticket creation or investigations.
+    pending = {key: alert for key, alert in pending.items() if key not in history}
     pending = retire_pending(config, pending, "page_prefixes")
     write_json(path, pending)
     sent, failures = [], []
@@ -239,6 +255,8 @@ def deliver_pending(config, alerts, pager):
         try:
             pager(alert)
             sent.append(alert)
+            history[key] = time.time()
+            write_json(history_path, history)
             del pending[key]
             write_json(path, pending)
         except Exception:
@@ -372,7 +390,9 @@ def run_session(config):
 def publish_heartbeat(result):
     if result["status"] != "success":
         return False
-    message = "MONITOR_HEARTBEAT success " + json.dumps({
+    # Incoming events must never hide a broken hourly fallback.
+    tag = "MONITOR_HEARTBEAT" if result.get("trigger", "cron") == "cron" else "MONITOR_EVENT"
+    message = tag + " success " + json.dumps({
         "triageAt": result["triageAt"], "llmSkipped": result["llmSkipped"], "finishedAt": result["finishedAt"],
     })
     try:
@@ -436,7 +456,8 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
         preview.mkdir(parents=True, exist_ok=True)
         config = replace(config, state_dir=preview, legacy_dirs=(), metrics_file=preview / "metrics.prom")
     result = {"startedAt": timestamp(), "finishedAt": None, "status": "failed", "llmSkipped": True,
-              "triageAt": None, "telegramSent": [], "attempts": [], "errors": []}
+              "triageAt": None, "telegramSent": [], "attempts": [], "errors": [],
+              "trigger": os.environ.get("MONITOR_TRIGGER", "cron")}
     try:
         if collector(config) != 0:
             raise RuntimeError("triage collection failed")
@@ -446,7 +467,9 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
             result["status"] = "success"
             result["dryRun"] = True
         else:
-            sent, failures = deliver_pending(config, summary["p0_alerts"], pager)
+            identities = {item["alert_text"]: item["signature"] + ":" + str(item.get("severity"))
+                          for item in summary["escalations"] if item.get("alert_text")}
+            sent, failures = deliver_pending(config, summary["p0_alerts"], pager, identities)
             result["telegramSent"].extend(sent)
             result["errors"].extend(failures)
             batch = prepare_escalations(config, summary)
@@ -487,6 +510,7 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
     result["finishedAt"] = timestamp()
     result["heartbeatPublished"] = False if dry_run else publisher(result)
     write_json(config.state_dir / "last-session.json", result)
+    write_json(config.state_dir / ("last-event-session.json" if result["trigger"] == "webhook" else "last-cron-session.json"), result)
     try:
         write_metrics(config, result)
     except (OSError, ValueError, KeyError):
@@ -500,16 +524,25 @@ def run_once(config, collector=collect, session_runner=run_session, pager=send_p
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--migrate-only", action="store_true", help="migrate local state under the shared lock, without collection or inference")
+    parser.add_argument("--trigger", choices=("cron", "webhook"), default="cron")
+    parser.add_argument("--lock-wait-seconds", type=int, default=3300,
+                        help="scheduled runs wait up to this long for an event run (0..3300 seconds)")
     args = parser.parse_args(argv)
+    if not 0 <= args.lock_wait_seconds <= 3300:
+        parser.error("--lock-wait-seconds must be between 0 and 3300")
+    os.environ["MONITOR_TRIGGER"] = args.trigger
     def interrupted(signum, frame):
         raise InterruptedError("monitor interrupted")
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     config = Config.from_env()
-    with monitor_lock(config.lock_file) as acquired:
+    # Event runs back off for five minutes after success, giving a waiting cron
+    # its own collection/heartbeat. Never acknowledge a skipped scheduled run.
+    wait = args.lock_wait_seconds if args.trigger == "cron" and not args.migrate_only else 0
+    with monitor_lock(config.lock_file, wait_seconds=wait) as acquired:
         if not acquired:
             print("Monitor already running; skipped", flush=True)
-            return 1 if args.migrate_only else 0
+            return 75 if args.trigger == "webhook" and not args.migrate_only else 1
         migrate_state(config)
         if args.migrate_only:
             return 0

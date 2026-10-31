@@ -1,6 +1,63 @@
 # Monitor
 
-The hourly runner holds one process lock, collects deterministic evidence, pages
+Production errors can wake the monitor through an authenticated webhook. The
+hourly cron remains an independent fallback; both invoke `run-monitor-session.sh`,
+hold the same process lock, read the same sources and apply the same severity,
+false-positive and ticket-deduplication policy. A notification is only a hint to
+collect evidence, never an instruction to the agent. Confirmed urgent P0 pages
+and the loop's own dead-man alerts remain enabled. Successful urgent pages have
+one-hour delivery receipts per signature/severity, so frequent event runs do not
+multiply reminders; a new signature or higher severity pages immediately. Failed
+deliveries stay in the outbox. These receipts never suppress investigations.
+
+The GCP path is Logging → Monitoring → Pub/Sub → HTTPS `/monitor/alerts` → the
+monitor. Pub/Sub signs an OIDC token; the receiver verifies its signature, expiry,
+exact audience and verified service-account email, and checks the subscription
+and source project. No shared webhook password is stored in Terraform. Only this
+route is exposed through Caddy; the dispatcher API stays on loopback.
+
+The receiver persists a coalesced wake-up before returning 204. Pub/Sub retries
+failed deliveries for up to 24 hours. The local queue survives service restarts;
+duplicates and bursts do not start concurrent runs. First collection starts after
+10 seconds for log ingestion, with a second collection five minutes after success
+to catch growing bursts. Subsequent events are coalesced at five-minute intervals.
+An event run colliding with cron retries after 30 seconds; other failures retry after five
+minutes. An event arriving during a run remains queued. Deployment guards defer
+starts. No webhook body is forwarded to the model or used to construct a command.
+Scheduled runs wait up to 55 minutes for the lock, then fail explicitly if it is
+still held. Event cooldowns leave space for that waiting fallback to run and
+publish its own heartbeat.
+
+`last-event-session.json`, `last-cron-session.json`, and `webhook-queue.json` expose
+the two paths separately. `GET http://127.0.0.1:4100/monitor/status` shows queue
+health without message contents. Event runs publish `MONITOR_EVENT success`;
+only scheduled successes publish `MONITOR_HEARTBEAT success`, so busy incoming
+traffic cannot hide a stopped cron. The existing two-hour collection lookback
+covers a missed hourly tick; outages longer than that require manual investigation
+of the uncovered interval. Sentry and consumer-only probes remain hourly unless
+another source publishes a wake-up.
+
+Configure ingress for another consumer:
+
+1. Generate the trigger scope from the collector's targets:
+   `python3 monitor/trigger_config.py consumers/<name>/targets.json consumers/<name>/monitor-trigger.json`.
+   Thresholds and suppressions stay in the monitor, not in GCP alert rules.
+2. Instantiate `infra/terraform/modules/self-healing-monitor-ingress` with the
+   project ID/number, HTTPS endpoint and generated `trigger_config`. Enable the
+   Pub/Sub and Monitoring APIs first. The applying identity needs permission to
+   attach the dedicated push service account to its subscription.
+3. Set `MONITOR_WEBHOOK_AUDIENCE`, `MONITOR_WEBHOOK_EMAIL` and
+   `MONITOR_WEBHOOK_SUBSCRIPTION` in the consumer profile to the exact endpoint,
+   module `push_identity` and `subscription` outputs. Deploy the reviewed release.
+4. Prove rejected unauthenticated requests and a successful authenticated wake-up
+   before removing covered services from any existing raw error paging policy.
+   Preserve coverage for services outside this monitor's targets.
+
+An integration can publish `{"kind":"monitor-wakeup","project":"<project>"}`
+to the module's topic using an identity with `pubsub.publisher` on that topic.
+This starts a real collection; it does not manufacture an error or bypass rules.
+
+The runner holds one process lock, collects deterministic evidence, pages
 urgent incidents, and gives only a prepared escalation batch to the shared
 Claude/Codex/OpenCode provider runner. The monitor agent can deduplicate/file
 issues and record delivery receipts; it cannot claim repair work or change code.

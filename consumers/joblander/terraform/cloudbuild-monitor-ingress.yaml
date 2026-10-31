@@ -1,0 +1,41 @@
+# Run from the merged GitHub SHA. Provision with _CUTOVER=false, prove delivery,
+# then run with _CUTOVER=true. No VM mutation or service restart in this build.
+timeout: 1200s
+serviceAccount: projects/meet-assistant-6d8ad/serviceAccounts/255174193709-compute@developer.gserviceaccount.com
+substitutions:
+  _CUTOVER: 'false'
+options:
+  logging: CLOUD_LOGGING_ONLY
+steps:
+  - id: plan
+    name: hashicorp/terraform:1.5.7
+    dir: consumers/joblander/terraform
+    entrypoint: sh
+    args:
+      - -ec
+      - |
+        terraform init -input=false
+        terraform plan -input=false -lock-timeout=60s -out=/workspace/ingress.tfplan \
+          -var=monitor_ingress_cutover=${_CUTOVER} \
+          -target=module.monitor_ingress -target=google_monitoring_alert_policy.legacy_5xx
+        terraform show -json /workspace/ingress.tfplan > /workspace/ingress-plan.json
+  - id: validate-plan
+    name: python:3.11-slim
+    entrypoint: python3
+    args: [consumers/joblander/terraform/validate-monitor-ingress.py, /workspace/ingress-plan.json]
+  - id: require-delivery-proof-before-cutover
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -ec
+      - |
+        if [ '${_CUTOVER}' = true ]; then
+          gcloud logging read 'logName="projects/meet-assistant-6d8ad/logs/self-healing-monitor" AND textPayload:"MONITOR_EVENT success"' \
+            --project=meet-assistant-6d8ad --freshness=30m --limit=1 --format=json > /workspace/proof.json
+          python3 -c 'import json; assert json.load(open("/workspace/proof.json")), "No recent successful webhook monitor run: refusing cutover"'
+        fi
+  - id: apply
+    name: hashicorp/terraform:1.5.7
+    dir: consumers/joblander/terraform
+    entrypoint: terraform
+    args: [apply, -input=false, /workspace/ingress.tfplan]

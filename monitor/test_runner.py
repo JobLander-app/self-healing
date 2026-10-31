@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 import run_monitor as runner
@@ -208,6 +209,67 @@ class MonitorRunnerTests(unittest.TestCase):
         # No fresh escalation on the next collection: the old P2 is report-only.
         self.assertEqual(self.run_once(collector=self.collector(), session_runner=recovered), 0)
         self.assertEqual(json.loads((self.config.state_dir / "linear-outbox.json").read_text()), {})
+
+    def test_webhook_and_cron_both_honor_ticket_verdict_before_starting_filing(self):
+        now = datetime.now(timezone.utc)
+        verdict = {"signature": "audio:failed", "priority": 3, "issue_identifier": "APP-42",
+                   "issue_id": "original", "created_at": now - timedelta(hours=2), "decided_at": now}
+        session = Mock(side_effect=AssertionError("suppressed work must not reach the agent"))
+        for trigger in ("webhook", "webhook", "cron"):
+            with patch.dict(os.environ, {"MONITOR_TRIGGER": trigger}), patch.object(runner, "decisions", return_value=[verdict]):
+                self.assertEqual(self.run_once(collector=self.collector(escalations=[{
+                    "action": "linear_create_if_no_dup", "severity": "P2"}]), session_runner=session), 0)
+                self.assertEqual(json.loads((self.config.state_dir / "linear-outbox.json").read_text()), {})
+        session.assert_not_called()
+
+    def test_event_success_cannot_hide_a_dead_hourly_scheduler(self):
+        result = {"status": "success", "trigger": "webhook", "triageAt": runner.timestamp(),
+                  "finishedAt": runner.timestamp(), "llmSkipped": True}
+        with patch.object(runner.subprocess, "run", return_value=Mock(returncode=0)) as command:
+            self.assertTrue(runner.publish_heartbeat(result))
+            self.assertTrue(command.call_args.args[0][4].startswith("MONITOR_EVENT success "))
+            result["trigger"] = "cron"
+            self.assertTrue(runner.publish_heartbeat(result))
+            self.assertTrue(command.call_args.args[0][4].startswith("MONITOR_HEARTBEAT success "))
+
+    def test_frequent_events_do_not_multiply_pages_but_new_incidents_page_immediately(self):
+        pager = Mock()
+        with patch.object(runner.time, "time", return_value=1000):
+            runner.deliver_pending(self.config, ["first count"], pager, {"first count": "api:failure:P0"})
+        with patch.object(runner.time, "time", return_value=1300):
+            runner.deliver_pending(self.config, ["larger count", "different failure"], pager,
+                                   {"larger count": "api:failure:P0", "different failure": "api:other:P0"})
+        self.assertEqual(pager.call_count, 2)
+        with patch.object(runner.time, "time", return_value=4600):
+            runner.deliver_pending(self.config, ["larger count"], pager, {"larger count": "api:failure:P0"})
+        self.assertEqual(pager.call_count, 3)
+
+    def test_failed_page_delivery_has_no_receipt_and_retries_on_next_trigger(self):
+        sent, failures = runner.deliver_pending(self.config, ["urgent"], Mock(side_effect=RuntimeError("offline")),
+                                                {"urgent": "api:failure:P0"})
+        self.assertEqual(sent, [])
+        self.assertTrue(failures)
+        pager = Mock()
+        runner.deliver_pending(self.config, [], pager)
+        pager.assert_called_once_with("urgent")
+
+    def test_event_lock_collision_is_retryable_not_acknowledged_as_success(self):
+        with patch.object(runner.Config, "from_env", return_value=self.config), \
+             patch.object(runner.signal, "signal"), patch.dict(os.environ, {}, clear=False):
+            with runner.monitor_lock(self.config.lock_file):
+                self.assertEqual(runner.main(["--trigger", "webhook"]), 75)
+                self.assertEqual(runner.main(["--lock-wait-seconds", "0"]), 1)
+
+    def test_scheduled_lock_wait_collects_after_event_releases_and_is_bounded(self):
+        with patch.object(runner.fcntl, "flock", side_effect=[BlockingIOError(), None, None]), \
+             patch.object(runner.time, "sleep") as sleep:
+            with runner.monitor_lock(self.config.lock_file, wait_seconds=10) as acquired:
+                self.assertTrue(acquired)
+            sleep.assert_called_once()
+        with patch.object(runner.fcntl, "flock", side_effect=BlockingIOError()), \
+             patch.object(runner.time, "monotonic", side_effect=[0, 11]):
+            with runner.monitor_lock(self.config.lock_file, wait_seconds=10) as acquired:
+                self.assertFalse(acquired)
 
     def test_success_marker_cannot_ack_a_batch_with_recorded_routing_errors(self):
         self.assertEqual(self.run_once(

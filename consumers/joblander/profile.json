@@ -35,6 +35,9 @@
     "MONITOR_LEGACY_DIRS": "/home/joblander/workspace/teams/logs/monitoring:/home/joblander/joblander/workspace/teams/logs/monitoring",
     "GIT_AUTHOR_NAME": "JobLander Self-Healing Agent",
     "GIT_AUTHOR_EMAIL": "agent@joblander.app",
-    "CLOUD_FUNCTION_SERVICE": "email-service"
+    "CLOUD_FUNCTION_SERVICE": "email-service",
+    "MONITOR_WEBHOOK_AUDIENCE": "https://self-healing.joblander.app/monitor/alerts",
+    "MONITOR_WEBHOOK_EMAIL": "self-healing-monitor-push@meet-assistant-6d8ad.iam.gserviceaccount.com",
+    "MONITOR_WEBHOOK_SUBSCRIPTION": "projects/meet-assistant-6d8ad/subscriptions/self-healing-monitor-errors"
   }
 }
