@@ -27,3 +27,21 @@ resource "google_pubsub_topic_iam_member" "monitor_topic_policy" {
   role    = google_project_iam_custom_role.monitor_topic_policy.name
   member  = "serviceAccount:255174193709-compute@developer.gserviceaccount.com"
 }
+
+# Sink creation is authorized on the parent project. Limit the build to sink
+# CRUD; it cannot modify log buckets, exclusions, retention or project IAM.
+resource "google_project_iam_custom_role" "monitor_sink" {
+  project = local.project
+  role_id = "selfHealingMonitorSink"
+  title   = "Manage self-healing log export"
+  permissions = [
+    "logging.sinks.create", "logging.sinks.get",
+    "logging.sinks.update", "logging.sinks.delete",
+  ]
+}
+
+resource "google_project_iam_member" "monitor_sink" {
+  project = local.project
+  role    = google_project_iam_custom_role.monitor_sink.name
+  member  = "serviceAccount:255174193709-compute@developer.gserviceaccount.com"
+}
