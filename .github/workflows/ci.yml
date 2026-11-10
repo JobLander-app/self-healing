@@ -147,9 +147,14 @@ jobs:
           command -v systemd-analyze >/dev/null 2>&1 \
             || { echo "::error::systemd-analyze is not installed — this job would pass by doing nothing"; exit 1; }
           probe="$(mktemp -d)/probe.service"
-          printf '[Unit]\nDescription=probe\n[Service]\nExecStart=/bin/true\nStartLimitIntervalSec=0\n' >"$probe"
-          if ! systemd-analyze verify "$probe" 2>&1 | grep -qi 'Unknown key name'; then
+          # Use a completely fabricated key that no systemd version will ever
+          # accept — avoids the StartLimitIntervalSec false negative introduced
+          # when that directive was backported to [Service] in systemd ≥ 230.
+          printf '[Unit]\nDescription=probe\n[Service]\nExecStart=/bin/true\nXSelfHealProbeInvalidKey=1\n' >"$probe"
+          probe_out="$(systemd-analyze verify "$probe" 2>&1)"
+          if ! echo "$probe_out" | grep -qiE 'Unknown key|Unknown lvalue|Unknown section'; then
             echo "::error::self-test failed: systemd-analyze no longer reports a misplaced directive, so this job proves nothing"
+            echo "::error::probe output: $probe_out"
             exit 1
           fi
 
