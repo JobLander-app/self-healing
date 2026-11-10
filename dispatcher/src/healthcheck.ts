@@ -260,6 +260,12 @@ async function probeFirebase(): Promise<string> {
 
 async function probeSentry(): Promise<string> {
   const SENTRY_429_RETRY_MS = 5_000;
+  // Sentry's API occasionally responds slowly at the network edge (observed:
+  // one midnight healthcheck at 00:00 UTC hit the 20 s MCP fetch timeout while
+  // the same call succeeds in <3 s normally). One retry with a brief pause
+  // avoids filing a repair ticket on a transient hiccup. If the second attempt
+  // also times out, that is a real outage worth investigating.
+  const SENTRY_TIMEOUT_RETRY_MS = 3_000;
   await resolveSentryToken();
   const probeOnce = () => probeMcp({
     entry: SENTRY_MCP_ENTRY,
@@ -274,6 +280,12 @@ async function probeSentry(): Promise<string> {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("429") && msg.includes("Too Many Requests")) {
       await new Promise<void>((resolve) => setTimeout(resolve, SENTRY_429_RETRY_MS));
+      const { detail } = await probeOnce(); // throws → reported as down if still failing
+      return detail;
+    }
+    // Retry once on a transient Sentry API or probe-budget timeout.
+    if (msg.includes("timed out") || msg.includes("probe budget exhausted")) {
+      await new Promise<void>((resolve) => setTimeout(resolve, SENTRY_TIMEOUT_RETRY_MS));
       const { detail } = await probeOnce(); // throws → reported as down if still failing
       return detail;
     }
